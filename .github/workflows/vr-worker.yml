@@ -57,6 +57,11 @@ jobs:
         run: python tools/test_mos_xtc.py
       - name: Native hand texture bake tests (GH #61)
         run: python tools/test_xtc_bake.py
+      - name: XRSIM harness tests (GH #68)
+        run: |
+          python -m pip install --quiet --disable-pip-version-check numpy pillow
+          python tools/test_xrsim.py
+          python tools/xrsim.py --selftest
       - name: Hook-init regression test (GH #42)
         run: python tools/verify_hook_init.py
       - name: Scenario manifest validation (GH #48)

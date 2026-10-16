@@ -34,6 +34,9 @@ hook_debug.txt
 all_exports.txt
 tests/artifacts/
 
+# XRSIM eye captures (GH #68): large BMP dumps; the diffable report.json is kept.
+tests/xrsim/artifacts/
+
 __pycache__/
 
 tools/worker-state.json

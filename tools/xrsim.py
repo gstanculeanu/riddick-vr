@@ -14,7 +14,13 @@ Sim runs set RIDDICKVR_SIM=1 so the hook never injects desktop input (#68).
 
 Usage:
   python tools/xrsim.py --scenario tools/scenarios/melee.json
+  python tools/xrsim.py --evaluate-only       # re-analyse captures on disk,
+                                              # no game/host launch (CI-safe)
   python tools/xrsim.py --selftest            # logic check, no game (CI)
+
+The ``--evaluate-only`` path is what makes the harness usable *without a
+headset*: a previous run's ``test_frame_*.bmp`` / ``right_*.bmp`` pairs are
+re-checked and written to ``tests/xrsim/report.json`` for diffing.
 """
 
 from __future__ import annotations
@@ -31,12 +37,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 GAME_DIR = Path(r"F:\The Chronicles of Riddick - Assault on Dark Athena\System\Win32_x86")
 GAME_EXE = GAME_DIR / "DarkAthena.exe"
-HOST_EXE = Path(r"C:\Users\GigelCastel\riddick-vr\dist\riddickvr-host.exe")
+HOST_EXE = REPO_ROOT / "dist" / "riddickvr-host.exe"
 LOG_FILE = GAME_DIR / "riddick_vr.log"
-ARTIFACTS = Path(r"C:\Users\GigelCastel\riddick-vr\tests\xrsim\artifacts")
-REPORT = Path(r"C:\Users\GigelCastel\riddick-vr\tests\xrsim\report.json")
+DEFAULT_ARTIFACTS = REPO_ROOT / "tests" / "xrsim" / "artifacts"
+DEFAULT_REPORT = REPO_ROOT / "tests" / "xrsim" / "report.json"
 
 FRAME_BUDGET_RE = re.compile(
     r"FrameBudget samples=(\d+) mean_ms=([\d.]+) max_ms=([\d.]+) "
@@ -44,18 +52,28 @@ FRAME_BUDGET_RE = re.compile(
 
 
 # ---------------------------------------------------------------- stereo diff
-def stereo_metrics(left_path: Path, right_path: Path, search=48):
+def stereo_metrics(left_path: Path, right_path: Path, search=48, downscale=1):
     """Best horizontal/vertical alignment of the two eye images.
 
     Returns dict with: non_black_l/r, best_dx, best_dy, residual (MSE at best),
     identical (bool). The mod is a monoscopic blit with an IPD shift, so a
     correct frame has a small horizontal dx and ~zero dy.
+
+    ``downscale`` (integer >= 1) block-subsamples both images before the search
+    so multi-megapixel eye buffers can be analysed quickly; dx/dy are then in
+    downscaled pixels (multiply by ``downscale`` for the full-res shift).
     """
     L = np.array(Image.open(left_path).convert("L"), dtype=np.float32)
     R = np.array(Image.open(right_path).convert("L"), dtype=np.float32)
-    out = {"shape_l": list(L.shape), "shape_r": list(R.shape)}
-    out["non_black_l"] = float(L.mean()) > 1.0
-    out["non_black_r"] = float(R.mean()) > 1.0
+    ds = max(1, int(downscale))
+    if ds > 1:
+        L = L[::ds, ::ds]
+        R = R[::ds, ::ds]
+    out = {"shape_l": list(L.shape), "shape_r": list(R.shape), "downscale": ds}
+    out["mean_l"] = float(L.mean())
+    out["mean_r"] = float(R.mean())
+    out["non_black_l"] = out["mean_l"] > 1.0
+    out["non_black_r"] = out["mean_r"] > 1.0
     if L.shape != R.shape:
         out.update(best_dx=None, best_dy=None, residual=None, identical=False,
                    note="shape mismatch")
@@ -91,8 +109,17 @@ def assert_stereo(metrics, require_disparity=True):
         checks.append({"check": name, "ok": bool(cond), "detail": detail})
         ok = ok and bool(cond)
 
-    chk("both_eyes_non_black", metrics.get("non_black_l") and metrics.get("non_black_r"),
-        f"L={metrics.get('non_black_l')} R={metrics.get('non_black_r')}")
+    non_black = metrics.get("non_black_l") and metrics.get("non_black_r")
+    chk("both_eyes_non_black", non_black,
+        f"meanL={metrics.get('mean_l'):.4g} meanR={metrics.get('mean_r'):.4g}"
+        if metrics.get("mean_l") is not None else "")
+    if not non_black:
+        # GH #68: all-zero eye buffers mean the GL<->D3D11 interop copy never
+        # produced content (distinct from a legitimately black scene). Keep the
+        # remaining geometry checks running so the report still shows shapes.
+        chk("interop_produced_content", False,
+            "eye buffers are empty: check the hook 'Hardware Interop' lines and "
+            "StereoRenderer::LockSharedTextures/UnlockSharedTextures")
     if metrics.get("shape_l") != metrics.get("shape_r"):
         chk("same_eye_resolution", False, "shape mismatch")
         return ok, checks
@@ -102,8 +129,32 @@ def assert_stereo(metrics, require_disparity=True):
     if require_disparity:
         chk("horizontal_disparity_present", dx is not None and abs(dx) >= 1,
             f"dx={dx}")
-    chk("not_mono_duplicate", not metrics.get("identical"), "eyes identical")
+    chk("not_mono_duplicate", not metrics.get("identical"),
+        f"identical={metrics.get('identical')}")
     return ok, checks
+
+
+# --------------------------------------------------------------- capture health
+def frame_signature(path: Path):
+    """Cheap 16x16 luma signature used to tell live frames from a static scene."""
+    return Image.open(path).convert("L").resize((16, 16)).tobytes()
+
+
+def capture_health_checks(lefts):
+    """Flag captures where nothing changed: a static/menu screen cannot validate
+    gameplay stereo, so an all-identical dump series is not a valid run."""
+    checks = []
+    if len(lefts) < 2:
+        checks.append({"check": "scene_advanced", "ok": True, "skip": True,
+                       "detail": f"only {len(lefts)} frame(s); cannot judge"})
+        return checks
+    sigs = [frame_signature(p) for p in lefts]
+    distinct = len(set(sigs))
+    detail = f"{distinct}/{len(lefts)} distinct frames"
+    if distinct < 2:
+        detail += " (frozen capture: cannot validate stereo on a static scene)"
+    checks.append({"check": "scene_advanced", "ok": distinct >= 2, "detail": detail})
+    return checks
 
 
 # ------------------------------------------------------------------ comfort
@@ -140,9 +191,9 @@ def parse_budget(host_log: str, budget_ms: float):
 
 
 # ------------------------------------------------------------------ orchestration
-def run_sim(args):
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    for f in list(ARTIFACTS.glob("*.bmp")) + list(ARTIFACTS.glob("*.png")):
+def run_sim(args, artifacts: Path):
+    artifacts.mkdir(parents=True, exist_ok=True)
+    for f in list(artifacts.glob("*.bmp")) + list(artifacts.glob("*.png")):
         try:
             f.unlink()
         except OSError:
@@ -150,7 +201,7 @@ def run_sim(args):
     log_mark = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
 
     host_cmd = [str(HOST_EXE), "--mock", "--auto-exit-with-game",
-                "--dump-dir", str(ARTIFACTS), "--dump-interval", str(args.interval),
+                "--dump-dir", str(artifacts), "--dump-interval", str(args.interval),
                 "--max-frames", str(args.frames)]
     if args.scenario:
         host_cmd += ["--scenario-file", str(Path(args.scenario).resolve())]
@@ -187,52 +238,76 @@ def run_sim(args):
     return "\n".join(host_log), log_mark
 
 
-def evaluate(args, host_log, log_mark):
+def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
+    """Evaluate one run's evidence.
+
+    ``host_log`` is the mock host's stdout (may be empty for --evaluate-only);
+    ``fresh_log`` is the text of the hook log to scan for interaction markers.
+    A check with ``"skip": True`` is reported but does not affect the verdict.
+    """
     checks = []
-    # 1. frame budget
-    ok_b, rec = parse_budget(host_log, args.max_frame_ms)
-    checks.append({**rec, "group": "frame_budget"})
+    # 1. frame budget (requires a live host log; skipped when re-analysing)
+    if host_log.strip():
+        ok_b, rec = parse_budget(host_log, args.max_frame_ms)
+        checks.append({**rec, "group": "frame_budget"})
+    else:
+        checks.append({"group": "frame_budget", "check": "frame_budget", "ok": True,
+                       "skip": True, "detail": "no host log (evaluate-only)"})
     # 2. stereo
-    lefts = sorted(ARTIFACTS.glob("test_frame_*.bmp"))
-    rights_by_n = {int(p.stem.split("_")[1]): p for p in ARTIFACTS.glob("right_*.bmp")}
-    stereo_ok = True
+    lefts = sorted(artifacts.glob("test_frame_*.bmp"))
+    rights_by_n = {int(p.stem.split("_")[1]): p for p in artifacts.glob("right_*.bmp")}
     if not lefts:
         checks.append({"group": "stereo", "check": "frames_captured", "ok": False,
-                       "detail": "no test_frame_*.bmp"})
-        stereo_ok = False
+                       "detail": f"no test_frame_*.bmp in {artifacts}"})
     else:
+        for c in capture_health_checks(lefts):
+            checks.append({**c, "group": "capture"})
         for lp in lefts:
             n = int(lp.stem.split("_")[2])
             rp = rights_by_n.get(n)
             if rp is None:
                 checks.append({"group": "stereo", "check": f"right_frame_{n}", "ok": False,
                                "detail": "missing right_*.bmp"})
-                stereo_ok = False
                 continue
-            m = stereo_metrics(lp, rp)
-            ok, sub = assert_stereo(m, require_disparity=args.require_disparity)
+            m = stereo_metrics(lp, rp, downscale=args.downscale)
+            _, sub = assert_stereo(m, require_disparity=args.require_disparity)
             for c in sub:
                 checks.append({**c, "group": "stereo", "frame": n,
                                "detail": f"{c['detail']} {m.get('best_dx')}/{m.get('best_dy')}"})
-            stereo_ok = stereo_ok and ok
     # 3. interaction markers
     req = []
     if args.scenario and Path(args.scenario).is_file():
         req = json.loads(Path(args.scenario).read_text(encoding="utf-8")).get("markers", [])
-    fresh = ""
-    if LOG_FILE.exists():
-        fresh = LOG_FILE.read_bytes()[log_mark:].decode(errors="ignore")
     for marker in req:
-        hit = marker in fresh
+        hit = marker in fresh_log
         checks.append({"group": "interaction", "check": f"marker:{marker}", "ok": hit,
-                       "detail": "fresh log"})
+                       "detail": "hook log"})
     # 4. comfort
     if lefts:
-        ok_c, sub = comfort_checks(lefts[-1])
+        _, sub = comfort_checks(lefts[-1])
         for c in sub:
-            checks.append({**c, "group": "comfort"})
-    passed = all(c["ok"] for c in checks) if checks else False
+            checks.append({**c, "group": "comfort",
+                           "detail": f"{c.get('detail','')} (frame {lefts[-1].name})"})
+    passed = all(c["ok"] for c in checks if not c.get("skip")) if checks else False
     return passed, checks
+
+
+def write_report(report: Path, passed: bool, checks, extra=None):
+    report.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"passed": passed, "checks": checks}
+    if extra:
+        payload.update(extra)
+    report.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return report
+
+
+def print_summary(checks, report: Path, passed: bool):
+    print("\n" + "=" * 60)
+    for c in checks:
+        tag = "SKIP" if c.get("skip") else ("PASS" if c["ok"] else "FAIL")
+        print(f"  [{tag}] {c.get('group','')}: {c['check']} ({c.get('detail','')})")
+    print("=" * 60)
+    print(f"  XRSIM RESULT: {'PASS' if passed else 'FAIL'}  -> {report}")
 
 
 def cmd_selftest():
@@ -266,6 +341,25 @@ def cmd_selftest():
     return 0 if allok else 1
 
 
+def cmd_evaluate_only(args):
+    artifacts = Path(args.artifacts) if args.artifacts else DEFAULT_ARTIFACTS
+    report = Path(args.report_file) if args.report_file else DEFAULT_REPORT
+    lefts = sorted(artifacts.glob("test_frame_*.bmp"))
+    if not lefts:
+        print(f"[xrsim] evaluate-only: no captures in {artifacts}; nothing to do.")
+        return 0
+    log_path = Path(args.hook_log) if args.hook_log else LOG_FILE
+    fresh = log_path.read_text(errors="ignore") if log_path.is_file() else ""
+    if not fresh:
+        print(f"[xrsim] evaluate-only: no hook log at {log_path}; marker checks will be empty.")
+    passed, checks = evaluate(args, artifacts, "", fresh)
+    write_report(report, passed, checks,
+                 extra={"mode": "evaluate-only", "artifacts": str(artifacts),
+                        "hook_log": str(log_path)})
+    print_summary(checks, report, passed)
+    return 0 if passed else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scenario")
@@ -275,23 +369,32 @@ def main(argv=None):
     ap.add_argument("--max-frame-ms", type=float, default=1000.0 / 90.0)
     ap.add_argument("--no-require-disparity", dest="require_disparity",
                     action="store_false")
+    ap.add_argument("--downscale", type=int, default=1,
+                    help="block-subsample eye images by this factor (speed)")
+    ap.add_argument("--artifacts", help="capture directory (default tests/xrsim/artifacts)")
+    ap.add_argument("--report-file", help="report path (default tests/xrsim/report.json)")
+    ap.add_argument("--hook-log", help="hook log to scan for markers (default: game log)")
+    ap.add_argument("--evaluate-only", action="store_true",
+                    help="re-analyse existing captures; do not launch host/game")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
 
     if args.selftest:
         return cmd_selftest()
+    if args.evaluate_only:
+        return cmd_evaluate_only(args)
 
-    host_log, log_mark = run_sim(args)
-    passed, checks = evaluate(args, host_log, log_mark)
+    artifacts = Path(args.artifacts) if args.artifacts else DEFAULT_ARTIFACTS
+    report = Path(args.report_file) if args.report_file else DEFAULT_REPORT
+    host_log, log_mark = run_sim(args, artifacts)
 
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text(json.dumps({"passed": passed, "checks": checks}, indent=2),
-                      encoding="utf-8")
-    print("\n" + "=" * 60)
-    for c in checks:
-        print(f"  [{'PASS' if c['ok'] else 'FAIL'}] {c.get('group','')}: {c['check']} ({c['detail']})")
-    print("=" * 60)
-    print(f"  XRSIM RESULT: {'PASS' if passed else 'FAIL'}  -> {REPORT}")
+    fresh = ""
+    if LOG_FILE.exists():
+        fresh = LOG_FILE.read_bytes()[log_mark:].decode(errors="ignore")
+    passed, checks = evaluate(args, artifacts, host_log, fresh)
+    write_report(report, passed, checks,
+                 extra={"mode": "run", "artifacts": str(artifacts)})
+    print_summary(checks, report, passed)
     return 0 if passed else 1
 
 

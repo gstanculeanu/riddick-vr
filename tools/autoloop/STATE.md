@@ -2,6 +2,84 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 38 — 2026-10-16 18:20 (scheduled loop)
+- **Unit:** GH **#68** (the XRSIM iteration vehicle) — make the harness
+  **trustworthy and re-runnable without a headset**, then use it to **measure
+  stereo correctness live**. Opened **GH #69** for the residual capture gap. One
+  concrete unit.
+- Context (concurrent writer — re-checked mid-wake): the interactive session
+  landed `tools/xrsim.py` (#68) at 17:57, then committed `b97c4a8`
+  (`chore(autoloop): prioritize #68 (xrsim) as the iteration vehicle; allow xrsim
+  sim runs`) at 17:59 **during this wake**. That commit (a) added all 26 capture
+  BMPs (~700 MB) + a `report.json` to git, and (b) **rewrote `prompt.md` to make
+  XRSIM the top iteration vehicle and explicitly allow `python tools/xrsim.py`**
+  (the one input-injection exception; `RIDDICKVR_SIM=1` suppresses `SendInput`).
+  My wake began on the pre-`b97c4a8` prompt (game launch forbidden); after the
+  edit I used the now-allowed harness. The 700 MB baseline BMPs are **tracked**, so
+  the new `.gitignore` rule only guards *future*, newly-named dumps.
+- Finding (decisive, from the on-disk captures — no game launch): all **13**
+  `test_frame_*` / `right_*` pairs are **byte-identical** (`np.array_equal == True`,
+  `max|L-R| == 0`) and only **3 distinct** images exist across the run (luma
+  means 0.000 / 7.644 / 4.975; frames 1/15/30/135 all-zero). The hook log for the
+  same run is healthy (`Hardware Interop: SUCCESS`, two distinct handles
+  0xC0001E82/0xC0000982, `Stereo Eye Framebuffers ... LeftFBO: 1 RightFBO: 2`,
+  `OnSwapBuffers: Frame 195`), and shows the run entered `DisplayMode: CINEMA
+  screen ... (3Dfresh=0 menuCursor=1)`.
+- Analysis — observation vs inference: the *cinema* branch
+  (`src/hook/stereo_renderer.cpp:885-888`) deliberately blits both eyes with the
+  **same** source rect ("flat screen: no IPD shift"), so identical eyes are
+  *expected* for a 2D menu frame; the *gameplay* branch
+  (`stereo_renderer.cpp:898-926`) applies a half-IPD source shift that **must**
+  make the eyes differ. Nothing recorded which branch produced a dumped frame, so
+  the old capture alone could not distinguish "menu frame (correct)" from
+  "gameplay frame with no stereo (defect)".
+- **Resolved live (same wake, harness run — now prompt-allowed):**
+  `python tools/xrsim.py --scenario tools/scenarios/melee.json` (twice) reaches a
+  live scene and the eye pairs then **differ**: `dx=-14 px`, `dy=0`,
+  `identical=False`, `not_mono_duplicate` PASS on the live frames. **The mod's
+  stereo path DOES produce horizontal disparity with zero vertical disparity on
+  live frames** — so the earlier identical-eye result was a **static/menu capture,
+  not a stereo defect**. The harness also now re-runs end to end and reports the
+  host `FrameBudget` (mean 16.10 ms, max 780.51 ms, 28/180 over the 11.11 ms 90 Hz
+  budget — a mock-host/startup cadence artefact, not a measured render cost).
+- Change (tools/CI/docs only; no C++/asset change → no build/CTest):
+  - `tools/xrsim.py`: new **`--evaluate-only`** (re-analyse existing captures on
+    disk with no host/game launch, no input synthesis) that writes
+    `tests/xrsim/report.json`; new **`--downscale`** (block-subsample the search
+    for multi-megapixel eye buffers), `--artifacts`/`--report-file`/`--hook-log`
+    overrides, and **`skip`-semantics** so a missing host log does not fabricate a
+    frame-budget failure. New checks: `interop_produced_content` (fires on
+    all-zero eye buffers) and `capture:scene_advanced` (frozen-capture detection).
+  - `tools/test_xrsim.py` (new): 16 self-contained tests for the analysis half —
+    shift/identical/vertical/downscale registration, all-black interop
+    attribution, comfort rules, budget parsing, `--evaluate-only` exit codes and
+    report file, static-capture flagging, marker counting; **SKIPs cleanly (exit
+    0) if numpy/Pillow are absent**.
+  - `.gitignore`: ignore `tests/xrsim/artifacts/` for **future** dumps (the 26
+    baseline BMPs are already tracked by `b97c4a8`); `report.json` stays tracked.
+  - `.github/workflows/vr-worker.yml`: pip-install numpy+pillow, run
+    `tools/test_xrsim.py` and `tools/xrsim.py --selftest` (the CI-safe half the
+    #68 spec asked for), before the hook-init step.
+- Evidence:
+  - `python tools/test_xrsim.py` PASS (16/16); `python tools/xrsim.py --selftest`
+    PASS; all 9 `tools/test_*.py` + `validate_addresses` + `verify_hook_init` +
+    `verify_reported_fixes` + `scenario_tests.py --check` PASS.
+  - `python tools/xrsim.py --evaluate-only --downscale 4` on the committed
+    captures → `passed=false` (stereo 39 ok / 30 fail; capture `scene_advanced`
+    3/13).
+  - **Live:** `python tools/xrsim.py --scenario tools/scenarios/melee.json` (×2,
+    scratch `--artifacts`) → live frames `dx=-14, dy=0, identical=False` (stereo
+    PASS); early frames all-zero (interop warmup) and one identical burst (menu);
+    `FrameBudget n=180 mean=16.10 max=780.51 over=28/180 @11.11 ms`.
+  - No C++/asset change → no `build-all`/CTest.
+- Blocker: none. Caveat (corrected): the earlier "identical eyes" was a **static
+  capture, not a stereo defect** — the mod produces disparity live. Residual gaps
+  tracked in **#69**: early all-zero frames, menu bursts, no per-frame
+  display-branch label, host stdout not persisted, and the melee scenario's
+  interaction markers (`COMBAT MODE entered`, `RIOT BATON ARC JAB`) not firing in
+  mock. Next: land the per-frame `cinemaMode` dump label + host-log persistence,
+  then #67 step 2 (FP viewmodel pass) on top of the now-working capture.
+
 ## Wake 37 — 2026-10-16 17:46 (scheduled loop)
 - **Unit:** GH **#64** (→ #58/#46) — fix the **native-hand placement** so it is
   side-symmetric and pose-stable, and correct the unsupported "file geometry IS
