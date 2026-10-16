@@ -9,3 +9,7 @@ The Host component is an independent 64-bit (x64) application responsible for al
 - Poll OpenXR Action Sets for motion controller tracking (poses, buttons, thumbsticks, triggers).
 - Maintain frame pacing (`xrWaitFrame`, `xrBeginFrame`, `xrEndFrame`).
 - Receive shared GPU textures from the 32-bit game hook and submit them to the OpenXR swapchain.
+- In mock mode (`--mock`), label every dumped stereo capture with the display
+  branch the hook published for that frame (`cinema` vs `gameplay`) in
+  `<dump-dir>\display_branch.log`, so the XRSIM harness (#68/#69) can attribute a
+  byte-identical eye pair instead of guessing (ADR-0445).

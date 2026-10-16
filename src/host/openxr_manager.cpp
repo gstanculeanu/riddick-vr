@@ -1694,7 +1694,13 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             bool frameReady = ipcHost.WaitForFrameReady(20);
             if (frameReady) {
                 RiddickVRSharedState clientState{};
-                if (ipcHost.ReadState(clientState)) {
+                const bool stateRead = ipcHost.ReadState(clientState);
+                // GH #69: the hook publishes which display branch produced the
+                // frame (cinema screen vs 3D gameplay). Label every capture with
+                // it so an identical-eye capture can be *attributed* to cinema
+                // (expected: no IPD shift) instead of guessed at as a defect.
+                const bool cinemaMode = stateRead && clientState.cinemaMode;
+                if (stateRead) {
                     if (clientState.leftEyeSharedHandle && clientState.rightEyeSharedHandle) {
                         EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
                     }
@@ -1754,7 +1760,27 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     const bool okR = SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedRightTex, rightPath);
                     std::cout << "[Mock Host] Captured stereo frame " << totalFrames
                               << " (L=" << (okL ? "ok" : "err") << " R=" << (okR ? "ok" : "err")
-                              << ") -> " << leftPath << " / " << rightPath << std::endl;
+                              << ") cinema=" << (cinemaMode ? 1 : 0)
+                              << " -> " << leftPath << " / " << rightPath << std::endl;
+
+                    // GH #69: persist the per-frame display branch next to the
+                    // captures. The harness reads this to give each frame a
+                    // cinema-vs-gameplay label, so a byte-identical eye pair is
+                    // judged against the branch that produced it (cinema frames
+                    // legitimately have no IPD shift).
+                    const std::string labelPath = m_dumpDir + "\\display_branch.log";
+                    std::ofstream labelFile(labelPath,
+                                            (totalFrames == 1) ? std::ios::trunc
+                                                               : std::ios::app);
+                    if (labelFile) {
+                        if (totalFrames == 1) {
+                            labelFile << "# frame=NNNN cinema=<0|1> left=<ok|err> right=<ok|err>\n";
+                        }
+                        labelFile << "frame=" << totalFrames
+                                  << " cinema=" << (cinemaMode ? 1 : 0)
+                                  << " left=" << (okL ? "ok" : "err")
+                                  << " right=" << (okR ? "ok" : "err") << "\n";
+                    }
                 }
 
                 ipcHost.SignalFrameConsumed();

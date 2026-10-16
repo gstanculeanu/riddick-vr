@@ -149,6 +149,20 @@ def main():
             "viewmodel_suppressor_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
             "GH #66: engine viewmodel suppression must be off-by-default, intercept RndrGL draws, and be unit-tested")
 
+    # GH #69: the mock host must label every capture with the display branch it
+    # published (cinema vs gameplay) and persist that label beside the frames,
+    # and the harness must consume the label so identical eyes are attributed
+    # instead of guessed (and a cinema-only run cannot pass the stereo gates).
+    xrsim_tool = (ROOT / "tools/xrsim.py").read_text(encoding="utf-8")
+    require("cinema=" in host and "display_branch.log" in host and
+            "stateRead && clientState.cinemaMode" in host and
+            "read_display_branch_labels" in xrsim_tool and
+            "gameplay_captures_present" in xrsim_tool and
+            "persist_host_log" in xrsim_tool and
+            'DISPLAY_LABEL_FILE = "display_branch.log"' in xrsim_tool,
+            "GH #69: XRSIM must label each capture with its display branch and "
+            "attribute identical eyes per frame")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

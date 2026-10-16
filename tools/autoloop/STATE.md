@@ -2,6 +2,68 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 39 — 2026-10-16 18:21 (scheduled loop)
+- **Unit:** GH **#68** (the XRSIM iteration vehicle, top priority) — do wake 38's
+  stated "Next": give every capture a **per-frame display-branch label** (cinema
+  vs gameplay) and **persist the mock host stdout**, so an identical-eye capture
+  is *attributed* not guessed. Closes #69 requirements 2 and 3 and its acceptance
+  ("report states, per frame, whether it was cinema or gameplay"). One unit.
+- Finding (decisive, from the code + live run): the harness could not interpret
+  its own captures. `stereo_renderer.cpp` deliberately blits both eyes with the
+  **same** source rect on the *cinema* branch (no IPD shift) and a half-IPD shift
+  on the *gameplay* branch, but nothing recorded which branch produced a dumped
+  frame — so "identical eyes" was unjudgeable (wake 38 had to guess). The bit the
+  host needs is already published: `StereoRenderer::m_sharedState.cinemaMode`
+  (`riddick_vr_protocol.h:89`) read by the mock loop via `ipcHost.ReadState`.
+- Change (host C++ + tools/tests/docs; **no game/asset change**):
+  - `src/host/openxr_manager.cpp`: hoist the per-frame state read
+    (`stateRead && clientState.cinemaMode`); the capture line now carries
+    `cinema=<0|1>`, and each dumped frame appends one machine-readable line to
+    `<dump-dir>\display_branch.log`
+    (`frame=NNNN cinema=<0|1> left=<ok|err> right=<ok|err>`).
+  - `tools/xrsim.py`: `read_display_branch_labels()` (parse the label file;
+    absent frame ⇒ `unknown`, never assumed gameplay); `persist_host_log()` +
+    `host_log_path()` (mock stdout → `<artifacts>\host.log`, stale files cleared
+    each run); every stereo check is now tagged `branch=`; on a **cinema** frame
+    the two gameplay-only gates (`horizontal_disparity_present`,
+    `not_mono_duplicate`) are reported **skipped** (identical eyes are correct
+    there) while `both_eyes_non_black`/`interop_produced_content` still apply;
+    new `gameplay_captures_present` check (fails when the label file exists and
+    **no** frame is gameplay ⇒ a menu-only run cannot pass); `--evaluate-only`
+    reuses `<artifacts>\host.log` when present; the report records `host_log` and
+    the per-frame `display_branch` map.
+  - `tools/test_xrsim.py` (+5 → **21**): label parsing, cinema identical eyes
+    skipped-not-failed + cinema-only run fails, gameplay identical eyes still
+    fail, the gameplay-presence gate, `--evaluate-only` reads a persisted host log.
+  - `tools/verify_reported_fixes.py` (new GH #69 invariant),
+    `src/host/README.md`, `docs/adr/0445-xrsim-per-frame-display-branch-label.md`
+    (new), `tests/xrsim/report.json` (regenerated baseline).
+- Evidence:
+  - **Live** `python tools/xrsim.py --scenario tools/scenarios/melee.json
+    --timeout 150` (allowed exception; `RIDDICKVR_SIM=1`) reached 3D gameplay:
+    `gameplay_captures_present` **PASS — 8 gameplay / 5 cinema / 0 unknown of
+    13**; the 8 gameplay frames `dx=-14, dy=0, identical=False`; `display_branch.log`
+    shows the transition live (`frame=1..60 cinema=1`, `75..180 cinema=0`);
+    `<artifacts>\host.log` persisted (`FrameBudget samples=180 mean_ms=17.42
+    max_ms=899.54 over=30 budget=11.11`).
+  - Offline: `python tools/test_xrsim.py` **21/21 PASS**; `xrsim.py --selftest`
+    PASS; `--evaluate-only --downscale 4` on the committed captures regenerated
+    `tests/xrsim/report.json` (branch unknown ⇒ `gameplay_captures_present`
+    skipped, not retro-failed); `build-all.ps1 -Config Release` OK (x86
+    `opengl32.dll` + x64 host); CTest **9/9 PASS** x86 **and** x64; all 9
+    `tools/test_*.py` + `validate_addresses` + `verify_hook_init` +
+    `verify_reported_fixes` + `scenario_tests.py --check` PASS.
+- Blocker: none. Residual #69 gaps are now **visible and attributed** rather than
+  guessed: frames 1/15/30 are all-zero eye buffers (interop warmup, flagged by
+  `interop_produced_content`), the melee markers (`COMBAT MODE entered`,
+  `RIOT BATON ARC JAB`) still do not fire under the mock, and one transition
+  cinema frame (60) showed `dy=-4`.
+- **Next:** #69 req 1 — make a scripted run reach live gameplay *earlier* (drive
+  past the loading/warmup so the all-zero interop frames shrink) and wire the
+  scenario's interaction markers to the mock; then **#67 step 2** (identify the
+  first-person viewmodel pass) on top of the now-attributable capture.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 38 — 2026-10-16 18:20 (scheduled loop)
 - **Unit:** GH **#68** (the XRSIM iteration vehicle) — make the harness
   **trustworthy and re-runnable without a headset**, then use it to **measure

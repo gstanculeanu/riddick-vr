@@ -7,6 +7,9 @@ headset), captures BOTH eyes, and asserts:
   * frame-time budget   (host FrameBudget lines),
   * stereo correctness   (left/right eye diff: non-identical, horizontal
                           disparity present, no vertical disparity),
+  * display branch       (per-frame cinema-vs-gameplay label: identical eyes are
+                          correct on a cinema screen and only a defect when the
+                          frame is 3D gameplay -- GH #69),
   * interaction state    (scenario markers present in the fresh hook log),
   * comfort rules        (non-black, no green chroma glitch, full-bleed/HUD).
 
@@ -49,6 +52,13 @@ DEFAULT_REPORT = REPO_ROOT / "tests" / "xrsim" / "report.json"
 FRAME_BUDGET_RE = re.compile(
     r"FrameBudget samples=(\d+) mean_ms=([\d.]+) max_ms=([\d.]+) "
     r"over_budget=(\d+) budget_ms=([\d.]+)")
+
+# GH #69: the mock host writes one label line per dumped capture, recording the
+# display branch the hook published for that frame (cinema screen vs 3D
+# gameplay). Parsed here so identical eyes can be attributed, not guessed.
+DISPLAY_LABEL_RE = re.compile(
+    r"frame=(\d+)\s+cinema=([01])\s+left=(\w+)\s+right=(\w+)")
+DISPLAY_LABEL_FILE = "display_branch.log"
 
 
 # ---------------------------------------------------------------- stereo diff
@@ -135,6 +145,24 @@ def assert_stereo(metrics, require_disparity=True):
 
 
 # --------------------------------------------------------------- capture health
+def read_display_branch_labels(artifacts: Path):
+    """GH #69: map frame number -> isCinema from the host's ``display_branch.log``.
+
+    Returns ``{}`` when the label file is absent (e.g. a legacy capture or a run
+    from a host build predating the label). A frame missing from the map is
+    reported as ``branch="unknown"`` rather than assumed to be gameplay.
+    """
+    path = Path(artifacts) / DISPLAY_LABEL_FILE
+    labels = {}
+    if not path.is_file():
+        return labels
+    for line in path.read_text(errors="ignore").splitlines():
+        m = DISPLAY_LABEL_RE.search(line)
+        if m:
+            labels[int(m.group(1))] = (m.group(2) == "1")
+    return labels
+
+
 def frame_signature(path: Path):
     """Cheap 16x16 luma signature used to tell live frames from a static scene."""
     return Image.open(path).convert("L").resize((16, 16)).tobytes()
@@ -193,7 +221,8 @@ def parse_budget(host_log: str, budget_ms: float):
 # ------------------------------------------------------------------ orchestration
 def run_sim(args, artifacts: Path):
     artifacts.mkdir(parents=True, exist_ok=True)
-    for f in list(artifacts.glob("*.bmp")) + list(artifacts.glob("*.png")):
+    for f in (list(artifacts.glob("*.bmp")) + list(artifacts.glob("*.png")) +
+              [artifacts / DISPLAY_LABEL_FILE, artifacts / "host.log"]):
         try:
             f.unlink()
         except OSError:
@@ -238,6 +267,22 @@ def run_sim(args, artifacts: Path):
     return "\n".join(host_log), log_mark
 
 
+def host_log_path(artifacts: Path) -> Path:
+    return Path(artifacts) / "host.log"
+
+
+def persist_host_log(artifacts: Path, host_log: str) -> Path:
+    """GH #69: keep the mock host's stdout so frame-budget / capture lines
+    survive the run and can be re-analysed by ``--evaluate-only``."""
+    path = host_log_path(artifacts)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(host_log, encoding="utf-8")
+    except OSError:
+        pass
+    return path
+
+
 def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
     """Evaluate one run's evidence.
 
@@ -256,6 +301,8 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
     # 2. stereo
     lefts = sorted(artifacts.glob("test_frame_*.bmp"))
     rights_by_n = {int(p.stem.split("_")[1]): p for p in artifacts.glob("right_*.bmp")}
+    labels = read_display_branch_labels(artifacts)
+    branch_counts = {"cinema": 0, "gameplay": 0, "unknown": 0}
     if not lefts:
         checks.append({"group": "stereo", "check": "frames_captured", "ok": False,
                        "detail": f"no test_frame_*.bmp in {artifacts}"})
@@ -264,16 +311,46 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
             checks.append({**c, "group": "capture"})
         for lp in lefts:
             n = int(lp.stem.split("_")[2])
+            branch = labels.get(n)
+            branch_name = ("cinema" if branch is True else
+                           "gameplay" if branch is False else "unknown")
+            branch_counts[branch_name] += 1
             rp = rights_by_n.get(n)
             if rp is None:
                 checks.append({"group": "stereo", "check": f"right_frame_{n}", "ok": False,
+                               "branch": branch_name,
                                "detail": "missing right_*.bmp"})
                 continue
             m = stereo_metrics(lp, rp, downscale=args.downscale)
             _, sub = assert_stereo(m, require_disparity=args.require_disparity)
             for c in sub:
-                checks.append({**c, "group": "stereo", "frame": n,
-                               "detail": f"{c['detail']} {m.get('best_dx')}/{m.get('best_dy')}"})
+                rec = {**c, "group": "stereo", "frame": n, "branch": branch_name,
+                       "detail": f"{c['detail']} {m.get('best_dx')}/{m.get('best_dy')}"}
+                # GH #69: on a cinema screen the renderer deliberately blits the
+                # same source rect to both eyes ("flat screen: no IPD shift"), so
+                # identical eyes are CORRECT there. The gameplay-only stereo
+                # gates become informational instead of failures.
+                if branch is True and c["check"] in ("horizontal_disparity_present",
+                                                     "not_mono_duplicate"):
+                    rec["ok"] = True
+                    rec["skip"] = True
+                    rec["detail"] = ("cinema frame: identical eyes expected "
+                                     "(no IPD shift); " + rec["detail"])
+                checks.append(rec)
+        # GH #69 acceptance: a run is only meaningful for the stereo gates if it
+        # captured at least one live 3D gameplay frame. A menu-only run cannot
+        # validate gameplay stereo and must not be recorded as a pass.
+        if labels:
+            checks.append({"group": "stereo", "check": "gameplay_captures_present",
+                           "ok": branch_counts["gameplay"] >= 1,
+                           "detail": (f"{branch_counts['gameplay']} gameplay / "
+                                      f"{branch_counts['cinema']} cinema / "
+                                      f"{branch_counts['unknown']} unknown of {len(lefts)}")})
+        else:
+            checks.append({"group": "stereo", "check": "gameplay_captures_present",
+                           "ok": True, "skip": True,
+                           "detail": (f"no {DISPLAY_LABEL_FILE}: per-frame display "
+                                      "branch unknown (legacy capture or pre-label host)")})
     # 3. interaction markers
     req = []
     if args.scenario and Path(args.scenario).is_file():
@@ -352,10 +429,20 @@ def cmd_evaluate_only(args):
     fresh = log_path.read_text(errors="ignore") if log_path.is_file() else ""
     if not fresh:
         print(f"[xrsim] evaluate-only: no hook log at {log_path}; marker checks will be empty.")
-    passed, checks = evaluate(args, artifacts, "", fresh)
+    # GH #69: if a previous live run persisted its host stdout, reuse it so the
+    # frame-budget group still has evidence during offline re-analysis.
+    hlp = host_log_path(artifacts)
+    host_text = hlp.read_text(errors="ignore") if hlp.is_file() else ""
+    if not host_text:
+        print(f"[xrsim] evaluate-only: no persisted host log at {hlp}; "
+              "frame-budget check is skipped.")
+    passed, checks = evaluate(args, artifacts, host_text, fresh)
+    labels = read_display_branch_labels(artifacts)
     write_report(report, passed, checks,
                  extra={"mode": "evaluate-only", "artifacts": str(artifacts),
-                        "hook_log": str(log_path)})
+                        "hook_log": str(log_path),
+                        "host_log": str(hlp) if hlp.is_file() else None,
+                        "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
     return 0 if passed else 1
 
@@ -387,13 +474,17 @@ def main(argv=None):
     artifacts = Path(args.artifacts) if args.artifacts else DEFAULT_ARTIFACTS
     report = Path(args.report_file) if args.report_file else DEFAULT_REPORT
     host_log, log_mark = run_sim(args, artifacts)
+    persist_host_log(artifacts, host_log)  # GH #69: survive the run
 
     fresh = ""
     if LOG_FILE.exists():
         fresh = LOG_FILE.read_bytes()[log_mark:].decode(errors="ignore")
     passed, checks = evaluate(args, artifacts, host_log, fresh)
+    labels = read_display_branch_labels(artifacts)
     write_report(report, passed, checks,
-                 extra={"mode": "run", "artifacts": str(artifacts)})
+                 extra={"mode": "run", "artifacts": str(artifacts),
+                        "host_log": str(host_log_path(artifacts)),
+                        "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
     return 0 if passed else 1
 

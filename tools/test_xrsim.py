@@ -260,6 +260,84 @@ def test_selftest_passes(td):
         assert xrsim.cmd_selftest() == 0
 
 
+# ------------------------------------------------- display branch (GH #69)
+def _write_labels(art: Path, mapping):
+    lines = ["# frame=NNNN cinema=<0|1> left=<ok|err> right=<ok|err>"]
+    for n, cinema in sorted(mapping.items()):
+        lines.append(f"frame={n} cinema={1 if cinema else 0} left=ok right=ok")
+    (art / xrsim.DISPLAY_LABEL_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_display_branch_labels_parsed(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _write_labels(art, {15: True, 30: False})
+    labels = xrsim.read_display_branch_labels(art)
+    assert labels == {15: True, 30: False}, labels
+    # Absent file -> unknown, not fabricated.
+    assert xrsim.read_display_branch_labels(Path(td) / "nope") == {}
+
+
+def test_cinema_identical_eyes_are_skipped_not_failed(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", base)  # identical: correct on a cinema screen
+    _write_labels(art, {15: True})
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    for name in ("horizontal_disparity_present", "not_mono_duplicate"):
+        rec = [c for c in checks if c["check"] == name and c.get("frame") == 15][0]
+        assert rec["ok"] is True and rec.get("skip") is True, rec
+        assert rec["branch"] == "cinema", rec
+    # ... but a cinema-only run cannot validate gameplay stereo.
+    gp = [c for c in checks if c["check"] == "gameplay_captures_present"][0]
+    assert gp["ok"] is False, gp
+    assert passed is False
+
+
+def test_gameplay_identical_eyes_still_fail(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", base)
+    _write_labels(art, {15: False})  # gameplay: identical eyes = mono duplicate
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    dup = [c for c in checks if c["check"] == "not_mono_duplicate" and c.get("frame") == 15][0]
+    assert dup["ok"] is False and not dup.get("skip"), dup
+    assert dup["branch"] == "gameplay", dup
+    assert passed is False
+
+
+def test_gameplay_captures_present_gate(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0015.bmp", _content(seed=1))
+    _save(art / "right_0015.bmp", _content(seed=1))          # cinema, identical
+    _save(art / "test_frame_0030.bmp", _content(seed=2))
+    _save(art / "right_0030.bmp", _shift_h(_content(seed=2), 3))  # gameplay, shifted
+    _write_labels(art, {15: True, 30: False})
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    gp = [c for c in checks if c["check"] == "gameplay_captures_present"][0]
+    assert gp["ok"] is True, gp
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
+
+
+def test_evaluate_only_reads_persisted_host_log(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    xrsim.persist_host_log(
+        art, "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 budget_ms=11.11")
+    rep = Path(td) / "report.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                         "--report-file", str(rep)])
+    assert rc == 0
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    fb = [c for c in payload["checks"] if c["check"] == "frame_budget"][0]
+    assert not fb.get("skip") and fb["ok"] is True, fb
+    assert payload["host_log"], payload
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -270,7 +348,12 @@ def main() -> int:
              test_evaluate_only_writes_report_and_exit_code,
              test_static_capture_is_flagged,
              test_evaluate_only_empty_dir_is_noop,
-             test_evaluate_counts_scenario_markers, test_selftest_passes)
+             test_evaluate_counts_scenario_markers, test_selftest_passes,
+             test_display_branch_labels_parsed,
+             test_cinema_identical_eyes_are_skipped_not_failed,
+             test_gameplay_identical_eyes_still_fail,
+             test_gameplay_captures_present_gate,
+             test_evaluate_only_reads_persisted_host_log)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)
