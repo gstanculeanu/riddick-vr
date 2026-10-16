@@ -162,6 +162,14 @@ if(BUILD_TESTING)
     )
     add_test(NAME native_hand_texture_asset COMMAND riddick_vr_native_hand_texture_tests)
 
+    # GH #61: the baked diffuse + the arm mesh UVs must be skin-toned, never a
+    # white / flat patch (refutes the "decodes white" premise that disabled it).
+    add_executable(riddick_vr_native_hand_skin_tests tests/native_hand_skin_tests.cpp)
+    target_include_directories(riddick_vr_native_hand_skin_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME native_hand_skin_mapping COMMAND riddick_vr_native_hand_skin_tests)
+
     # GH #69 (requirement 1): XRSIM dump gate -- capture live 3D gameplay only.
     add_executable(riddick_vr_dump_gate_tests tests/dump_gate_tests.cpp)
     target_include_directories(riddick_vr_dump_gate_tests PRIVATE

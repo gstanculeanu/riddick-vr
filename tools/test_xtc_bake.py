@@ -26,6 +26,19 @@ import test_mos_xtc as tm  # noqa: E402
 
 _BLOCK_RE = re.compile(r"kTexture\d+_Dxt1\[\] = \{(.*?)\};", re.S)
 
+# Committed generated assets (in-tree; no game install needed) used by the
+# GH #61 skin regression below.
+_TEX_HEADER = os.path.join(_HERE, "..", "src", "hook", "native_hand_texture_data.h")
+_MESH_HEADER = os.path.join(_HERE, "..", "src", "hook", "native_hand_mesh_data.h")
+
+_MESH_VERT_RE = re.compile(
+    r"\{\s*\{\s*[-\d.eE]+f,\s*[-\d.eE]+f,\s*[-\d.eE]+f\s*\},\s*"
+    r"\{\s*[-\d.eE]+f,\s*[-\d.eE]+f,\s*[-\d.eE]+f\s*\},\s*"
+    r"\{\s*([-\d.eE]+)f,\s*([-\d.eE]+)f\s*\}\s*\}")
+_MESH_ROW_RE = re.compile(
+    r"\{\s*\"([^\"]+)\",\s*\"([^\"]+)\",\s*(-?\d+),\s*(-?\d+),\s*"
+    r"(-?\d+),\s*kMesh(\d+)_Vertices,")
+
 
 def _dxt1(c0, c1, bits=0):
     return struct.pack("<HHI", c0, c1, bits)
@@ -162,10 +175,99 @@ def test_main_requires_output(tmp_dir):
         raise AssertionError("expected SystemExit when nothing to do")
 
 
+def _parse_tex_header(text):
+    """Return (width, height, dxt1_bytes) for the single committed texture."""
+    m = re.search(
+        r"\{\s*\"([^\"]+)\",\s*\"([^\"]+)\",\s*(-?\d+),\s*(\d+),\s*(\d+),\s*"
+        r"kTexture0_Dxt1,\s*(\d+),", text)
+    assert m, "no NativeHandTexture row in the committed header"
+    name, _source, _mip, width, height, nbytes = m.groups()
+    return name, int(width), int(height), int(nbytes)
+
+
+def _parse_mesh_uvs(text):
+    """Return {name: (surface_index, [(u, v), ...])} from the mesh header."""
+    arrays = re.findall(r"kMesh(\d+)_Vertices\[\]\s*=\s*\{(.*?)\n\};", text, re.S)
+    uvs_by_idx = {
+        int(idx): [(float(a.group(1)), float(a.group(2)))
+                   for a in _MESH_VERT_RE.finditer(body)]
+        for idx, body in arrays
+    }
+    meshes = {}
+    for m in _MESH_ROW_RE.finditer(text):
+        name, _src, _cluster, surface, _axis, idx = m.groups()
+        meshes[name] = (int(surface), uvs_by_idx[int(idx)])
+    return meshes
+
+
+def test_committed_asset_is_skin_toned(tmp_dir):
+    """GH #61: the shipped bake must be warm skin, never a white/flat patch.
+
+    Commit 52c2101 disabled the real diffuse claiming the bake "decoded white".
+    This reproduces the in-tree asset decode + the arm meshes' own UV sampling
+    and refutes that: the surface has no near-white texels and the UVs sample
+    varied skin tones. Guards against re-disabling the feature on the same
+    false premise (mirrors tests/native_hand_skin_tests.cpp).
+    """
+    with open(_TEX_HEADER, encoding="utf-8") as f:
+        tex_text = f.read()
+    with open(_MESH_HEADER, encoding="utf-8") as f:
+        mesh_text = f.read()
+
+    name, width, height, nbytes = _parse_tex_header(tex_text)
+    assert name == "Riddick_ArmScar_D", name
+    blocks = _parse_blocks(tex_text)
+    assert len(blocks) == nbytes == (width + 3) // 4 * ((height + 3) // 4) * 8
+    rgba = mos_xtc.bc1_decode(blocks, width, height)
+
+    def luma(i):
+        return (rgba[i] * 299 + rgba[i + 1] * 587 + rgba[i + 2] * 114) // 1000
+
+    n = width * height
+    lums = [luma(i * 4) for i in range(n)]
+    mean = sum(lums) / n
+    white = sum(1 for i in range(n)
+                if rgba[i * 4] > 200 and rgba[i * 4 + 1] > 200 and rgba[i * 4 + 2] > 200)
+    assert white / n < 0.02, f"baked diffuse decodes {white}/{n} near-white texels"
+    assert 90.0 < mean < 200.0, f"baked diffuse mean luma {mean:.1f} not skin-like"
+
+    def sample(u, v):
+        x = min(width - 1, max(0, int(round(u * (width - 1)))))
+        y = min(height - 1, max(0, int(round(v * (height - 1)))))
+        o = (y * width + x) * 4
+        return (rgba[o] * 299 + rgba[o + 1] * 587 + rgba[o + 2] * 114) // 1000, \
+            (rgba[o] > 200 and rgba[o + 1] > 200 and rgba[o + 2] > 200)
+
+    meshes = _parse_mesh_uvs(mesh_text)
+    textured = 0
+    for mesh_name, (surface, uvs) in meshes.items():
+        if not uvs:
+            continue
+        if surface not in (1, 2):
+            continue  # only the drawn Riddick arm meshes carry ARMSCAR UVs
+        textured += 1
+        us = [u for u, _ in uvs]
+        vs = [v for _, v in uvs]
+        assert max(us) - min(us) > 0.5 or max(vs) - min(vs) > 0.5, \
+            f"{mesh_name} UVs are degenerate"
+        for flip in (False, True):
+            cols = [sample(u, (1 - v) if flip else v) for u, v in uvs]
+            sampled = [c[0] for c in cols]
+            m = sum(sampled) / len(sampled)
+            var = sum((x - m) ** 2 for x in sampled) / len(sampled)
+            assert 90.0 < m < 200.0 and var ** 0.5 > 15.0, \
+                f"{mesh_name} (flip={flip}) samples mean={m:.1f} std={var ** 0.5:.1f}"
+            assert not any(c[1] for c in cols), \
+                f"{mesh_name} (flip={flip}) samples near-white texels"
+    assert textured >= 2, f"expected 2 textured arm meshes, found {textured}"
+
+
 def main() -> int:
     tests = (test_bake_roundtrip, test_manifest_metadata,
              test_cli_bake_and_verify, test_rejects_non_dxt1,
-             test_rejects_unknown_image_and_mip, test_main_requires_output)
+             test_rejects_unknown_image_and_mip, test_main_requires_output,
+             test_committed_asset_is_skin_toned)
+
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

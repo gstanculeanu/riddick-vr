@@ -281,8 +281,26 @@ def main():
             "glTranslatef/glPopMatrix mirrored by gl_matrix_tracker.h), not just "
             "the last loaded glLoadMatrixf")
 
-    print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #62, "
-          "#64-67, #69, #71-72)")
+    # GH #61: the native hands must ship with the real Riddick skin diffuse
+    # bound. The commit that disabled it (52c2101) claimed the bake "decoded
+    # white"; that is false (the committed asset is warm skin tones with no
+    # near-white texels and the arm meshes' own UVs sample it), so a regression
+    # test pins the fact on the committed asset and the shipped INI keeps the
+    # texture enabled rather than reverting on the same false premise.
+    require("NativeHandTexture=1" in (ROOT / "riddick_vr.ini").read_text(encoding="utf-8") and
+            "EnsureNativeHandTexture" in hands and
+            'FindNativeHandTexture("Riddick_ArmScar_D")' in hands and
+            "GL_MODULATE" in hands and
+            "nativeHandTexture = 1" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            "tests/native_hand_skin_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "native_hand_skin_mapping" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "test_committed_asset_is_skin_toned" in
+            (ROOT / "tools/test_xtc_bake.py").read_text(encoding="utf-8"),
+            "GH #61: the shipped config must keep the real skin diffuse enabled "
+            "and the skin-toned bake must stay pinned by a regression test")
+
+    print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
+          "#62, #64-67, #69, #71-72)")
     return 0
 
 

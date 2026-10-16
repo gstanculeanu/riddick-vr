@@ -71,6 +71,13 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   in `tools/mos_xtc.py`.
 - Gated by `[VR] NativeHands` (mesh) and `[VR] NativeHandTexture`; the flat
   skin tone is retained as the fallback. Only active when `NativeHands` is set.
+  The shipped INI keeps `NativeHandTexture=1`: the bake is **verified skin-toned,
+  never white** (whole-surface mean luma ~139, zero near-white texels; the arm
+  meshes' own UVs sample varied skin across the atlas). The commit that disabled
+  it (52c2101) attributed the washed-out look to a white bake, but the real
+  cause was the 0.25 fade translucency fixed in the same commit — the invariant
+  is now pinned by `native_hand_skin_mapping`
+  (`tests/native_hand_skin_tests.cpp`) and `tools/test_xtc_bake.py`.
 
 ## Front-of-HMD block guard (GH #62)
 - `combat_guard.h`: header-only, dependency-free `GuardEnvelope` (`GuardHandInWindow`

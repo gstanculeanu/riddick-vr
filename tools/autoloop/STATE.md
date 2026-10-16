@@ -2,6 +2,54 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 46 — 2026-10-16 20:27 (scheduled loop)
+- **Unit:** GH **#61** (real skin diffuse on the native hands) — the standing
+  prompt says "the baked diffuse decodes white; fix or keep the skin-tone
+  fallback". I tested that premise instead of trusting it: **it is false**, so
+  the fix is to **stop disabling the (correct) texture** and pin the fact with a
+  regression test. No GL/deploy; generated-asset + tests/docs/config only.
+- **Why this unit (top items are deploy-blocked):** #67/#64/#65/#62/#63 are all
+  hook-side and need a headset deploy this loop must not do (#67 step 3 still
+  needs a validated capture; wake 45 handed it to an interactive session). #61
+  had a concrete, *offline-decidable* question and a false premise.
+- **Decisive finding (offline, read-only):** commit `52c2101` disabled the
+  texture claiming "the baked NativeHandTexture decoded white". Decoding the
+  shipped `Content/Models.xtc` `Riddick_ArmScar_D` mip 1 (256×512 DXT1) gives a
+  whole-surface **mean RGB ≈ (164.0,130.6,114.7) → mean luma ≈ 139 with
+  `0/131072` near-white texels**; the native arm meshes' own UVs span nearly the
+  full atlas and sample mean luma **127–147** with stddev 42–55 and **0
+  near-white** samples (both V-flip variants). The asset is byte-identical to
+  its first commit (`280e058`, checksum `0x05308AE2`). The washed-out/white look
+  was the **0.25 fade translucency** that the *same* commit fixed (`f = 1.0f`).
+- **Change (config + hook docs + tests/tools + ADR):**
+  - `riddick_vr.ini`: `NativeHandTexture=0 → 1` (matches the compiled default,
+    `tools/riddick_vr.ini.example`, and the documented recommendation) + comment
+    citing the verification.
+  - `tests/native_hand_skin_tests.cpp` (new) + CTest `native_hand_skin_mapping`
+    (CMake): decodes the in-tree asset with `bc1.h` and asserts skin-tone /
+    non-white / non-flat for the whole surface *and* at the arm meshes' own UVs
+    (both V-flips), plus non-degenerate UV spans.
+  - `tools/test_xtc_bake.py`: +`test_committed_asset_is_skin_toned` (CI lane, no
+    game install) mirroring the invariant on the committed headers.
+  - `tools/verify_reported_fixes.py`: new #61 invariant (shipped INI keeps
+    `NativeHandTexture=1`; the regression test stays wired).
+  - `src/hook/native_hand_texture.h` + `src/hook/README.md` +
+    `docs/adr/0452-native-hand-skin-diffuse-verified.md` (new).
+- **Validation:** `build-all.ps1 -Config Release` OK (x86 hook + x64 host; **no
+  `-Deploy`**); CTest **12/12 PASS on x86 AND x64** (new `native_hand_skin_mapping`);
+  all 10 `tools/test_*.py` + `validate_addresses` + `verify_hook_init` +
+  `verify_reported_fixes` + `scenario_tests.py --check` PASS.
+- **Blocker / honest limit:** **not headset-validated** — the *rendered* result
+  still needs one in-headset confirm (as does `NativeHandTextureVFlip`). The live
+  game-dir INI also still has `NativeHandTexture=0` and the deployed hook is
+  stale (17:56); this loop must not write the game install, so the running build
+  keeps the flat tone until an interactive session deploys + sets the INI. What
+  is now settled offline is the *claim* that justified disabling it.
+- **Next:** one interactive deploy with `NativeHandTexture=1` (flip `VFlip` if
+  the seam is wrong) closes #61; then #64's remaining "flat/2D" is texture-side
+  and should resolve with it. Otherwise continue #67 step 3 (needs the capture).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 45 — 2026-10-16 20:15 (scheduled loop)
 - **Unit:** GH **#67 step 1 (remainder)** — make the draw-time `GL_MODELVIEW`
   capture the **effective** matrix by mirroring the fixed-function modelview stack

@@ -13,6 +13,15 @@
 // unit-tested headlessly (``tests/native_hand_texture_tests.cpp``) without a GL
 // context or the game. It is consumed by ``VRHandRenderer::DrawNativeHand``
 // behind the ``NativeHands`` config flag.
+//
+// GH #61 (verified): the bake is warm skin/scar tones -- whole-surface mean
+// luma ~139 with **zero** near-white texels -- and the native arm meshes' own
+// UVs sample it across the atlas (mean luma ~127-147, real tonal spread). The
+// earlier "baked NativeHandTexture decoded white" claim that disabled the bind
+// (commit 52c2101) was a mis-attribution of the *0.25 fade* translucency fixed
+// in the same commit; ``tests/native_hand_skin_tests.cpp`` and
+// ``tools/test_xtc_bake.py`` pin the invariant so the feature is not reverted
+// on that false premise.
 
 namespace RiddickVR {
 
