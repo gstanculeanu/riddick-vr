@@ -185,4 +185,12 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/host
     )
     add_test(NAME eye_frame_record COMMAND riddick_vr_eye_frame_tests)
+
+    # GH #68 (requirement 2): frame-time pacing percentiles (p50/p95) + the
+    # budget wire line (src/host/frame_time_stats.h) the harness asserts on.
+    add_executable(riddick_vr_frame_time_tests tests/frame_time_tests.cpp)
+    target_include_directories(riddick_vr_frame_time_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
+    )
+    add_test(NAME frame_time_percentiles COMMAND riddick_vr_frame_time_tests)
 endif()

@@ -81,7 +81,8 @@ DEFAULT_REPORT = REPO_ROOT / "tests" / "xrsim" / "report.json"
 
 FRAME_BUDGET_RE = re.compile(
     r"FrameBudget samples=(\d+) mean_ms=([\d.]+) max_ms=([\d.]+) "
-    r"over_budget=(\d+) budget_ms=([\d.]+)")
+    r"over_budget=(\d+) budget_ms=([\d.]+)"
+    r"(?: p50_ms=([\d.]+) p95_ms=([\d.]+))?")
 
 # GH #71 requirement 1: the mock host tracks the *game's* uncapped swap rate
 # (~250-300 FPS on the trivial startup splash), so a frame-counted window is only
@@ -637,15 +638,33 @@ def comfort_checks(left_path: Path):
 
 # ------------------------------------------------------------------ frame budget
 def parse_budget(host_log: str, budget_ms: float):
-    samples = FRAME_BUDGET_RE.findall(host_log)
-    if not samples:
+    """GH #68 requirement 2: assert the *frame-pacing* budget (ADR-0455).
+
+    The mock host follows the game's uncapped swap rate, so a one-off level-load
+    hitch shows up in ``mean_ms``/``max_ms`` without being a sustained 90 Hz
+    regression. The budget is therefore asserted on **p50 and p95** -- the
+    typical frame and the frame the user actually feels -- while ``max_ms`` and
+    the drop count (``over_budget``) are still *reported* so a real stall stays
+    visible. Requires a post-#68 host build (the line carries p50_ms/p95_ms).
+    """
+    rows = FRAME_BUDGET_RE.findall(host_log)
+    if not rows:
         return False, {"check": "frame_budget_reported", "ok": False,
                        "detail": "no FrameBudget line from host"}
-    n, mean, mx, over, budget = samples[-1]
-    n, mean, mx, over, budget = int(n), float(mean), float(mx), int(over), float(budget)
-    tol = max(budget_ms, budget) * 1.5
-    rec = {"check": "frame_budget", "ok": (mean <= budget_ms and mx <= tol),
-           "detail": f"n={n} mean={mean:.2f} max={mx:.2f} over={over} budget={budget:.2f}"}
+    n, mean, mx, over, budget, p50, p95 = rows[-1]
+    n, over = int(n), int(over)
+    mean, mx, budget = float(mean), float(mx), float(budget)
+    if not p50 or not p95:
+        return False, {"check": "frame_budget_reported", "ok": False,
+                       "detail": "FrameBudget line lacks p50_ms/p95_ms "
+                                 "(stale host build; rebuild riddickvr-host)"}
+    p50, p95 = float(p50), float(p95)
+    eff = budget_ms if budget_ms > 0.0 else budget
+    rec = {"check": "frame_budget", "ok": (p50 <= eff and p95 <= eff),
+           "p50_ms": p50, "p95_ms": p95, "mean_ms": mean, "max_ms": mx,
+           "over_budget": over, "budget_ms": eff,
+           "detail": (f"n={n} p50={p50:.2f} p95={p95:.2f} mean={mean:.2f} "
+                      f"max={mx:.2f} over={over} budget={eff:.2f}")}
     return rec["ok"], rec
 
 
@@ -918,8 +937,8 @@ def cmd_selftest():
     Image.fromarray(base).save(tmp / "test_frame_0002.bmp")
     m2 = stereo_metrics(tmp / "test_frame_0002.bmp", tmp / "right_0002.bmp", search=20)
     ok_dup, checks_dup = assert_stereo(m2, require_disparity=True)
-    ok_b, _ = parse_budget("FrameBudget samples=60 mean_ms=8.0 max_ms=12.0 over_budget=2 budget_ms=11.11", 11.11)
-    ok_b2, _ = parse_budget("FrameBudget samples=60 mean_ms=30.0 max_ms=90.0 over_budget=50 budget_ms=11.11", 11.11)
+    ok_b, _ = parse_budget("FrameBudget samples=60 mean_ms=8.0 max_ms=40.0 over_budget=2 budget_ms=11.11 p50_ms=7.0 p95_ms=9.5", 11.11)
+    ok_b2, _ = parse_budget("FrameBudget samples=60 mean_ms=30.0 max_ms=90.0 over_budget=50 budget_ms=11.11 p50_ms=20.0 p95_ms=40.0", 11.11)
     results = {
         "shifted_pair_passes": ok_shift,
         "identical_pair_fails": (not ok_dup),
@@ -977,7 +996,9 @@ def main(argv=None):
     ap.add_argument("--interval", type=int, default=None,
                     help="dump every N frames (default 15; 300 with --reach-gameplay)")
     ap.add_argument("--timeout", type=int, default=90)
-    ap.add_argument("--max-frame-ms", type=float, default=1000.0 / 90.0)
+    ap.add_argument("--max-frame-ms", type=float, default=1000.0 / 90.0,
+                    help="90 Hz frame-pacing budget; the check asserts p50 and p95 "
+                         "against it (max/drops are still reported; GH #68/ADR-0455)")
     ap.add_argument("--no-require-disparity", dest="require_disparity",
                     action="store_false")
     ap.add_argument("--downscale", type=int, default=1,

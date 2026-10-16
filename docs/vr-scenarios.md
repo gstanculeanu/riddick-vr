@@ -98,8 +98,12 @@ shift, and the same blit gives a steady `dy=0` from every crop on a good frame.
 edge (`DY_SEARCH_BOUND`): an unquantifiable `dy` is reported **inconclusive** (a
 skip), and the report's `vertical_disparity` key carries the `ok` /
 `inconclusive` / `failed` tally. A textured frame with a real, interior offset
-still fails. The `frame_budget` FAIL on a live run (the mock host follows the
-game's uncapped swap rate) is a separate, pre-existing artefact.
+still fails. The `frame_budget` check asserts the 90 Hz budget on the
+frame-pacing percentiles (**p50 and p95 <= 11.11 ms**), not on the arithmetic
+mean or the single worst frame: the mock host follows the game's uncapped swap
+rate, so a one-off level-load hitch (~760 ms) dominates `max_ms`/`mean_ms`
+without being a sustained 90 Hz regression (ADR-0455). `max_ms` and the drop
+count are still *reported* so a real stall stays visible.
 
 ## Current coverage and limits
 

@@ -245,6 +245,30 @@ def main():
             "GH #68: the mock host must record each dumped frame's camera "
             "transform (eye pose/projection) and the harness must parse it")
 
+    # GH #68 requirement 2 (second half): the frame budget must be asserted on a
+    # *frame-pacing* statistic, not on the arithmetic mean / single worst frame.
+    # The mock host follows the game's uncapped swap rate, so a one-off
+    # level-load hitch (measured ~760 ms) dominates mean/max without being a
+    # sustained 90 Hz regression. The summary therefore carries p50/p95 (pure
+    # helper src/host/frame_time_stats.h, unit-tested) and the harness asserts
+    # the budget on p50/p95 while still reporting max_ms and the drop count
+    # (ADR-0455).
+    frame_time = (ROOT / "src/host/frame_time_stats.h").read_text(encoding="utf-8")
+    require("PercentileMs" in frame_time and
+            "p50Ms" in frame_time and "p95Ms" in frame_time and
+            "SummarizeFrameTimes" in frame_time and
+            "FormatFrameBudgetLine" in frame_time and
+            "frame_time_stats.h" in host and
+            "FormatFrameBudgetLine(stats)" in host and
+            "tests/frame_time_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "frame_time_percentiles" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "p50_ms=([\\d.]+) p95_ms=([\\d.]+)" in xrsim_tool and
+            "p50 <= eff and p95 <= eff" in xrsim_tool and
+            '"p50_ms": p50' in xrsim_tool and
+            '"p95_ms": p95' in xrsim_tool,
+            "GH #68: the frame budget must be asserted on p50/p95 pacing "
+            "(with max/drops still reported) and surfaced in the harness report")
+
     # GH #72 requirement 3: the dark-frame `dy=±4` is an alignment-estimator
     # artefact, not a stereo defect (ADR-0454). The harness must gate the
     # vertical-disparity verdict on the frame's contrast and on the optimum not

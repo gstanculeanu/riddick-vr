@@ -1,6 +1,7 @@
 #include "openxr_manager.h"
 #include "dump_gate.h"
 #include "eye_frame.h"
+#include "frame_time_stats.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -1808,8 +1809,16 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
 
                 // GH #68: frame-time budget sampling (host frame cadence). Emits a
                 // parseable summary the simulator harness reads; budget = 90 Hz.
+                //
+                // GH #68 requirement 2: the summary now carries p50/p95 in
+                // addition to mean/max/drops, and the harness *asserts* the
+                // p50/p95 budget (a single level-load hitch must not read as a
+                // sustained 90 Hz regression; ADR-0448/0454). The percentile
+                // maths + wire format live in the pure helper
+                // src/host/frame_time_stats.h (unit-tested).
                 {
                     static auto s_prevFrameTs = std::chrono::steady_clock::now();
+                    static std::vector<double> s_frameTimesMs;
                     static double s_sumFrameMs = 0.0, s_maxFrameMs = 0.0;
                     static uint64_t s_frameSamples = 0, s_overBudget = 0;
                     static const double s_budgetMs = 1000.0 / 90.0; // 11.11 ms @ 90 Hz
@@ -1821,13 +1830,21 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                         if (dtMs > s_maxFrameMs) s_maxFrameMs = dtMs;
                         if (dtMs > s_budgetMs) s_overBudget++;
                         s_frameSamples++;
-                        if (s_frameSamples % 30 == 0) {
-                            std::cout << "[Mock Host] FrameBudget samples=" << s_frameSamples
-                                      << " mean_ms=" << std::fixed << std::setprecision(2)
-                                      << (s_sumFrameMs / s_frameSamples)
-                                      << " max_ms=" << s_maxFrameMs
-                                      << " over_budget=" << s_overBudget
-                                      << " budget_ms=" << s_budgetMs << std::endl;
+                        // Percentile window (bounded so an open-ended run cannot
+                        // grow without limit; a real run is ~1e4-1e5 samples).
+                        if (s_frameTimesMs.size() < kMaxFrameTimeSamples) {
+                            s_frameTimesMs.push_back(dtMs);
+                        }
+                        if ((s_frameSamples % 30) == 0) {
+                            FrameTimeStats stats =
+                                SummarizeFrameTimes(s_frameTimesMs, s_budgetMs);
+                            // Cumulative fields keep their previous meaning; the
+                            // percentiles come from the sample window.
+                            stats.samples = s_frameSamples;
+                            stats.meanMs = s_sumFrameMs / static_cast<double>(s_frameSamples);
+                            stats.maxMs = s_maxFrameMs;
+                            stats.overBudget = s_overBudget;
+                            std::cout << FormatFrameBudgetLine(stats) << std::endl;
                         }
                     }
                 }

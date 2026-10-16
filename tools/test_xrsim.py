@@ -278,17 +278,35 @@ def test_comfort_flags_green_glitch(td):
 
 
 # ------------------------------------------------------------------- budget
-def test_parse_budget_accepts_and_rejects(td):
+def test_parse_budget_asserts_p50_p95_not_max(td):
+    # GH #68 req 2: the budget is asserted on p50/p95, so a one-off level-load
+    # hitch (max_ms=763) does not read as a sustained 90 Hz regression.
+    ok, rec = xrsim.parse_budget(
+        "FrameBudget samples=600 mean_ms=6.0 max_ms=763.0 over_budget=12 "
+        "budget_ms=11.11 p50_ms=3.2 p95_ms=4.8", 11.11)
+    assert ok, rec
+    assert rec["p50_ms"] == 3.2 and rec["p95_ms"] == 4.8, rec
+    assert rec["max_ms"] == 763.0 and rec["over_budget"] == 12, rec
+    # p50 above budget fails even if p95 were somehow lower.
     ok, _ = xrsim.parse_budget(
+        "FrameBudget samples=60 mean_ms=14.0 max_ms=20.0 over_budget=40 "
+        "budget_ms=11.11 p50_ms=13.0 p95_ms=10.0", 11.11)
+    assert not ok
+    # p95 above budget fails.
+    ok, _ = xrsim.parse_budget(
+        "FrameBudget samples=60 mean_ms=30.0 max_ms=90.0 over_budget=50 "
+        "budget_ms=11.11 p50_ms=20.0 p95_ms=40.0", 11.11)
+    assert not ok
+
+
+def test_parse_budget_reports_missing_line_and_stale_host(td):
+    ok, rec = xrsim.parse_budget("no budget here", 11.11)
+    assert not ok and rec["check"] == "frame_budget_reported", rec
+    # A legacy line without percentiles is reported, not silently passed.
+    ok, rec = xrsim.parse_budget(
         "FrameBudget samples=60 mean_ms=8.0 max_ms=12.0 over_budget=2 budget_ms=11.11",
         11.11)
-    assert ok
-    ok, _ = xrsim.parse_budget(
-        "FrameBudget samples=60 mean_ms=30.0 max_ms=90.0 over_budget=50 budget_ms=11.11",
-        11.11)
-    assert not ok
-    ok, rec = xrsim.parse_budget("no budget here", 11.11)
-    assert not ok and rec["check"] == "frame_budget_reported"
+    assert not ok and rec["check"] == "frame_budget_reported", rec
 
 
 # ------------------------------------------------------- evaluate / e2e path
@@ -310,7 +328,8 @@ def test_evaluate_passes_on_good_frame(td):
     _save(art / "test_frame_0015.bmp", base)
     _save(art / "right_0015.bmp", _shift_h(base, 3))
     passed, checks = xrsim.evaluate(
-        _args(), art, "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 budget_ms=11.11",
+        _args(), art, "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 "
+                      "budget_ms=11.11 p50_ms=5.0 p95_ms=7.0",
         "")
     assert passed, checks
 
@@ -525,7 +544,8 @@ def test_evaluate_only_reads_persisted_host_log(td):
     _save(art / "test_frame_0015.bmp", base)
     _save(art / "right_0015.bmp", _shift_h(base, 3))
     xrsim.persist_host_log(
-        art, "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 budget_ms=11.11")
+        art, "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 "
+             "budget_ms=11.11 p50_ms=5.0 p95_ms=7.0")
     rep = Path(td) / "report.json"
     with contextlib.redirect_stdout(io.StringIO()):
         rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
@@ -850,7 +870,8 @@ def main() -> int:
              test_interior_dy_on_a_textured_frame_fails,
              test_interior_dy_on_a_low_contrast_frame_is_inconclusive,
              test_comfort_flags_empty_frame, test_comfort_passes_on_content,
-             test_comfort_flags_green_glitch, test_parse_budget_accepts_and_rejects,
+             test_comfort_flags_green_glitch, test_parse_budget_asserts_p50_p95_not_max,
+             test_parse_budget_reports_missing_line_and_stale_host,
              test_evaluate_passes_on_good_frame, test_evaluate_fails_on_black_frames,
              test_evaluate_only_writes_report_and_exit_code,
              test_static_capture_is_flagged,

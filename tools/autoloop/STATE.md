@@ -2,6 +2,70 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 49 — 2026-10-16 21:43 (scheduled loop)
+- **Unit:** GH **#68 requirement 2 (second half)** — make the frame-time budget a
+  *frame-pacing* assertion: report **p50/p95** (plus max + drops) and assert the
+  90 Hz budget on p50/p95 instead of `mean`/`max`. Host + tooling only; **no
+  hook change, no deploy**.
+- **Why this unit:** wake 48's Next named exactly this as the top item that can
+  be *finished* without a deploy (the top hook items — #72 req 1, #67 step 3,
+  #64, #63, #62, #65 — all need a headset deploy this loop must not do, and the
+  sim install's hook is stale at 17:56). It is the last red check on a live run
+  (ADR-0447/0448/0454), and it is host-side ⇒ live-validatable with the freshly
+  built `dist\riddickvr-host.exe` via the allowed sim exception (#68).
+- **Root cause (measured, not inferred):** the host's frame loop is gated on the
+  *game's* uncapped swap rate, so a single level-load stall dominates
+  `max_ms`/`mean_ms`. Live `FrameBudget samples=5400 mean_ms=3.32 max_ms=763.26
+  over_budget=123 budget_ms=11.11` (ADR-0448) — the old
+  `mean <= budget && max <= 1.5*budget` rule fails on that one-off 763 ms hitch
+  (a load artefact, not an 11.11 ms render cost), so `frame_budget` was a
+  permanent red FAIL excluded from every "all green" claim.
+- **Change (host C++ + tools/tests/docs; no hook/asset change):**
+  - `src/host/frame_time_stats.h` (new, pure/dependency-free): `PercentileMs`
+    (nearest-rank → always a real sample), `SummarizeFrameTimes`,
+    `FormatFrameBudgetLine`, `kMaxFrameTimeSamples` (1<<20 safety bound).
+  - `src/host/openxr_manager.cpp`: the 30-frame `FrameBudget` line now ends with
+    `p50_ms=.. p95_ms=..`; `samples/mean_ms/max_ms/over_budget` keep their
+    previous cumulative meaning (p50/p95 come from the bounded sample window).
+  - `tools/xrsim.py`: `FRAME_BUDGET_RE` grows an optional `p50_ms/p95_ms` tail;
+    `parse_budget` asserts `p50 <= budget and p95 <= budget` (arg-governed),
+    still reports `max_ms`/`over_budget` and puts `p50_ms`/`p95_ms` in the
+    record; a line *without* percentiles is a `frame_budget_reported` FAIL
+    ("stale host build"), never silently passed.
+  - `tests/frame_time_tests.cpp` (new CTest `frame_time_percentiles`, x86+x64)
+    pins the percentile definition, "hitch is not a regression", the drop count
+    and the exact wire line; `tools/test_xrsim.py` (+1 → 54) pins pass/fail and
+    the legacy/stale-host path; `tools/verify_reported_fixes.py` (new #68 req 2
+    invariant); `src/host/README.md`, `docs/vr-scenarios.md`,
+    `docs/adr/0455-xrsim-frame-pacing-percentile-budget.md` (new).
+- **Evidence:**
+  - **Live** (allowed exception, `RIDDICKVR_SIM=1`, fresh `dist\riddickvr-host.exe`,
+    scratch deleted): `--reach-gameplay --duration 45 --interval 300`, then
+    `--evaluate-only --downscale 4`:
+    - the run's final host line is
+      `[Mock Host] FrameBudget samples=12900 mean_ms=3.26 max_ms=762.84
+      over_budget=249 budget_ms=11.11 p50_ms=2.38 p95_ms=4.62`;
+    - report `frame_budget` **ok=true** (`p50=2.38 p95=4.62 mean=3.26
+      max=762.84 over=249 budget=11.11`) — the 763 ms hitch is still *reported*
+      and no longer fails; **XRSIM RESULT: PASS** (43 gameplay frames, full-bleed
+      reached, `gameplay_window_has_content` PASS, `capture_metadata_present`
+      PASS, all 43 stereo gates PASS, all `no_vertical_disparity` inconclusive
+      per ADR-0454). Previously this run's only FAIL was `frame_budget`.
+  - Offline: CTest **14/14 x64 + 14/14 x86** (incl. new `frame_time_percentiles`);
+    all 9 `tools/test_*.py` PASS; `xrsim.py --selftest` PASS; `validate_addresses`
+    PASS; `verify_hook_init` PASS; `scenario_tests.py --check` PASS;
+    `verify_reported_fixes.py` PASS. `build-all.ps1` (no `-Deploy`) OK
+    (`dist\riddickvr-host.exe` x64 + `dist\opengl32.dll` x86 rebuilt).
+- **Blocker / honest limit:** `max_ms` is **not** asserted — a one-off stall is
+  reported but does not fail; only a *sustained* regression (p95 > budget) does.
+  This measures the host/game frame loop the simulator drives, not a headset
+  present-time; the real 90 Hz pipeline still needs the headset. #72 req 1 (the
+  BarScan branch signal) is still the top open hook item and needs one
+  interactive deploy (sim hook stale at 17:56).
+- **Next:** #72 req 1 via one interactive deploy (`ViewmodelObserve=1` + the
+  branch fix together — now also carries #67 step 1's modelview capture and
+  #67 step 3's camera-relative re-projection), else the next host-side #68 gap.
+
 ## Wake 48 — 2026-10-16 21:17 (scheduled loop)
 - **Unit:** GH **#72 requirement 3** — resolve the `dy=±4` vertical-disparity
   question (an explicit #72 acceptance criterion) and make the harness report it

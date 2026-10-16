@@ -34,3 +34,11 @@ The Host component is an independent 64-bit (x64) application responsible for al
   `capture_metadata_present` check confirms it, and it is the camera transform
   GH #67 step 3 needs to re-express the engine's first-person viewmodel in
   head/controller space.
+- In mock mode, the host prints a parseable **frame-time summary** every 30
+  frames (`[Mock Host] FrameBudget samples=.. mean_ms=.. max_ms=..
+  over_budget=.. budget_ms=.. p50_ms=.. p95_ms=..`; GH #68 requirement 2). The
+  percentile maths and the wire line live in the pure helper
+  `src/host/frame_time_stats.h` (unit-tested by `tests/frame_time_tests.cpp`),
+  and `tools/xrsim.py` **asserts the budget on p50/p95** while still reporting
+  `max_ms` and the drop count -- so a one-off level-load hitch is visible but
+  does not read as a sustained 90 Hz regression (ADR-0455).
