@@ -163,6 +163,19 @@ def main():
             "GH #69: XRSIM must label each capture with its display branch and "
             "attribute identical eyes per frame")
 
+    # GH #69 requirement 1: the dump window must be gated on the hook-published
+    # display branch so the capture is live 3D gameplay (menu/cinema + interop
+    # warm-up frames have correctly-identical eyes and cannot validate stereo).
+    # The gate is a pure, unit-tested helper and scripted runs opt in.
+    require("ShouldDumpFrame" in (ROOT / "src/host/dump_gate.h").read_text(encoding="utf-8") and
+            "ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode)" in host and
+            "--dump-gameplay-only" in host_main and
+            "build_host_cmd" in xrsim_tool and
+            '"--dump-gameplay-only"' in xrsim_tool and
+            "dump_gate_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+            "GH #69: XRSIM must gate the dump window on gameplay-only frames "
+            "(pure helper + --dump-gameplay-only + unit test)")
+
     # GH #69 requirement 4: the hook truncates riddick_vr.log on every launch
     # (logging.cpp: std::ios::out|std::ios::trunc), so a pre-run byte offset is
     # not a run boundary -- the harness must recover the *current run's* section

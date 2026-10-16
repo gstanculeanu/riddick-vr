@@ -1,4 +1,5 @@
 #include "openxr_manager.h"
+#include "dump_gate.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -1533,6 +1534,9 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
         std::cout << "[Host] Simulating Meta Quest 2 VR Headset (2496x2688 @ 90FPS)\n";
         if (!m_dumpDir.empty()) {
             std::cout << "[Host] Artifact frame dump directory: " << m_dumpDir << " (Interval: " << m_dumpInterval << ")\n";
+            if (m_dumpGameplayOnly) {
+                std::cout << "[Host] Dump gate: gameplay-only (skip cinema/menu frames) [GH #69]\n";
+            }
             CreateDirectoryA(m_dumpDir.c_str(), NULL);
         }
         std::cout << "[Host] ========================================================" << std::endl;
@@ -1553,6 +1557,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
         // to prove the publish path works end-to-end without a headset.
         bool sawHookHaptics = false;
         uint32_t hapticFrames = 0;
+        // GH #69 req 1: count *dumped* frames (not loop frames) so the label
+        // file's header/trunc is written for the first capture even when the
+        // gameplay-only gate skips the early cinema frames.
+        uint32_t dumps = 0;
         auto lastClientSeen = std::chrono::steady_clock::now();
 
         while (m_running) {
@@ -1750,8 +1758,15 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 // GH #68: capture BOTH eyes for the XR-simulator stereo diff.
                 // test_frame_####.bmp stays the LEFT eye (legacy tooling), and
                 // right_####.bmp is the RIGHT eye.
+                //
+                // GH #69 requirement 1: when m_dumpGameplayOnly is set the
+                // window is gated on the hook-published display branch, so the
+                // dump is live 3D gameplay rather than the menu/cinema (and
+                // all-zero interop warm-up) frames whose identical eye pairs
+                // are correct but not a stereo validation.
+                const bool dumpDue = (totalFrames == 1 || totalFrames % m_dumpInterval == 0);
                 if (!m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
-                    (totalFrames == 1 || totalFrames % m_dumpInterval == 0)) {
+                    ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode)) {
                     char leftPath[MAX_PATH];
                     char rightPath[MAX_PATH];
                     sprintf_s(leftPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
@@ -1770,10 +1785,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     // legitimately have no IPD shift).
                     const std::string labelPath = m_dumpDir + "\\display_branch.log";
                     std::ofstream labelFile(labelPath,
-                                            (totalFrames == 1) ? std::ios::trunc
-                                                               : std::ios::app);
+                                            (dumps == 0) ? std::ios::trunc
+                                                         : std::ios::app);
                     if (labelFile) {
-                        if (totalFrames == 1) {
+                        if (dumps == 0) {
                             labelFile << "# frame=NNNN cinema=<0|1> left=<ok|err> right=<ok|err>\n";
                         }
                         labelFile << "frame=" << totalFrames
@@ -1781,6 +1796,7 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                                   << " left=" << (okL ? "ok" : "err")
                                   << " right=" << (okR ? "ok" : "err") << "\n";
                     }
+                    dumps++;
                 }
 
                 ipcHost.SignalFrameConsumed();

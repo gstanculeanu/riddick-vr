@@ -59,6 +59,7 @@ int main(int argc, char* argv[]) {
     std::string scenarioDir = "";
     uint32_t maxFrames = 0;
     uint32_t dumpInterval = 10;
+    bool dumpGameplayOnly = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -76,6 +77,8 @@ int main(int argc, char* argv[]) {
             maxFrames = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--dump-interval" && i + 1 < argc) {
             dumpInterval = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--dump-gameplay-only") {
+            dumpGameplayOnly = true;
         } else if (arg == "--config" && i + 1 < argc) {
             configPath = argv[++i];
         } else if (arg == "--scenario-file" && i + 1 < argc) {
@@ -92,6 +95,7 @@ int main(int argc, char* argv[]) {
                       << "  --mock                  Run in headless simulated VR mock mode (no headset needed)\n"
                       << "  --dump-dir <PATH>       Directory to save test frame screenshots (BMP format)\n"
                       << "  --dump-interval <N>     Save screenshot every N frames (default: 10)\n"
+                      << "  --dump-gameplay-only    Only dump frames the hook reports as 3D gameplay (#69)\n"
                       << "  --max-frames <N>        Exit automatically after N rendered frames\n"
                       << "  --config <PATH>         Read VR settings from this riddick_vr.ini\n"
                       << "  --scenario-file <PATH>  Play a JSON mock-controller scenario\n"
@@ -140,6 +144,7 @@ int main(int argc, char* argv[]) {
 
     if (mockMode) {
         xrManager.SetMockMode(true, dumpDir, maxFrames, dumpInterval);
+        xrManager.SetDumpGameplayOnly(dumpGameplayOnly);
     }
     if (!scenarioPath.empty()) {
         xrManager.SetScenarioFile(scenarioPath);

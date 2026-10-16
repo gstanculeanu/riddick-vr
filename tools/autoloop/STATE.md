@@ -2,6 +2,73 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 41 — 2026-10-16 19:00 (scheduled loop)
+- **Unit:** GH **#69 requirement 1** (the last open item; wake 40's stated Next) —
+  land the **gameplay-only XRSIM dump gate** so the capture window is the branch
+  whose stereo is meaningful, then live-validate it. One unit (host C++ + tool +
+  tests + docs); off by default; no deploy; no game/asset change.
+- Finding 1 (gate works, decisive, measured): before, the mock host dumped on a
+  fixed cadence so a 180-frame scripted run captured **5 cinema + 8 gameplay**
+  frames (the cinema frames, incl. the all-zero interop warm-up, have identical
+  eyes *correctly*). After gating on the hook-published branch: **5 gameplay / 0
+  cinema / 0 unknown of 5**, every frame `dx=-14 dy=0 identical=False`, markers
+  still PASS.
+- Finding 2 (req 1 acceptance **not** met — the residual is re-scoped): the
+  gameplay-only window is a **static startup-splash page**, not live gameplay.
+  `scene_advanced` **FAIL 1/5**, and a `--frames 900 --interval 150` probe is
+  still **1/6 distinct** (all dumps byte-identical). Rendered, the dump is the
+  **legal/attribution text page** (`© 2009 Atari…`); with A taps it advances only
+  to the **ESRB "MATURE 17+" page**. The hook logs
+  `DisplayMode: FULL-BLEED gameplay (3Dfresh=1 menuCursor=0)` for those static 2D
+  pages → `cinemaMode` (the only branch bit) **mislabels them as 3D gameplay**.
+  The built-in loop (which *does* tap Button A every 60 frames) stalls on the
+  same ESRB page, so the stall is **not scenario-specific**. The experimental
+  melee A-tap scenario edit was **reverted** (it did not reach gameplay and the
+  built-in loop proves it is not the cause).
+- Change (host C++ + tools/tests/docs; off by default; no deploy):
+  - `src/host/dump_gate.h` (new): `RiddickVR::ShouldDumpFrame(dumpDue,
+    dumpGameplayOnly, stateRead, cinemaMode)` — legacy when off; when on, capture
+    only a *known* gameplay branch (`stateRead && !cinemaMode`), never an unread
+    state.
+  - `tests/dump_gate_tests.cpp` (new) + CTest `dump_gate_gameplay_only` (built
+    and run on **x86 and x64**): cadence, legacy pass-through, gameplay-only
+    semantics, unknown-branch rejection.
+  - `src/host/openxr_manager.{h,cpp}`: `m_dumpGameplayOnly` + `SetDumpGameplayOnly`;
+    the mock loop calls the gate and the `display_branch.log` header/trunc is now
+    keyed on the first **dumped** frame (`dumps == 0`), so it is written even when
+    the early frames are skipped; a `[Host] Dump gate: gameplay-only` line.
+  - `src/host/main.cpp`: `--dump-gameplay-only` (help text + `SetDumpGameplayOnly`).
+  - `tools/xrsim.py`: extracted `build_host_cmd(...)`; `--dump-branch
+    {gameplay,any}` (default `gameplay`) → scripted runs pass
+    `--dump-gameplay-only`; `--dump-branch any` keeps the legacy cadence.
+  - `tools/test_xrsim.py` (+2 → **27**): default requests the flag and threads the
+    scenario; `any` omits it.
+  - `tools/verify_reported_fixes.py` (extended #69 invariant),
+    `src/host/README.md`, `docs/adr/0447-xrsim-gameplay-only-dump-gate.md` (new).
+- Evidence:
+  - **Live** `python tools/xrsim.py --scenario tools/scenarios/melee.json
+    --timeout 150` (allowed exception; `RIDDICKVR_SIM=1`; scratch artifacts):
+    `gameplay_captures_present` **PASS — 5 gameplay / 0 cinema / 0 unknown of 5**;
+    all 5 `dx=-14 dy=0 identical=False`; `display_branch.log` all `cinema=0`;
+    markers PASS; `scene_advanced` FAIL 1/5; `frame_budget` FAIL (mock cadence).
+  - Probes: `--frames 900 --interval 150` → 6 gameplay/0 cinema, 1/6 distinct; the
+    built-in loop `--frames 600 --interval 60` → 9 gameplay/0 cinema, 3/9 distinct,
+    first 2 dumps all-black (interop warm-up), content = the same splash page.
+  - Offline: `python tools/test_xrsim.py` **27/27 PASS**; `xrsim.py --selftest`
+    PASS; `scenario_tests.py --check` PASS; all 9 `tools/test_*.py` +
+    `validate_addresses` + `verify_hook_init` + `verify_reported_fixes` PASS.
+  - `tools/build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host);
+    CTest **10/10 PASS** x86 **and** x64 (new `dump_gate_gameplay_only`).
+- Blocker: **not** full VR portability — req 1's *mechanism* is landed but its
+  *acceptance* is blocked: the mock run never leaves the startup splash and
+  `cinemaMode` mislabels static 2D splash pages as gameplay. Filed **GH #71**
+  (reach a live, advancing 3D scene + fix the branch signal; related to #43).
+- **Next:** #71 — get a scripted run into live, advancing 3D gameplay (fresh
+  input pacing / longer window / direct level start) and make the branch signal
+  exclude the static splash; then **#67 step 2** (identify the first-person
+  viewmodel pass) on top of a real gameplay capture.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 40 — 2026-10-16 18:40 (scheduled loop)
 - **Unit:** GH **#69** (top vehicle #68's residual requirement 4) — make the
   scenario **interaction markers reproducible** under the mock. Two independent

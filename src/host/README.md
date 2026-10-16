@@ -13,3 +13,10 @@ The Host component is an independent 64-bit (x64) application responsible for al
   branch the hook published for that frame (`cinema` vs `gameplay`) in
   `<dump-dir>\display_branch.log`, so the XRSIM harness (#68/#69) can attribute a
   byte-identical eye pair instead of guessing (ADR-0445).
+- In mock mode, `--dump-gameplay-only` gates the dump window on that branch:
+  frames are captured only once the hook reports 3D gameplay, so a scripted run
+  yields a live-gameplay capture instead of the menu/cinema and all-zero
+  interop warm-up frames whose identical eyes are correct but cannot validate
+  stereo (GH #69 requirement 1, ADR-0447). The gate decision is the pure helper
+  `ShouldDumpFrame` (`src/host/dump_gate.h`), unit-tested by
+  `tests/dump_gate_tests.cpp`. `tools/xrsim.py` opts scripted runs in by default.

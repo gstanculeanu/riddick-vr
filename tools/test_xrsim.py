@@ -164,6 +164,7 @@ def _args(**kw):
         max_frame_ms=1000.0 / 90.0, require_disparity=kw.get("require_disparity", True),
         downscale=kw.get("downscale", 1), artifacts=kw.get("artifacts"),
         report_file=kw.get("report_file"), hook_log=kw.get("hook_log"),
+        dump_branch=kw.get("dump_branch", "gameplay"),
         evaluate_only=True, selftest=False)
 
 
@@ -400,6 +401,23 @@ def test_evaluate_only_reads_persisted_host_log(td):
     assert payload["host_log"], payload
 
 
+# --------------------------------------------- dump gate (GH #69 req 1)
+def test_build_host_cmd_defaults_to_gameplay_only(td):
+    """A scripted run must request the gameplay-only dump gate so the capture
+    window is live 3D gameplay, not the menu/cinema warm-up (#69 req 1)."""
+    scen = Path(td) / "melee.json"
+    scen.write_text("{}", encoding="utf-8")
+    cmd = xrsim.build_host_cmd(_args(scenario=str(scen)), Path(td) / "art")
+    assert "--dump-gameplay-only" in cmd, cmd
+    # The scenario path must still be threaded through.
+    assert "--scenario-file" in cmd and str(scen.resolve()) in cmd, cmd
+
+
+def test_build_host_cmd_any_branch_keeps_legacy_cadence(td):
+    cmd = xrsim.build_host_cmd(_args(dump_branch="any"), Path(td) / "art")
+    assert "--dump-gameplay-only" not in cmd, cmd
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -419,7 +437,9 @@ def main() -> int:
              test_cinema_identical_eyes_are_skipped_not_failed,
              test_gameplay_identical_eyes_still_fail,
              test_gameplay_captures_present_gate,
-             test_evaluate_only_reads_persisted_host_log)
+             test_evaluate_only_reads_persisted_host_log,
+             test_build_host_cmd_defaults_to_gameplay_only,
+             test_build_host_cmd_any_branch_keeps_legacy_cadence)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

@@ -153,4 +153,11 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME native_hand_texture_asset COMMAND riddick_vr_native_hand_texture_tests)
+
+    # GH #69 (requirement 1): XRSIM dump gate -- capture live 3D gameplay only.
+    add_executable(riddick_vr_dump_gate_tests tests/dump_gate_tests.cpp)
+    target_include_directories(riddick_vr_dump_gate_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
+    )
+    add_test(NAME dump_gate_gameplay_only COMMAND riddick_vr_dump_gate_tests)
 endif()

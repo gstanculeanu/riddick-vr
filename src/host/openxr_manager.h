@@ -46,6 +46,9 @@ public:
         m_maxFrames = maxFrames;
         m_dumpInterval = dumpInterval;
     }
+    // GH #69 requirement 1: only dump frames the hook reports as 3D gameplay,
+    // so the XRSIM capture window is live gameplay rather than menu/loading.
+    void SetDumpGameplayOnly(bool enable) { m_dumpGameplayOnly = enable; }
     // GH #48: file-driven scenario trajectories (tools/scenarios/*.json).
     // New scenarios need no rebuild: host interpolates keyframes per frame.
     struct ScenarioKey {
@@ -151,6 +154,8 @@ private:
     std::string m_dumpDir;
     uint32_t m_maxFrames = 0;
     uint32_t m_dumpInterval = 10;
+    // GH #69 requirement 1: capture only live-3D-gameplay frames.
+    bool m_dumpGameplayOnly = false;
     // GH #48 scenario playback.
     std::string m_scenarioPath;
     std::vector<ScenarioKey> m_scenarioKeys;

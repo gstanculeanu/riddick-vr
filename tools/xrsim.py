@@ -15,7 +15,10 @@ headset), captures BOTH eyes, and asserts:
                           section is recovered by its header, not a byte offset),
   * comfort rules        (non-black, no green chroma glitch, full-bleed/HUD).
 
-Sim runs set RIDDICKVR_SIM=1 so the hook never injects desktop input (#68).
+Sim runs set RIDDICKVR_SIM=1 so the hook never injects desktop input (#68), and
+default to a *gameplay-only* dump window (``--dump-gameplay-only``) so the
+captures are live 3D gameplay rather than the menu/cinema frames whose
+identical eye pairs are correct but cannot validate stereo (#69).
 
 Usage:
   python tools/xrsim.py --scenario tools/scenarios/melee.json
@@ -270,6 +273,25 @@ def parse_budget(host_log: str, budget_ms: float):
 
 
 # ------------------------------------------------------------------ orchestration
+def build_host_cmd(args, artifacts: Path):
+    """Build the mock-host command line for one scripted run.
+
+    GH #69 requirement 1: scripted runs default to ``--dump-gameplay-only`` so
+    the capture window is live 3D gameplay -- the frames that can actually
+    validate stereo -- instead of the menu/cinema and all-zero interop warm-up
+    frames (where identical eyes are correct). Pass ``--dump-branch any`` to
+    keep the legacy capture-everything cadence.
+    """
+    cmd = [str(HOST_EXE), "--mock", "--auto-exit-with-game",
+           "--dump-dir", str(artifacts), "--dump-interval", str(args.interval),
+           "--max-frames", str(args.frames)]
+    if getattr(args, "dump_branch", "gameplay") == "gameplay":
+        cmd.append("--dump-gameplay-only")
+    if args.scenario:
+        cmd += ["--scenario-file", str(Path(args.scenario).resolve())]
+    return cmd
+
+
 def run_sim(args, artifacts: Path):
     artifacts.mkdir(parents=True, exist_ok=True)
     for f in (list(artifacts.glob("*.bmp")) + list(artifacts.glob("*.png")) +
@@ -280,11 +302,7 @@ def run_sim(args, artifacts: Path):
             pass
     log_mark = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
 
-    host_cmd = [str(HOST_EXE), "--mock", "--auto-exit-with-game",
-                "--dump-dir", str(artifacts), "--dump-interval", str(args.interval),
-                "--max-frames", str(args.frames)]
-    if args.scenario:
-        host_cmd += ["--scenario-file", str(Path(args.scenario).resolve())]
+    host_cmd = build_host_cmd(args, artifacts)
 
     env = dict(os.environ, RIDDICKVR_SIM="1")  # GH #68: no desktop input
     print(f"[xrsim] host: {' '.join(host_cmd)}")
@@ -512,6 +530,9 @@ def main(argv=None):
                     action="store_false")
     ap.add_argument("--downscale", type=int, default=1,
                     help="block-subsample eye images by this factor (speed)")
+    ap.add_argument("--dump-branch", choices=("gameplay", "any"), default="gameplay",
+                    help="which display branch to capture: live gameplay only "
+                         "(default) or any frame (GH #69)")
     ap.add_argument("--artifacts", help="capture directory (default tests/xrsim/artifacts)")
     ap.add_argument("--report-file", help="report path (default tests/xrsim/report.json)")
     ap.add_argument("--hook-log", help="hook log to scan for markers (default: game log)")
