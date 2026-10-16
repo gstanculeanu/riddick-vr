@@ -188,6 +188,23 @@ def main():
             "GH #69: XRSIM must read the current-run hook-log section (the hook "
             "truncates its log per launch), not slice by a stale byte offset")
 
+    # GH #71 requirement 1: the mock host follows the *game's* uncapped swap rate,
+    # so a frame-counted window cannot express the wall-clock the startup sequence
+    # needs. Reaching live gameplay must run with an unlimited frame count bounded
+    # by wall-clock, and must prove a full-bleed 3D scene was reached from the
+    # hook's structural BarScan active-rect signal -- not the `cinemaMode` bit,
+    # which mislabels the static 2D splash pages as gameplay (GH #72).
+    require("--reach-gameplay" in xrsim_tool and
+            "GAMEPLAY_DEFAULT_DURATION" in xrsim_tool and
+            "active_rect_fill" in xrsim_tool and
+            "BARSCAN_WINDOW_RE" in xrsim_tool and
+            "gameplay_full_bleed_reached" in xrsim_tool and
+            "0 if getattr(args, \"reach_gameplay\", False) else args.frames" in xrsim_tool and
+            "gameplay_capture_stats" in xrsim_tool and
+            "live_gameplay" in xrsim_tool,
+            "GH #71: XRSIM must reach live gameplay with an unlimited, wall-clock "
+            "bounded run and assert the full-bleed BarScan signal")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

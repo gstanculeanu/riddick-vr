@@ -2,6 +2,66 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 42 — 2026-10-16 19:25 (scheduled loop)
+- **Unit:** GH **#71 requirement 1** (the top "Next" from wake 41) — make a
+  scripted XRSIM run actually reach live, advancing 3D gameplay, and prove it.
+  Tools/docs + tests only; **no C++/asset change, no build, no deploy**.
+- **Decisive finding (corrects ADR-0447 and the #71 premise): the mock run never
+  "stalled" — the window was too short.** The mock host's loop is gated on the
+  game's frame-ready signal, so it advances at the **game's uncapped swap rate**;
+  the trivial startup splash renders at **~250-300 FPS** (`OnSwapBuffers: Frame
+  1283 (256.4 FPS)`, host `mean_ms≈3.2-3.3`). So a 180-frame run is ≈**0.6 s** and
+  wake 41's 900-frame probe ≈3 s of game time — far short of the splash + level
+  load. At **5400 frames (≈16 s)** the run reaches live 3D gameplay.
+- Change (tools/docs/tests; no game/asset change):
+  - `tools/xrsim.py`: **`--reach-gameplay`** runs the host with an **unlimited**
+    frame count (`--max-frames 0`) bounded by wall-clock **`--duration`** (default
+    60 s; `--interval` defaults to 300 for a startup-length run), because a frame
+    budget cannot express wall-clock startup time. New `active_rect_fill()` (parse
+    the hook's `BarScan` active-rect from the current-run log) drives the graded
+    **`gameplay_full_bleed_reached`** check (need fill ≥ 0.9): the splash is
+    letterboxed (~0.36), gameplay fills the window (1.00). New
+    `gameplay_capture_stats()` + a `live_gameplay` report key
+    (gameplay/cinema/unknown/**blank**/distinct) so the graded window's content is
+    visible. Deliberately **not** the `cinemaMode` bit (which mislabels the splash).
+  - `tools/test_xrsim.py` (+4 → **32**): unlimited reach command; `BarScan` fill
+    parsing (0.36 splash / 1.00 gameplay / None); gameplay/blank/distinct stats;
+    the opt-in full-bleed gate + report key.
+  - `tools/verify_reported_fixes.py` (new GH #71 invariant);
+    `docs/adr/0448-xrsim-reach-gameplay-window.md` (new); `docs/vr-scenarios.md`
+    caveat; `tests/xrsim/report.json` (regenerated `--evaluate-only --downscale 4`;
+    +1 key only).
+- Evidence (LIVE, `RIDDICKVR_SIM=1`, scratch artifacts, deleted after):
+  - `python tools/xrsim.py --frames 5400 --interval 300 --dump-branch any`:
+    `scene_advanced` **PASS 15/19 distinct**; `gameplay_captures_present` PASS 18
+    gameplay/1 cinema; all gameplay frames non-black with `dx=-31..-23`,
+    `not_mono_duplicate` PASS. Rendered: legal page → ESRB page → a dark interior
+    with the **native VR hand** bottom-left + HUD top-left. Hook `BarScan`: splash
+    `(0,304)-(648,605)`/`(336,80)-(944,477)` of `(1280,605)` ≈0.36, later
+    `snap to (0,0)-(1280,605)` = 1.00.
+  - `python tools/xrsim.py --reach-gameplay --duration 40 --interval 300`:
+    `gameplay_full_bleed_reached` **PASS (max fill=1.00)**; `scene_advanced`
+    **PASS 35/38**; `gameplay_captures_present` PASS 38/0/0; `live_gameplay`
+    `{gameplay 38, blank 0, distinct 35}`. Only FAIL = `frame_budget`
+    (mock-cadence artefact).
+  - Offline: `test_xrsim.py` **32/32**; `xrsim.py --selftest` PASS;
+    `verify_reported_fixes` PASS; all 8 `tools/test_*.py` + `validate_addresses` +
+    `verify_hook_init` + `scenario_tests.py --check` PASS. No C++/asset changed →
+    no `build-all.ps1`/CTest (documented).
+- Blocker: **not full VR portability.** #71 requirement 1 is now met *structurally*
+  (full-bleed scene reached) but the `cinemaMode` bit still mislabels the static 2D
+  splash as gameplay (req 2) and blank warm-up frames are reported, not skipped
+  (req 3). Filed **GH #72** with the decoded evidence (BarScan fill 0.36 vs 1.00).
+  New recorded risk: live gameplay frames register **`dy=±4`** in the stereo diff on
+  very dark scenes (mean luma ≈2.5-13) — likely a low-contrast registration
+  artifact, **not claimed** as a stereo defect until reproduced on a brighter frame
+  (#72).
+- **Next:** #72 — fix the branch signal (use the BarScan active-rect fill; mind
+  #44) + the cold-start content gate; then **#67 step 2** (identify the
+  first-person viewmodel pass) on top of a real gameplay capture; defer scenario
+  playback until gameplay is reached (#71) so scripted interaction runs at ~90 Hz.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 41 — 2026-10-16 19:00 (scheduled loop)
 - **Unit:** GH **#69 requirement 1** (the last open item; wake 40's stated Next) —
   land the **gameplay-only XRSIM dump gate** so the capture window is the branch

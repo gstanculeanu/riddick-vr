@@ -22,6 +22,8 @@ identical eye pairs are correct but cannot validate stereo (#69).
 
 Usage:
   python tools/xrsim.py --scenario tools/scenarios/melee.json
+  python tools/xrsim.py --reach-gameplay --duration 45   # run long enough to
+                                              # reach live 3D gameplay (GH #71)
   python tools/xrsim.py --evaluate-only       # re-analyse captures on disk,
                                               # no game/host launch (CI-safe)
   python tools/xrsim.py --selftest            # logic check, no game (CI)
@@ -29,6 +31,15 @@ Usage:
 The ``--evaluate-only`` path is what makes the harness usable *without a
 headset*: a previous run's ``test_frame_*.bmp`` / ``right_*.bmp`` pairs are
 re-checked and written to ``tests/xrsim/report.json`` for diffing.
+
+``--reach-gameplay`` (GH #71 requirement 1) runs with an unlimited frame count
+bounded by wall-clock ``--duration``, because the mock host follows the *game's*
+uncapped swap rate (~250-300 FPS on the trivial startup splash): a 180-frame
+window is ~0.6 s and never gets past the splash. With a ~15 s window the title
+reaches live 3D gameplay. That mode also asserts ``gameplay_full_bleed_reached``
+from the hook's ``BarScan`` active-rect fill (the splash is letterboxed; gameplay
+fills the window) -- a structural proof, since the ``cinemaMode`` bit mislabels
+the static splash pages as gameplay (GH #72).
 """
 
 from __future__ import annotations
@@ -57,6 +68,25 @@ DEFAULT_REPORT = REPO_ROOT / "tests" / "xrsim" / "report.json"
 FRAME_BUDGET_RE = re.compile(
     r"FrameBudget samples=(\d+) mean_ms=([\d.]+) max_ms=([\d.]+) "
     r"over_budget=(\d+) budget_ms=([\d.]+)")
+
+# GH #71 requirement 1: the mock host tracks the *game's* uncapped swap rate
+# (~250-300 FPS on the trivial startup splash), so a frame-counted window is only
+# a fraction of the wall-clock the title needs to finish its multi-page splash +
+# level load. A 180-frame run is ~0.6 s; reaching live 3D gameplay needs ~15 s of
+# wall clock. `--reach-gameplay` therefore runs with an *unlimited* frame count
+# (`--max-frames 0`) and is bounded by wall-clock `--duration` instead.
+GAMEPLAY_DEFAULT_DURATION = 60.0
+GAMEPLAY_DEFAULT_INTERVAL = 300   # a startup-length run must not fill the disk
+DEFAULT_DUMP_INTERVAL = 15
+
+# GH #71 requirement 2 evidence: the hook's `BarScan` logs the game's active
+# render rect. The startup splash is letterboxed to ~(336,80)-(944,477) of a
+# 1280x605 window (~36% of the area); live gameplay is the full window. That
+# *structural* signal -- unlike the (mislabelled) `cinemaMode` branch bit -- is
+# what proves a full-bleed 3D scene was actually reached.
+BARSCAN_RECT_RE = re.compile(r"\((-?\d+),\s*(-?\d+)\)\s*-\s*\((-?\d+),\s*(-?\d+)\)")
+BARSCAN_WINDOW_RE = re.compile(r"of \((\d+),\s*(\d+)\) win")
+FULL_BLEED_MIN_FILL = 0.9
 
 # GH #69: the mock host writes one label line per dumped capture, recording the
 # display branch the hook published for that frame (cinema screen vs 3D
@@ -239,6 +269,73 @@ def capture_health_checks(lefts):
     return checks
 
 
+def gameplay_capture_stats(artifacts, labels, min_mean=1.0, sig_cache=None):
+    """Summarise the gameplay-labelled captures of a run (GH #71 req 1/3).
+
+    Returns the count of gameplay-labelled frames, how many were blank
+    (GL<->D3D11 interop warm-up: an all-black eye buffer is not "live"), how many
+    cinema/unknown frames there were, and how many *distinct* non-blank gameplay
+    frames (16x16 luma signature) the run produced.
+
+    ``sig_cache`` (a ``{path: signature}`` dict) lets the caller reuse decoded
+    signatures across calls -- each eye BMP is multi-megabyte, so re-decoding
+    them on every poll would dominate the run.
+    """
+    artifacts = Path(artifacts)
+    total = cinema = unknown = blank = 0
+    sigs = set()
+    for lp in sorted(artifacts.glob("test_frame_*.bmp")):
+        n = int(lp.stem.split("_")[2])
+        branch = labels.get(n)
+        if branch is True:
+            cinema += 1
+            continue
+        if branch is None:
+            unknown += 1
+            continue
+        total += 1
+        key = str(lp)
+        if sig_cache is not None and key in sig_cache:
+            sig = sig_cache[key]
+        else:
+            try:
+                arr = np.asarray(Image.open(lp).convert("L"), dtype=np.float32)
+            except Exception:
+                continue
+            sig = (b"" if float(arr.mean()) <= min_mean else
+                   Image.fromarray(arr.astype(np.uint8)).resize((16, 16)).tobytes())
+            if sig_cache is not None:
+                sig_cache[key] = sig
+        if sig:
+            sigs.add(sig)
+        else:
+            blank += 1
+    return {"gameplay": total, "cinema": cinema, "unknown": unknown,
+            "blank_gameplay": blank, "distinct_gameplay": len(sigs)}
+
+
+def active_rect_fill(log_text):
+    """Largest active-render-rect fill ratio the hook's BarScan recorded.
+
+    ``1.0`` = the game filled the whole window (full-bleed 3D gameplay); the
+    startup splash is ~0.36. Returns ``None`` when the log carries no BarScan
+    window/rect (a pre-BarScan host or an unrelated log).
+    """
+    win = BARSCAN_WINDOW_RE.search(log_text or "")
+    if not win:
+        return None
+    w, h = int(win.group(1)), int(win.group(2))
+    if w <= 0 or h <= 0:
+        return None
+    best = 0.0
+    for m in BARSCAN_RECT_RE.finditer(log_text):
+        x0, y0, x1, y1 = (int(g) for g in m.groups())
+        area = max(0, x1 - x0) * max(0, y1 - y0)
+        if area / float(w * h) > best:
+            best = area / float(w * h)
+    return best if best > 0.0 else None
+
+
 # ------------------------------------------------------------------ comfort
 def comfort_checks(left_path: Path):
     arr = np.array(Image.open(left_path).convert("RGB"))
@@ -284,7 +381,7 @@ def build_host_cmd(args, artifacts: Path):
     """
     cmd = [str(HOST_EXE), "--mock", "--auto-exit-with-game",
            "--dump-dir", str(artifacts), "--dump-interval", str(args.interval),
-           "--max-frames", str(args.frames)]
+           "--max-frames", str(0 if getattr(args, "reach_gameplay", False) else args.frames)]
     if getattr(args, "dump_branch", "gameplay") == "gameplay":
         cmd.append("--dump-gameplay-only")
     if args.scenario:
@@ -312,13 +409,20 @@ def run_sim(args, artifacts: Path):
     print(f"[xrsim] game: {GAME_EXE}")
     game = subprocess.Popen([str(GAME_EXE)], cwd=str(GAME_DIR), env=env)
 
+    duration = getattr(args, "duration", None)
     host_log = []
     start = time.time()
     while True:
         if host.poll() is not None or game.poll() is not None:
             break
-        if time.time() - start > args.timeout:
+        elapsed = time.time() - start
+        if elapsed > args.timeout:
             print("[xrsim] timeout")
+            break
+        # GH #71: an unlimited-frame run is bounded by wall-clock, not by a frame
+        # count (the mock follows the game's uncapped swap rate).
+        if duration and elapsed > duration:
+            print(f"[xrsim] reached --duration {duration:.0f}s")
             break
         line = host.stdout.readline()
         if line:
@@ -420,6 +524,21 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
                            "ok": True, "skip": True,
                            "detail": (f"no {DISPLAY_LABEL_FILE}: per-frame display "
                                       "branch unknown (legacy capture or pre-label host)")})
+    # GH #71 requirement 1: a `--reach-gameplay` run asserts it actually reached a
+    # full-bleed 3D scene. The *structural* proof is the hook's BarScan active
+    # rect (the letterboxed startup splash is ~0.36 of the window; gameplay fills
+    # it), deliberately NOT the cinemaMode branch bit -- that bit mislabels the
+    # static 2D splash pages as gameplay (GH #72).
+    if getattr(args, "reach_gameplay", False):
+        fill = active_rect_fill(fresh_log)
+        if fill is None:
+            detail = "no BarScan active-rect line in the hook log"
+        else:
+            detail = (f"max BarScan active-rect fill={fill:.2f} "
+                      f"(need >= {FULL_BLEED_MIN_FILL})")
+        checks.append({"group": "capture", "check": "gameplay_full_bleed_reached",
+                       "ok": fill is not None and fill >= FULL_BLEED_MIN_FILL,
+                       "detail": detail})
     # 3. interaction markers
     req = []
     if args.scenario and Path(args.scenario).is_file():
@@ -513,6 +632,7 @@ def cmd_evaluate_only(args):
                         "hook_log_scope": "current-run section" if RUN_HEADER in fresh
                                           else "whole file",
                         "markers": marker_summary(checks),
+                        "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -523,7 +643,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scenario")
     ap.add_argument("--frames", type=int, default=180)
-    ap.add_argument("--interval", type=int, default=15)
+    ap.add_argument("--interval", type=int, default=None,
+                    help="dump every N frames (default 15; 300 with --reach-gameplay)")
     ap.add_argument("--timeout", type=int, default=90)
     ap.add_argument("--max-frame-ms", type=float, default=1000.0 / 90.0)
     ap.add_argument("--no-require-disparity", dest="require_disparity",
@@ -533,6 +654,14 @@ def main(argv=None):
     ap.add_argument("--dump-branch", choices=("gameplay", "any"), default="gameplay",
                     help="which display branch to capture: live gameplay only "
                          "(default) or any frame (GH #69)")
+    ap.add_argument("--reach-gameplay", action="store_true",
+                    help="drive the run to live gameplay: unlimited frames bounded by "
+                         "--duration (the mock follows the game's uncapped swap rate, so "
+                         "a frame budget cannot express the wall-clock startup time) and "
+                         "assert a full-bleed 3D scene was reached (GH #71)")
+    ap.add_argument("--duration", type=float, default=None,
+                    help=f"wall-clock run cap in seconds (default {GAMEPLAY_DEFAULT_DURATION:.0f} "
+                         "with --reach-gameplay)")
     ap.add_argument("--artifacts", help="capture directory (default tests/xrsim/artifacts)")
     ap.add_argument("--report-file", help="report path (default tests/xrsim/report.json)")
     ap.add_argument("--hook-log", help="hook log to scan for markers (default: game log)")
@@ -540,6 +669,14 @@ def main(argv=None):
                     help="re-analyse existing captures; do not launch host/game")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
+
+    if args.interval is None:
+        args.interval = (GAMEPLAY_DEFAULT_INTERVAL if args.reach_gameplay
+                         else DEFAULT_DUMP_INTERVAL)
+    if args.reach_gameplay:
+        if args.duration is None:
+            args.duration = GAMEPLAY_DEFAULT_DURATION
+        args.timeout = max(args.timeout, int(args.duration) + 20)
 
     if args.selftest:
         return cmd_selftest()
@@ -563,6 +700,7 @@ def main(argv=None):
                         "hook_log_scope": "current-run section" if RUN_HEADER in fresh
                                           else "whole file",
                         "markers": marker_summary(checks),
+                        "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

@@ -591,6 +591,13 @@
   "hook_log": "F:\\The Chronicles of Riddick - Assault on Dark Athena\\System\\Win32_x86\\riddick_vr.log",
   "hook_log_scope": "current-run section",
   "markers": {},
+  "live_gameplay": {
+    "gameplay": 0,
+    "cinema": 0,
+    "unknown": 13,
+    "blank_gameplay": 0,
+    "distinct_gameplay": 0
+  },
   "host_log": null,
   "display_branch": {}
 }

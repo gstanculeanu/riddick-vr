@@ -73,6 +73,18 @@ empty, silently dropping markers). The XRSIM harness now recovers the
 `scenario_tests.py --validate` and `semi_play.py` the same extraction is a
 tracked follow-up.
 
+**Caveat (GH #71, ADR-0448):** the mock host follows the *game's* uncapped swap
+rate (~250-300 FPS on the startup splash), so a frame-counted run is only a
+fraction of the wall-clock the title needs to finish its multi-page splash and
+load a level — a 180-frame run is ≈0.6 s and never leaves the splash. Use
+`python tools/xrsim.py --reach-gameplay --duration 45` to drive a run into live
+3D gameplay; it asserts a full-bleed scene was reached from the hook's `BarScan`
+active-rect fill (the splash is letterboxed to ≈0.36 of the window). Because the
+frame-indexed scenario keyframes then play far faster than 90 Hz, deferring
+scenario playback until gameplay is reached is follow-up work (#71/#72), and the
+`cinemaMode` branch bit still mislabels the static 2D splash pages as gameplay
+(#72).
+
 ## Current coverage and limits
 
 The scripted profiles provide deterministic controller poses and velocities,

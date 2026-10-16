@@ -12,6 +12,7 @@ Exit code 0 = pass, 1 = fail. If numpy/Pillow are unavailable the suite SKIPS
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -19,6 +20,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -165,6 +167,7 @@ def _args(**kw):
         downscale=kw.get("downscale", 1), artifacts=kw.get("artifacts"),
         report_file=kw.get("report_file"), hook_log=kw.get("hook_log"),
         dump_branch=kw.get("dump_branch", "gameplay"),
+        reach_gameplay=kw.get("reach_gameplay", False), duration=kw.get("duration"),
         evaluate_only=True, selftest=False)
 
 
@@ -418,6 +421,79 @@ def test_build_host_cmd_any_branch_keeps_legacy_cadence(td):
     assert "--dump-gameplay-only" not in cmd, cmd
 
 
+# ------------------------------------------- reach gameplay (GH #71 req 1)
+def test_build_host_cmd_reach_gameplay_is_unlimited(td):
+    """A `--reach-gameplay` run must not stop at a frame budget (the mock follows
+    the game's uncapped swap rate, so frames are not wall clock)."""
+    a = argparse.Namespace(frames=180, interval=300, dump_branch="gameplay",
+                           scenario=None, reach_gameplay=True)
+    cmd = xrsim.build_host_cmd(a, Path(td) / "art")
+    i = cmd.index("--max-frames")
+    assert cmd[i + 1] == "0", cmd
+
+
+def test_active_rect_fill_reads_barsan(td):
+    splash = ("[INFO] BarScan: first active rect (336,80)-(944,477) of (1280,605) win\n")
+    fill = xrsim.active_rect_fill(splash)
+    assert fill is not None and 0.30 < fill < 0.40, fill
+    gameplay = splash + "[INFO] BarScan: snap to (0,0)-(1280,605)\n"
+    assert xrsim.active_rect_fill(gameplay) == 1.0, xrsim.active_rect_fill(gameplay)
+    # No BarScan window -> unknown, never fabricated.
+    assert xrsim.active_rect_fill("[INFO] DisplayMode: FULL-BLEED") is None
+    assert xrsim.active_rect_fill("") is None
+
+
+def test_gameplay_capture_stats_excludes_blank_and_cinema(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0015.bmp", _black())              # gameplay, blank
+    _save(art / "test_frame_0030.bmp", _content(seed=1))      # gameplay, content
+    _save(art / "test_frame_0045.bmp", _content(seed=2))      # gameplay, distinct
+    _save(art / "test_frame_0060.bmp", _content(seed=1))      # gameplay, duplicate
+    _save(art / "test_frame_0075.bmp", _content(seed=3))      # cinema
+    _write_labels(art, {15: False, 30: False, 45: False, 60: False, 75: True})
+    stats = xrsim.gameplay_capture_stats(art, xrsim.read_display_branch_labels(art))
+    assert stats["gameplay"] == 4, stats
+    assert stats["blank_gameplay"] == 1, stats
+    assert stats["cinema"] == 1, stats
+    assert stats["distinct_gameplay"] == 2, stats
+
+
+def test_reach_gameplay_check_uses_full_bleed_signal(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0030.bmp", _content(seed=1))
+    _save(art / "right_0030.bmp", _shift_h(_content(seed=1), 3))
+    _write_labels(art, {30: False})
+    splash_log = "[INFO] BarScan: first active rect (336,80)-(944,477) of (1280,605) win\n"
+    _, checks = xrsim.evaluate(_args(reach_gameplay=True), art, "", splash_log)
+    rec = [c for c in checks if c["check"] == "gameplay_full_bleed_reached"][0]
+    assert rec["ok"] is False, rec
+    live_log = splash_log + "[INFO] BarScan: snap to (0,0)-(1280,605)\n"
+    _, checks = xrsim.evaluate(_args(reach_gameplay=True), art, "", live_log)
+    rec = [c for c in checks if c["check"] == "gameplay_full_bleed_reached"][0]
+    assert rec["ok"] is True, rec
+    # The check is opt-in: a plain run does not assert it.
+    _, checks = xrsim.evaluate(_args(), art, "", splash_log)
+    assert not [c for c in checks if c["check"] == "gameplay_full_bleed_reached"]
+
+
+def test_reach_gameplay_report_records_live_gameplay_stats(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0030.bmp", _content(seed=1))
+    _save(art / "right_0030.bmp", _shift_h(_content(seed=1), 3))
+    _write_labels(art, {30: False})
+    rep = Path(td) / "report.json"
+    log = Path(td) / "riddick_vr.log"
+    log.write_text(_run_log("x") + "[INFO] BarScan: snap to (0,0)-(1280,605)\n"
+                   "[INFO] BarScan: first active rect (0,0)-(1280,605) of (1280,605) win\n",
+                   encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                         "--report-file", str(rep), "--hook-log", str(log)])
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    assert payload["live_gameplay"]["distinct_gameplay"] == 1, payload["live_gameplay"]
+    assert rc == 0, payload
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -439,7 +515,12 @@ def main() -> int:
              test_gameplay_captures_present_gate,
              test_evaluate_only_reads_persisted_host_log,
              test_build_host_cmd_defaults_to_gameplay_only,
-             test_build_host_cmd_any_branch_keeps_legacy_cadence)
+             test_build_host_cmd_any_branch_keeps_legacy_cadence,
+             test_build_host_cmd_reach_gameplay_is_unlimited,
+             test_active_rect_fill_reads_barsan,
+             test_gameplay_capture_stats_excludes_blank_and_cinema,
+             test_reach_gameplay_check_uses_full_bleed_signal,
+             test_reach_gameplay_report_records_live_gameplay_stats)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)
