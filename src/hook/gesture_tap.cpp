@@ -24,33 +24,39 @@ void SetGestureGameHwnd(HWND hwnd) {
 }
 
 static void SendKey(WORD vk, bool isDown) {
-    if (SimModeNoInput()) return; // GH #68: no input injection in simulator mode
-    // GH #33: foreground guard (mirrors camera_hook IsGameForeground).
-    // Fail-open while the game HWND is unknown (tests); SetGestureGameHwnd
-    // should be wired to the latched game window when available.
-    if (s_gestureHwnd && IsWindow(s_gestureHwnd) && GetForegroundWindow() != s_gestureHwnd) return;
+    // GH #68: in simulator mode never inject OS-GLOBAL input (SendInput /
+    // keybd_event) -- but STILL post the targeted window message to the game so
+    // the harness can advance menus without hijacking the user's desktop.
+    const bool sim = SimModeNoInput();
     UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
 
-    // 1. DirectInput 8 Scan Code hardware event
-    INPUT inScancode = {};
-    inScancode.type = INPUT_KEYBOARD;
-    inScancode.ki.wVk = 0;
-    inScancode.ki.wScan = static_cast<WORD>(scan);
-    inScancode.ki.dwFlags = KEYEVENTF_SCANCODE | (isDown ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &inScancode, sizeof(INPUT));
+    if (!sim) {
+        // GH #33: foreground guard (mirrors camera_hook IsGameForeground).
+        // Fail-open while the game HWND is unknown (tests); SetGestureGameHwnd
+        // should be wired to the latched game window when available.
+        if (s_gestureHwnd && IsWindow(s_gestureHwnd) && GetForegroundWindow() != s_gestureHwnd) return;
 
-    // 2. Standard Virtual Key event
-    INPUT inVk = {};
-    inVk.type = INPUT_KEYBOARD;
-    inVk.ki.wVk = vk;
-    inVk.ki.wScan = static_cast<WORD>(scan);
-    inVk.ki.dwFlags = isDown ? 0 : KEYEVENTF_KEYUP;
-    SendInput(1, &inVk, sizeof(INPUT));
+        // 1. DirectInput 8 Scan Code hardware event
+        INPUT inScancode = {};
+        inScancode.type = INPUT_KEYBOARD;
+        inScancode.ki.wVk = 0;
+        inScancode.ki.wScan = static_cast<WORD>(scan);
+        inScancode.ki.dwFlags = KEYEVENTF_SCANCODE | (isDown ? 0 : KEYEVENTF_KEYUP);
+        SendInput(1, &inScancode, sizeof(INPUT));
 
-    // 3. Win32 legacy keybd_event fallback
-    keybd_event(static_cast<BYTE>(vk), static_cast<BYTE>(scan), isDown ? 0 : KEYEVENTF_KEYUP, 0);
+        // 2. Standard Virtual Key event
+        INPUT inVk = {};
+        inVk.type = INPUT_KEYBOARD;
+        inVk.ki.wVk = vk;
+        inVk.ki.wScan = static_cast<WORD>(scan);
+        inVk.ki.dwFlags = isDown ? 0 : KEYEVENTF_KEYUP;
+        SendInput(1, &inVk, sizeof(INPUT));
 
-    // 4. Direct window message posting to game window
+        // 3. Win32 legacy keybd_event fallback
+        keybd_event(static_cast<BYTE>(vk), static_cast<BYTE>(scan), isDown ? 0 : KEYEVENTF_KEYUP, 0);
+    }
+
+    // 4. Direct window message posting to game window (targeted; harness-safe).
     if (s_gestureHwnd && IsWindow(s_gestureHwnd)) {
         LPARAM lParam = (scan << 16) | 1;
         if (!isDown) lParam |= (1 << 30) | (1 << 31);

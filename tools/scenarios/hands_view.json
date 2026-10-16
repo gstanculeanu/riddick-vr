@@ -1,0 +1,9 @@
+{
+  "name": "hands_view",
+  "description": "Both controllers raised in front of the face, idle, so the VR/native hands are framed for inspection.",
+  "markers": [],
+  "keys": [
+    {"frame": 0,  "lx": -0.16, "ly": 1.55, "lz": -0.34, "lgrip": 0.0, "ltrig": 0.0, "lbtn": 0, "rx": 0.16, "ry": 1.55, "rz": -0.34, "rgrip": 0.0, "rtrig": 0.0, "rbtn": 0},
+    {"frame": 120,"lx": -0.16, "ly": 1.55, "lz": -0.34, "lgrip": 0.0, "ltrig": 0.0, "lbtn": 0, "rx": 0.16, "ry": 1.55, "rz": -0.34, "rgrip": 0.0, "rtrig": 0.0, "rbtn": 0}
+  ]
+}
