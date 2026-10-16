@@ -1320,6 +1320,81 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
     }
 }
 
+// GH #72 requirement 2: mean luma at/below this is the all-black GL<->D3D11
+// interop warm-up. Matches the harness's `blank_gameplay` rule (mean <= 1.0).
+static constexpr float kBlankMeanLuma = 1.0f;
+
+// GH #72 requirement 2: classify a candidate capture's content from the
+// left-eye texture. The mean luma separates the all-black interop warm-up
+// (mean ~0) from real content -- computed over *every* pixel so it matches the
+// harness's full-image rule (a sparse grid can miss a small bright element and
+// misjudge a dark-but-real frame as blank). The 16x16 luma signature lets the
+// caller drop byte-identical repeats (a static 2D startup page). Returns false
+// when the texture cannot be sampled -- the caller then treats the frame as
+// Live, so a probe failure never blocks a capture.
+static bool SampleEyeContent(ID3D11Device* device, ID3D11DeviceContext* context,
+                             ID3D11Texture2D* texture,
+                             float* outMeanLuma, uint64_t* outSignature) {
+    if (!device || !context || !texture) return false;
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    if (desc.Width == 0 || desc.Height == 0) return false;
+
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging) {
+        return false;
+    }
+    context->CopyResource(staging, texture);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        staging->Release();
+        return false;
+    }
+
+    // Full-image mean luma (plain (R+G+B)/3 average; the harness's near-black
+    // frames are ~0 under any weighting, so the threshold is unambiguous).
+    const uint8_t* base = static_cast<const uint8_t*>(mapped.pData);
+    uint64_t sum = 0;
+    for (uint32_t y = 0; y < desc.Height; ++y) {
+        const uint8_t* row = base + static_cast<size_t>(y) * mapped.RowPitch;
+        for (uint32_t x = 0; x < desc.Width; ++x) {
+            const uint8_t* px = row + static_cast<size_t>(x) * 4; // BGRA8
+            sum += (static_cast<uint32_t>(px[2]) + px[1] + px[0]) / 3; // R,G,B
+        }
+    }
+    const double count = static_cast<double>(desc.Width) * desc.Height;
+
+    // 16x16 luma signature for the frozen (byte-identical repeat) check.
+    const int kGrid = 16;
+    uint64_t hash = 1469598103934665603ull; // FNV-1a 64-bit offset basis
+    for (int gy = 0; gy < kGrid; ++gy) {
+        const uint32_t y = static_cast<uint32_t>(
+            static_cast<uint64_t>(gy) * desc.Height / kGrid);
+        const uint8_t* row = base + static_cast<size_t>(y) * mapped.RowPitch;
+        for (int gx = 0; gx < kGrid; ++gx) {
+            const uint32_t x = static_cast<uint32_t>(
+                static_cast<uint64_t>(gx) * desc.Width / kGrid);
+            const uint8_t* px = row + static_cast<size_t>(x) * 4;
+            const uint8_t luma = static_cast<uint8_t>(
+                (static_cast<int>(px[2]) + px[1] + px[0]) / 3);
+            hash = (hash ^ luma) * 1099511628211ull; // FNV-1a 64-bit prime
+        }
+    }
+
+    context->Unmap(staging, 0);
+    staging->Release();
+
+    if (outMeanLuma) *outMeanLuma = static_cast<float>(sum / count);
+    if (outSignature) *outSignature = hash;
+    return true;
+}
+
 bool OpenXRManager::SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::string& filename) {
     if (!device || !context || !texture) return false;
 
@@ -1536,6 +1611,7 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             std::cout << "[Host] Artifact frame dump directory: " << m_dumpDir << " (Interval: " << m_dumpInterval << ")\n";
             if (m_dumpGameplayOnly) {
                 std::cout << "[Host] Dump gate: gameplay-only (skip cinema/menu frames) [GH #69]\n";
+                std::cout << "[Host] Dump gate: content (skip blank warm-up / frozen repeats) [GH #72]\n";
             }
             CreateDirectoryA(m_dumpDir.c_str(), NULL);
         }
@@ -1765,8 +1841,30 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 // all-zero interop warm-up) frames whose identical eye pairs
                 // are correct but not a stereo validation.
                 const bool dumpDue = (totalFrames == 1 || totalFrames % m_dumpInterval == 0);
+                // GH #72 requirement 2: classify the candidate frame's content
+                // (blank interop warm-up vs frozen static page vs live) before
+                // the branch gate decides. Only sampled when a dump is actually
+                // due and the gameplay-only branch gate would otherwise pass.
+                RiddickVR::FrameContent content = RiddickVR::FrameContent::Live;
+                uint64_t contentSignature = 0;
+                bool contentSampled = false;
+                if (dumpDue && m_dumpGameplayOnly && stateRead && !cinemaMode &&
+                    !m_dumpDir.empty() && m_sharedLeftTex) {
+                    float meanLuma = 0.0f;
+                    uint64_t sig = 0;
+                    if (SampleEyeContent(m_d3d11Device, m_d3d11Context, m_sharedLeftTex,
+                                         &meanLuma, &sig)) {
+                        contentSampled = true;
+                        contentSignature = sig;
+                        if (meanLuma <= kBlankMeanLuma) {
+                            content = RiddickVR::FrameContent::Blank;
+                        } else if (m_hasLastDumpSignature && sig == m_lastDumpSignature) {
+                            content = RiddickVR::FrameContent::Frozen;
+                        }
+                    }
+                }
                 if (!m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
-                    ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode)) {
+                    ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content)) {
                     char leftPath[MAX_PATH];
                     char rightPath[MAX_PATH];
                     sprintf_s(leftPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
@@ -1797,6 +1895,21 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                                   << " right=" << (okR ? "ok" : "err") << "\n";
                     }
                     dumps++;
+                    // GH #72 requirement 2: remember this dump's signature so a
+                    // byte-identical repeat (a frozen 2D page) is skipped.
+                    if (contentSampled) {
+                        m_lastDumpSignature = contentSignature;
+                        m_hasLastDumpSignature = true;
+                    }
+                } else if (dumpDue && m_dumpGameplayOnly && stateRead && !cinemaMode &&
+                           content != RiddickVR::FrameContent::Live) {
+                    // GH #72 requirement 2: the branch says gameplay but the
+                    // content is not gradable -- report why the frame was kept
+                    // out of the window (the harness parses this line).
+                    std::cout << "[Mock Host] DumpGate skip frame=" << totalFrames
+                              << " reason="
+                              << (content == RiddickVR::FrameContent::Blank ? "blank" : "frozen")
+                              << std::endl;
                 }
 
                 ipcHost.SignalFrameConsumed();

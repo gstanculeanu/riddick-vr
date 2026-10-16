@@ -15,12 +15,27 @@
 // 3D gameplay (``cinemaMode == false``), so the dump window is live gameplay
 // and ``not_mono_duplicate`` / ``horizontal_disparity_present`` are meaningful.
 //
+// GH #72 requirement 2 (content gate): a frame can carry a *gameplay* branch
+// label and still be worthless for grading -- the very first GL<->D3D11 interop
+// frames are all-black, and a static 2D startup page repeats byte-identically
+// across the window. ``ShouldDumpFrame`` therefore also takes the frame's
+// content verdict and keeps only ``Live`` content, so the graded window is
+// actually live, advancing 3D gameplay.
+//
 // Pure and dependency-free so it is unit-testable (tests/dump_gate_tests.cpp).
 
 namespace RiddickVR {
 
+// GH #72 requirement 2: the content verdict for a candidate capture.
+enum class FrameContent {
+    Live,    // advancing, non-blank content: worth grading
+    Blank,   // all-black GL<->D3D11 interop warm-up (mean luma <= ~1)
+    Frozen,  // identical to the previously dumped frame (static 2D page)
+};
+
 inline bool ShouldDumpFrame(bool dumpDue, bool dumpGameplayOnly,
-                            bool stateRead, bool cinemaMode) {
+                            bool stateRead, bool cinemaMode,
+                            FrameContent content = FrameContent::Live) {
     if (!dumpDue) {
         return false;
     }
@@ -30,7 +45,12 @@ inline bool ShouldDumpFrame(bool dumpDue, bool dumpGameplayOnly,
     // Gameplay-only: the branch must be *known* (``stateRead``) and be 3D
     // gameplay. A frame whose state was not read must not be captured as if it
     // were gameplay -- it would carry no trustworthy display-branch label.
-    return stateRead && !cinemaMode;
+    if (!(stateRead && !cinemaMode)) {
+        return false;
+    }
+    // GH #72 requirement 2: blank interop warm-up and frozen repeats are not
+    // live gameplay, so they must not enter the graded window.
+    return content == FrameContent::Live;
 }
 
 }  // namespace RiddickVR

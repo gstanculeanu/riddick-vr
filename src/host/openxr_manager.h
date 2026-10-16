@@ -156,6 +156,12 @@ private:
     uint32_t m_dumpInterval = 10;
     // GH #69 requirement 1: capture only live-3D-gameplay frames.
     bool m_dumpGameplayOnly = false;
+    // GH #72 requirement 2: content gate. The 16x16 luma signature of the last
+    // *dumped* left-eye frame, so a byte-identical repeat (a static 2D startup
+    // page) is skipped instead of graded. Blank (all-zero interop warm-up)
+    // frames are skipped by mean luma before this is consulted.
+    uint64_t m_lastDumpSignature = 0;
+    bool m_hasLastDumpSignature = false;
     // GH #48 scenario playback.
     std::string m_scenarioPath;
     std::vector<ScenarioKey> m_scenarioKeys;

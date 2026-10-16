@@ -476,6 +476,49 @@ def test_reach_gameplay_check_uses_full_bleed_signal(td):
     assert not [c for c in checks if c["check"] == "gameplay_full_bleed_reached"]
 
 
+# ------------------------------------- content gate (GH #72 requirement 2)
+def test_content_gate_stats_parses_skip_lines(td):
+    log = ("[Mock Host] DumpGate skip frame=120 reason=blank\n"
+           "[Mock Host] DumpGate skip frame=180 reason=blank\n"
+           "[Mock Host] DumpGate skip frame=240 reason=frozen\n")
+    s = xrsim.content_gate_stats(log)
+    assert s == {"blank_skipped": 2, "frozen_skipped": 1}, s
+    # A pre-#72 host (no skip lines) reports nothing, never fabricated.
+    assert xrsim.content_gate_stats("") == {"blank_skipped": 0, "frozen_skipped": 0}
+
+
+def test_blank_gameplay_frame_fails_window_content_check(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0015.bmp", _black())            # gameplay, blank
+    _save(art / "right_0015.bmp", _black())
+    _save(art / "test_frame_0030.bmp", _content(seed=1))
+    _save(art / "right_0030.bmp", _shift_h(_content(seed=1), 3))
+    _write_labels(art, {15: False, 30: False})
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "gameplay_window_has_content"][0]
+    assert rec["ok"] is False, rec
+    assert passed is False
+
+    # A clean window (no blank gameplay frame) passes the check.
+    _save(art / "test_frame_0015.bmp", _content(seed=4))
+    _save(art / "right_0015.bmp", _shift_h(_content(seed=4), 3))
+    _, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "gameplay_window_has_content"][0]
+    assert rec["ok"] is True, rec
+
+
+def test_window_content_check_is_gameplay_only(td):
+    """The content check is a gameplay-only assertion; the legacy `any` branch
+    intentionally captures menu/blank frames, so it must not be added there."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0015.bmp", _black())
+    _save(art / "right_0015.bmp", _black())
+    _write_labels(art, {15: False})
+    _, checks = xrsim.evaluate(_args(dump_branch="any"), art, "", "")
+    assert not [c for c in checks if c["check"] == "gameplay_window_has_content"], checks
+
+
+# ------------------------------------------- reach gameplay (GH #71 req 1)
 def test_reach_gameplay_report_records_live_gameplay_stats(td):
     art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
     _save(art / "test_frame_0030.bmp", _content(seed=1))
@@ -520,6 +563,9 @@ def main() -> int:
              test_active_rect_fill_reads_barsan,
              test_gameplay_capture_stats_excludes_blank_and_cinema,
              test_reach_gameplay_check_uses_full_bleed_signal,
+             test_content_gate_stats_parses_skip_lines,
+             test_blank_gameplay_frame_fails_window_content_check,
+             test_window_content_check_is_gameplay_only,
              test_reach_gameplay_report_records_live_gameplay_stats)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

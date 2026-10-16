@@ -40,6 +40,13 @@ reaches live 3D gameplay. That mode also asserts ``gameplay_full_bleed_reached``
 from the hook's ``BarScan`` active-rect fill (the splash is letterboxed; gameplay
 fills the window) -- a structural proof, since the ``cinemaMode`` bit mislabels
 the static splash pages as gameplay (GH #72).
+
+The gameplay-only dump window is *content-gated* (GH #72 requirement 2): even a
+gameplay-labelled frame is kept out while it is all-black (the GL<->D3D11 interop
+warm-up) or byte-identical to the last dumped frame (a frozen static page), so the
+graded window is live, advancing 3D gameplay. The report carries
+``content_gate {blank_skipped, frozen_skipped}`` and, for gameplay-only runs, the
+``gameplay_window_has_content`` check.
 """
 
 from __future__ import annotations
@@ -94,6 +101,12 @@ FULL_BLEED_MIN_FILL = 0.9
 DISPLAY_LABEL_RE = re.compile(
     r"frame=(\d+)\s+cinema=([01])\s+left=(\w+)\s+right=(\w+)")
 DISPLAY_LABEL_FILE = "display_branch.log"
+
+# GH #72 requirement 2: the mock host's content gate logs every gameplay frame
+# it kept out of the graded window (all-black interop warm-up = `blank`; a
+# byte-identical repeat of the last dumped frame = `frozen`). Parsed so the
+# report can show the gate doing its job.
+DUMP_SKIP_RE = re.compile(r"DumpGate skip frame=(\d+) reason=(blank|frozen)")
 
 # GH #69 requirement 4: `Logger::Initialize` (src/hook/logging.cpp) opens
 # riddick_vr.log with `std::ios::out | std::ios::trunc`, so every game launch
@@ -314,6 +327,23 @@ def gameplay_capture_stats(artifacts, labels, min_mean=1.0, sig_cache=None):
             "blank_gameplay": blank, "distinct_gameplay": len(sigs)}
 
 
+def content_gate_stats(host_log):
+    """GH #72 requirement 2: frames the host's content gate kept out of the
+    graded window (``blank`` interop warm-up / ``frozen`` byte-identical
+    repeats). Empty when the host log carries no ``DumpGate skip`` lines (a
+    pre-#72 host, or a run that needed no gating)."""
+    blank = frozen = 0
+    for line in (host_log or "").splitlines():
+        m = DUMP_SKIP_RE.search(line)
+        if not m:
+            continue
+        if m.group(2) == "blank":
+            blank += 1
+        else:
+            frozen += 1
+    return {"blank_skipped": blank, "frozen_skipped": frozen}
+
+
 def active_rect_fill(log_text):
     """Largest active-render-rect fill ratio the hook's BarScan recorded.
 
@@ -519,6 +549,15 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
                            "detail": (f"{branch_counts['gameplay']} gameplay / "
                                       f"{branch_counts['cinema']} cinema / "
                                       f"{branch_counts['unknown']} unknown of {len(lefts)}")})
+            # GH #72 requirement 2: the graded window must not contain blank
+            # (all-black interop warm-up) gameplay frames. The host's content
+            # gate keeps them out; this asserts the window really is live.
+            if getattr(args, "dump_branch", "gameplay") == "gameplay":
+                stats = gameplay_capture_stats(artifacts, labels)
+                checks.append({"group": "capture", "check": "gameplay_window_has_content",
+                               "ok": stats["blank_gameplay"] == 0,
+                               "detail": (f"{stats['blank_gameplay']} blank of "
+                                          f"{stats['gameplay']} gameplay frame(s)")})
         else:
             checks.append({"group": "stereo", "check": "gameplay_captures_present",
                            "ok": True, "skip": True,
@@ -633,6 +672,7 @@ def cmd_evaluate_only(args):
                                           else "whole file",
                         "markers": marker_summary(checks),
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
+                        "content_gate": content_gate_stats(host_text),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -701,6 +741,7 @@ def main(argv=None):
                                           else "whole file",
                         "markers": marker_summary(checks),
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
+                        "content_gate": content_gate_stats(host_log),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

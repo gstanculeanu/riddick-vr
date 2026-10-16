@@ -587,7 +587,7 @@
     }
   ],
   "mode": "evaluate-only",
-  "artifacts": "tests\\xrsim\\artifacts",
+  "artifacts": "C:\\Users\\GigelCastel\\riddick-vr\\tests\\xrsim\\artifacts",
   "hook_log": "F:\\The Chronicles of Riddick - Assault on Dark Athena\\System\\Win32_x86\\riddick_vr.log",
   "hook_log_scope": "current-run section",
   "markers": {},
@@ -597,6 +597,10 @@
     "unknown": 13,
     "blank_gameplay": 0,
     "distinct_gameplay": 0
+  },
+  "content_gate": {
+    "blank_skipped": 0,
+    "frozen_skipped": 0
   },
   "host_log": null,
   "display_branch": {}

@@ -168,7 +168,7 @@ def main():
     # warm-up frames have correctly-identical eyes and cannot validate stereo).
     # The gate is a pure, unit-tested helper and scripted runs opt in.
     require("ShouldDumpFrame" in (ROOT / "src/host/dump_gate.h").read_text(encoding="utf-8") and
-            "ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode)" in host and
+            "ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content)" in host and
             "--dump-gameplay-only" in host_main and
             "build_host_cmd" in xrsim_tool and
             '"--dump-gameplay-only"' in xrsim_tool and
@@ -204,6 +204,27 @@ def main():
             "live_gameplay" in xrsim_tool,
             "GH #71: XRSIM must reach live gameplay with an unlimited, wall-clock "
             "bounded run and assert the full-bleed BarScan signal")
+
+    # GH #72 requirement 2: the gameplay-only dump window must also be
+    # *content-gated* -- a gameplay-labelled frame is skipped while it is
+    # all-black (GL<->D3D11 interop warm-up) or byte-identical to the last
+    # dumped frame (a frozen static 2D page), so the graded window is live,
+    # advancing 3D gameplay. The verdict is a pure FrameContent helper,
+    # unit-tested, and surfaced in the harness report.
+    dump_gate = (ROOT / "src/host/dump_gate.h").read_text(encoding="utf-8")
+    require("FrameContent" in dump_gate and
+            "FrameContent::Live" in dump_gate and
+            "SampleEyeContent" in host and
+            "kBlankMeanLuma" in host and
+            "RiddickVR::FrameContent::Frozen" in host and
+            "DumpGate skip frame=" in host and
+            "ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content)" in host and
+            "FrameContent::Blank" in (ROOT / "tests/dump_gate_tests.cpp").read_text(encoding="utf-8") and
+            "content_gate_stats" in xrsim_tool and
+            '"content_gate"' in xrsim_tool and
+            "gameplay_window_has_content" in xrsim_tool,
+            "GH #72: the XRSIM gameplay window must be content-gated (blank "
+            "interop warm-up / frozen repeats excluded) and report why")
 
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,

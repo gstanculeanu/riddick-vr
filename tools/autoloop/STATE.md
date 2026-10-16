@@ -2,6 +2,59 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 43 — 2026-10-16 19:43 (scheduled loop)
+- **Unit:** GH **#72 requirement 2** (the "cold-start content gate" half of
+  wake 42's stated Next) — keep the all-black GL↔D3D11 interop warm-up **and** a
+  frozen (byte-identical) static page out of the XRSIM **graded** window. Host
+  C++ + pure helper + tools/tests/docs; **no hook change, no deploy, no
+  game/asset change**.
+- **Finding (live, before→after, `--frames 600 --interval 60`):** the old
+  gameplay-only window opened on **2 all-black** frames + 1 near-black frame,
+  producing spurious `both_eyes_non_black` / `interop_produced_content` /
+  `no_vertical_disparity` FAILs; after the content gate the window is 6 live
+  frames, `blank_gameplay` **2 → 0**, and **every** retained frame is
+  `dx=-25 dy=0` PASS. Host log: `DumpGate skip frame=120|180|240 reason=blank`;
+  `content_gate {blank_skipped: 3, frozen_skipped: 0}`. No live frame dropped.
+- **BONUS — requirement 3 resolved (artifact, not defect):** a full
+  `--reach-gameplay --duration 30 --interval 300` run (27 gameplay/0 cinema,
+  `gameplay_window_has_content` PASS 0 blank of 27, `gameplay_full_bleed_reached`
+  PASS fill 1.00) shows the `dy=±4` vertical "disparity" appears **only on very
+  dark frames** (mean luma 2.5–13 → `dy=+3/−4`) and is exactly **0 on every
+  bright frame** (mean 35–107). A real misalignment would be
+  brightness-independent and constant-signed → the stereo-alignment estimator on
+  a flat low-contrast MSE landscape. (Also seen before: gating the all-black frame
+  removed its spurious `dy=-4`.)
+- Change (host C++ + tools/tests/docs; no deploy):
+  - `src/host/dump_gate.h`: `RiddickVR::FrameContent {Live,Blank,Frozen}`;
+    `ShouldDumpFrame(..., content = Live)` keeps only `Live` content in
+    gameplay-only mode (legacy mode unchanged; content gate subordinate to the
+    branch gate).
+  - `src/host/openxr_manager.{h,cpp}`: `SampleEyeContent()` (**full-image** mean
+    luma + 16×16 FNV signature), `kBlankMeanLuma = 1.0` (matches the harness
+    rule), `m_lastDumpSignature`/`m_hasLastDumpSignature`, the gate call, the
+    `DumpGate skip frame=N reason=blank|frozen` log + a banner line.
+  - `tools/xrsim.py`: `content_gate_stats()` + `content_gate` report key; new
+    gameplay-only graded check `gameplay_window_has_content`. `tools/test_xrsim.py`
+    (+3 → **35**). `tests/dump_gate_tests.cpp` (+content cases).
+  - `tools/verify_reported_fixes.py` (new #72 invariant; #69 invariant updated to
+    the new call signature), `src/host/README.md`,
+    `docs/adr/0449-xrsim-graded-window-content-gate.md` (new),
+    `tests/xrsim/report.json` (regenerated `--evaluate-only --downscale 4`; +1 key).
+- Validation: `build-all -Config Release` OK (x86 `opengl32.dll` + x64 host; no
+  deploy); CTest **10/10 PASS x86 AND x64**; all 9 `tools/test_*.py` +
+  `validate_addresses` + `verify_hook_init` + `verify_reported_fixes` +
+  `scenario_tests.py --check` PASS.
+- Blocker: **#72 requirement 1 (the branch signal) is a hook change** — the
+  startup splash is labelled gameplay because a perspective projection is loaded,
+  and the fix (BarScan active-rect fill; mind #44) can only be validated live by
+  **deploying** the 32-bit hook, which this loop must not do. Recorded on #72 with
+  the decoded evidence (splash fill ≈0.31 vs gameplay 1.00) and a design note
+  (cold-start latch vs threshold; #44 baked-bars risk).
+- **Next:** #72 req 1 is a hook change blocked on deploy — hand to an interactive
+  session (A/B knob, default off), else continue **#67 step 2** (identify the
+  first-person viewmodel pass) now that a capture can reach live 3D gameplay.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 42 — 2026-10-16 19:25 (scheduled loop)
 - **Unit:** GH **#71 requirement 1** (the top "Next" from wake 41) — make a
   scripted XRSIM run actually reach live, advancing 3D gameplay, and prove it.
