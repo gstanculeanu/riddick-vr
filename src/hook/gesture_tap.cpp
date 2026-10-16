@@ -23,7 +23,7 @@ void SetGestureGameHwnd(HWND hwnd) {
     s_gestureHwnd = hwnd;
 }
 
-void SendKey(WORD vk, bool isDown) {
+static void SendKey(WORD vk, bool isDown) {
     if (SimModeNoInput()) return; // GH #68: no input injection in simulator mode
     // GH #33: foreground guard (mirrors camera_hook IsGameForeground).
     // Fail-open while the game HWND is unknown (tests); SetGestureGameHwnd

@@ -581,4 +581,14 @@ bool OpenGLProxy::ShouldSuppressDrawCall() {
     return s_viewmodelSuppressor.ShouldSuppressDraw();
 }
 
+// Merge (PR #70): main's dllmain installs glLoadIdentity/glPushMatrix/glPopMatrix/
+// glTranslatef hooks that fed the software GL_MODELVIEW tracker used by the
+// observation-only path. PR #70 replaces that path with viewmodel_drive.h (window
+// opened on the depth-only clear) and does not need the tracker, but the hooks
+// remain. These satisfy the linker; the tracker is intentionally inert here.
+void OpenGLProxy::NoteModelviewLoadIdentity() {}
+void OpenGLProxy::NoteModelviewPush() {}
+void OpenGLProxy::NoteModelviewPop() {}
+void OpenGLProxy::NoteModelviewTranslatef(float, float, float) {}
+
 } // namespace RiddickVR

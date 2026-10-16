@@ -11,8 +11,10 @@ namespace RiddickVR {
 
 // Low-level multi-path key event (DirectInput scancode + VK + legacy +
 // window message). Moved here from camera_hook.cpp so all gesture taps
-// funnel through one choke point.
-void SendKey(WORD vk, bool isDown);
+// funnel through one choke point. SendKey itself is file-local (static) in
+// gesture_tap.cpp -- callers use SendKeyTap/SendGestureTap. (Merge PR #70:
+// camera_hook.cpp defines its own guarded SendKey, so a public SendKey here
+// was an ambiguous overload.)
 void SendKeyTap(WORD vk);
 void SetGestureGameHwnd(HWND hwnd);
 
