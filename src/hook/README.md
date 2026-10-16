@@ -118,13 +118,25 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   window and records, per sampled frame, how many draws fell **inside/outside**
   it and the `GL_MODELVIEW` in effect at the **first in-window draw** (the
   first-person pass loads one viewmodel-relative matrix and draws its submeshes),
-  logged as `ViewmodelProbe [#N]: inside=.. outside=.. sample=..` plus a
-  `ViewmodelProbe matrix: [..]` line every 300 presented frames. It **never**
-  skips a draw (the suppression decision is unchanged and stays last). The
-  transform is the input for re-expressing the pass in head/controller space
-  (GH #67) and for the duplicate-hands suppression (GH #63). XRSIM consumes it
-  (`viewmodel_probe` report key; the `viewmodel_pass_identified` check **skips**,
-  not fails, when the probe was not run). See ADR-0450.
+  logged as `ViewmodelProbe [#N]: inside=.. outside=.. sample=.. pushes=..
+  translates=..` plus a `ViewmodelProbe matrix: [..]` line every 300 presented
+  frames. It **never** skips a draw (the suppression decision is unchanged and
+  stays last). The transform is the input for re-expressing the pass in
+  head/controller space (GH #67) and for the duplicate-hands suppression
+  (GH #63). XRSIM consumes it (`viewmodel_probe` report key; the
+  `viewmodel_pass_identified` check **skips**, not fails, when the probe was not
+  run). See ADR-0450.
+- **GH #67 step 1 — the composed modelview.** `gl_matrix_tracker.h` mirrors the
+  fixed-function `GL_MODELVIEW` stack (`LoadMatrixf`/`LoadIdentity`/
+  `Translatef`/`Push`/`Pop`), because RndrGL composes object transforms from
+  `glLoadMatrixf` + `glPushMatrix`/`glTranslatef`/`glPopMatrix` and never imports
+  `glMultMatrixf`/`glRotatef` (`docs/rea/reference/RndrGL_GL_Path.txt` §3). Without
+  it `GetLastViewMatrix()` reported only the last *loaded* base, so a viewmodel pass
+  that pushed a sub-transform was captured wrong. `InstallRndrGLHooks` IAT-hooks
+  `OPENGL32.dll!glLoadIdentity/glPushMatrix/glPopMatrix/glTranslatef` and forwards
+  verbatim (never suppresses); `OpenGLProxy::NoteModelview*` feeds the tracker and
+  re-publishes `s_lastView`. Unit-tested by `gl_matrix_tracker`
+  (`tests/gl_matrix_tracker_tests.cpp`). See ADR-0451.
 
 
 

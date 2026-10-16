@@ -75,6 +75,12 @@ struct ViewmodelObservationSnapshot {
     unsigned drawsInside = 0;  // draws observed with the window open
     unsigned drawsOutside = 0; // draws observed with the window closed
     bool hadSample = false;    // a modelview was captured this frame
+    // GH #67 step 1: matrix composition seen inside the window. RndrGL builds a
+    // sub-object transform with glPushMatrix + glTranslatef (it does not import
+    // glMultMatrixf/glRotatef), so a non-zero count here is direct evidence that
+    // the sampled modelview must be the *composed* one (gl_matrix_tracker.h).
+    unsigned pushesInside = 0;
+    unsigned translatesInside = 0;
     float sample[16] = {};     // column-major, as uploaded to GL_MODELVIEW
 };
 
@@ -152,6 +158,16 @@ public:
         hasObserveSample_ = true;
     }
 
+    // GH #67 step 1: count the matrix-composition calls seen inside the window.
+    // No-ops unless observing with the window open, so the suppression path is
+    // untouched. Called from the RndrGL glPushMatrix/glTranslatef hooks.
+    void NoteObservedPush() {
+        if (config_.observe && windowOpen_) ++observePushes_;
+    }
+    void NoteObservedTranslate() {
+        if (config_.observe && windowOpen_) ++observeTranslates_;
+    }
+
     bool Observing() const { return config_.observe; }
 
     // Publishes this frame's observation and re-bases the observation counters.
@@ -161,6 +177,8 @@ public:
         snap.drawsInside = observeDrawsInside_;
         snap.drawsOutside = observeDrawsOutside_;
         snap.hadSample = hasObserveSample_;
+        snap.pushesInside = observePushes_;
+        snap.translatesInside = observeTranslates_;
         if (hasObserveSample_) {
             for (int i = 0; i < 16; ++i) snap.sample[i] = observeSample_[i];
         }
@@ -168,6 +186,8 @@ public:
         observeDrawsInside_ = 0;
         observeDrawsOutside_ = 0;
         hasObserveSample_ = false;
+        observePushes_ = 0;
+        observeTranslates_ = 0;
         return snap;
     }
 
@@ -201,6 +221,8 @@ private:
     bool hasObserveSample_ = false;
     unsigned observeDrawsInside_ = 0;
     unsigned observeDrawsOutside_ = 0;
+    unsigned observePushes_ = 0;
+    unsigned observeTranslates_ = 0;
     float observeSample_[16] = {};
 };
 

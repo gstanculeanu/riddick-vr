@@ -77,9 +77,22 @@ static BOOL WINAPI Hook_GdiSwapBuffers(HDC hdc) {
 // window is closed and the feature is off (the default).
 typedef void (WINAPI *PFN_glDrawElements)(GLenum mode, GLsizei count, GLenum type, const void* indices);
 typedef void (WINAPI *PFN_glCallList)(GLuint list);
+// GH #67 step 1: RndrGL composes object transforms from glLoadMatrixf +
+// glPushMatrix/glTranslatef/glPopMatrix (it does not import glMultMatrixf /
+// glRotatef -- docs/rea/reference/RndrGL_GL_Path.txt section 3). Intercept those
+// fixed-function calls so OpenGLProxy can mirror the effective GL_MODELVIEW for
+// the draw-time capture (the GH #67 step-2 probe / GetLastViewMatrix).
+typedef void (WINAPI *PFN_glLoadIdentity)(void);
+typedef void (WINAPI *PFN_glPushMatrix)(void);
+typedef void (WINAPI *PFN_glPopMatrix)(void);
+typedef void (WINAPI *PFN_glTranslatef)(GLfloat, GLfloat, GLfloat);
 
 static PFN_glDrawElements real_glDrawElements = nullptr;
 static PFN_glCallList real_glCallList = nullptr;
+static PFN_glLoadIdentity real_glLoadIdentity = nullptr;
+static PFN_glPushMatrix real_glPushMatrix = nullptr;
+static PFN_glPopMatrix real_glPopMatrix = nullptr;
+static PFN_glTranslatef real_glTranslatef = nullptr;
 
 static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
@@ -89,6 +102,29 @@ static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, 
 static void WINAPI Hook_glCallList(GLuint list) {
     if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
     if (real_glCallList) real_glCallList(list);
+}
+
+// GH #67 step 1: maintain the software GL_MODELVIEW stack, then forward verbatim.
+// Off-modelview calls are ignored by the proxy (the projection stack is not
+// tracked). These never suppress a draw.
+static void WINAPI Hook_glLoadIdentity(void) {
+    RiddickVR::OpenGLProxy::NoteModelviewLoadIdentity();
+    if (real_glLoadIdentity) real_glLoadIdentity();
+}
+
+static void WINAPI Hook_glPushMatrix(void) {
+    RiddickVR::OpenGLProxy::NoteModelviewPush();
+    if (real_glPushMatrix) real_glPushMatrix();
+}
+
+static void WINAPI Hook_glPopMatrix(void) {
+    RiddickVR::OpenGLProxy::NoteModelviewPop();
+    if (real_glPopMatrix) real_glPopMatrix();
+}
+
+static void WINAPI Hook_glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
+    RiddickVR::OpenGLProxy::NoteModelviewTranslatef(x, y, z);
+    if (real_glTranslatef) real_glTranslatef(x, y, z);
 }
 
 static void InstallRndrGLHooks() {
@@ -116,6 +152,38 @@ static void InstallRndrGLHooks() {
         "glCallList",
         reinterpret_cast<void*>(Hook_glCallList),
         reinterpret_cast<void**>(&real_glCallList)
+    );
+    // GH #67 step 1: intercept the fixed-function matrix composition the engine
+    // uses for object/viewmodel transforms, so the effective GL_MODELVIEW is
+    // observable (the step-2 probe and any controller-driven re-expression need
+    // it). Forwarded verbatim; never suppresses.
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "OPENGL32.dll",
+        "glLoadIdentity",
+        reinterpret_cast<void*>(Hook_glLoadIdentity),
+        reinterpret_cast<void**>(&real_glLoadIdentity)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "OPENGL32.dll",
+        "glPushMatrix",
+        reinterpret_cast<void*>(Hook_glPushMatrix),
+        reinterpret_cast<void**>(&real_glPushMatrix)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "OPENGL32.dll",
+        "glPopMatrix",
+        reinterpret_cast<void*>(Hook_glPopMatrix),
+        reinterpret_cast<void**>(&real_glPopMatrix)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "OPENGL32.dll",
+        "glTranslatef",
+        reinterpret_cast<void*>(Hook_glTranslatef),
+        reinterpret_cast<void**>(&real_glTranslatef)
     );
 }
 

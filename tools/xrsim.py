@@ -114,7 +114,8 @@ DUMP_SKIP_RE = re.compile(r"DumpGate skip frame=(\d+) reason=(blank|frozen)")
 # first in-window draw. Parsed here so a run can *identify* the pass (the draw
 # count / matrix are the input for driving it from the controller next).
 VIEWMODEL_PROBE_RE = re.compile(
-    r"ViewmodelProbe \[#(\d+)\]: inside=(\d+) outside=(\d+) sample=([01])")
+    r"ViewmodelProbe \[#(\d+)\]: inside=(\d+) outside=(\d+) sample=([01])"
+    r"(?: pushes=(\d+) translates=(\d+))?")
 VIEWMODEL_PROBE_MATRIX_RE = re.compile(r"ViewmodelProbe matrix:")
 _MATRIX_ROW_RE = re.compile(r"\[([-\d.eE ]+)\]")
 # GH #69 requirement 4: `Logger::Initialize` (src/hook/logging.cpp) opens
@@ -347,10 +348,19 @@ def viewmodel_probe_stats(log_text):
     """
     lines = []
     matrix = None
+    pushes = 0
+    translates = 0
     text = log_text or ""
     for m in VIEWMODEL_PROBE_RE.finditer(text):
+        p = int(m.group(5)) if m.group(5) is not None else None
+        t = int(m.group(6)) if m.group(6) is not None else None
+        if p:
+            pushes += p
+        if t:
+            translates += t
         lines.append({"index": int(m.group(1)), "inside": int(m.group(2)),
-                      "outside": int(m.group(3)), "sample": m.group(4) == "1"})
+                      "outside": int(m.group(3)), "sample": m.group(4) == "1",
+                      "pushes": p, "translates": t})
     mm = VIEWMODEL_PROBE_MATRIX_RE.search(text)
     if mm:
         rows = _MATRIX_ROW_RE.findall(text[mm.end():])
@@ -361,7 +371,7 @@ def viewmodel_probe_stats(log_text):
                 vals = []
             if len(vals) == 16:
                 matrix = vals
-    return {"lines": lines, "matrix": matrix}
+    return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates}
 
 
 def content_gate_stats(host_log):

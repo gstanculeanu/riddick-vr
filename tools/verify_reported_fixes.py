@@ -264,6 +264,23 @@ def main():
             "GH #67: the first-person viewmodel pass must be identifiable by an "
             "off-by-default, non-suppressing observation probe consumed by XRSIM")
 
+    # GH #67 step 1: the draw-time modelview must be the *effective* one. RndrGL
+    # composes transforms from glLoadMatrixf + glPushMatrix/glTranslatef/
+    # glPopMatrix, so a software mirror (gl_matrix_tracker.h) must be fed by the
+    # intercepted composition calls and must drive GetLastViewMatrix().
+    tracker = ROOT / "src/hook/gl_matrix_tracker.h"
+    require(tracker.exists() and
+            "class GlMatrixTracker" in tracker.read_text(encoding="utf-8") and
+            "NoteModelviewPush" in proxy and
+            "NoteModelviewTranslatef" in proxy and
+            "s_modelviewTracker" in proxy and
+            "OPENGL32.dll" in (ROOT / "src/hook/dllmain.cpp").read_text(encoding="utf-8") and
+            "glPushMatrix" in (ROOT / "src/hook/dllmain.cpp").read_text(encoding="utf-8") and
+            "gl_matrix_tracker_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+            "GH #67: the draw-time modelview must be composed (glPushMatrix/"
+            "glTranslatef/glPopMatrix mirrored by gl_matrix_tracker.h), not just "
+            "the last loaded glLoadMatrixf")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #62, "
           "#64-67, #69, #71-72)")
     return 0

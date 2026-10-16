@@ -4,6 +4,7 @@
 #include "camera_hook.h"
 #include "vr_config.h"
 #include "viewmodel_suppressor.h"
+#include "gl_matrix_tracker.h"
 #include "logging.h"
 #include <string>
 
@@ -81,6 +82,11 @@ static PFN_glClear          real_glClear = nullptr;
 static GLenum s_currentMatrixMode = 0x1700; // GL_MODELVIEW
 static float s_lastProjection[16] = {0};
 static float s_lastView[16] = {0};
+// GH #67 step 1: software mirror of the GL_MODELVIEW stack. `s_lastView` is kept
+// equal to the tracker's current matrix, so GetLastViewMatrix() (consumed by the
+// GH #67 step-2 observation probe) reports the *effective* modelview at a draw,
+// not merely the last loaded base.
+static GlMatrixTracker s_modelviewTracker;
 static bool s_hasProjection = false;
 static bool s_has3DGameplayProjection = false;
 // GH #43/#44: per-frame 3D freshness. Menus/cinematics use ortho/2D
@@ -265,6 +271,10 @@ BOOL WINAPI OpenGLProxy::Hook_wglMakeCurrent(HDC hdc, HGLRC hglrc) {
     RiddickVR_EnsureHookInitialized();
     BOOL result = real_wglMakeCurrent ? real_wglMakeCurrent(hdc, hglrc) : FALSE;
     if (result && hglrc != nullptr) {
+        // GH #67 step 1: a new context starts with an identity modelview stack.
+        s_currentMatrixMode = 0x1700 /* GL_MODELVIEW */;
+        s_modelviewTracker.Reset();
+        memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
         QueryContextExtensions();
         StereoRenderer::Instance().Initialize(hdc, hglrc);
     }
@@ -289,9 +299,10 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
     if (s_viewmodelSuppressor.Observing() && (s_swapFrameCount % 300) == 0) {
         const ViewmodelObservationSnapshot snapshot = s_viewmodelSuppressor.ComputeSnapshot();
         if (snapshot.windowOpened) {
-            VR_LOG_INFO("ViewmodelProbe [#%llu]: inside=%u outside=%u sample=%u",
+            VR_LOG_INFO("ViewmodelProbe [#%llu]: inside=%u outside=%u sample=%u pushes=%u translates=%u",
                 static_cast<unsigned long long>(s_swapFrameCount),
-                snapshot.drawsInside, snapshot.drawsOutside, snapshot.hadSample ? 1u : 0u);
+                snapshot.drawsInside, snapshot.drawsOutside, snapshot.hadSample ? 1u : 0u,
+                snapshot.pushesInside, snapshot.translatesInside);
             if (snapshot.hadSample) {
                 const float* s = snapshot.sample;
                 VR_LOG_INFO("ViewmodelProbe matrix: [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f]",
@@ -403,7 +414,10 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
                 s_projMatrixCount, m[0], m[5], m[10], m[14], m[1], m[2], m[3], m[15]);
         }
     } else if (s_currentMatrixMode == 0x1700 /* GL_MODELVIEW */) {
-        memcpy(s_lastView, m, sizeof(s_lastView));
+        // GH #67 step 1: LoadMatrixf replaces the current modelview; mirror it
+        // into the software stack so the draw-time sample is the effective one.
+        s_modelviewTracker.LoadMatrixf(m);
+        memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
         s_modelviewMatrixCount++;
         if (s_modelviewMatrixCount == 1 || s_modelviewMatrixCount % 300 == 0) {
             VR_LOG_INFO("glLoadMatrixf [MODELVIEW #%u]: Pos(%.2f, %.2f, %.2f)",
@@ -507,6 +521,38 @@ const float* OpenGLProxy::GetLastProjectionMatrix() {
 
 const float* OpenGLProxy::GetLastViewMatrix() {
     return s_lastView;
+}
+
+// GH #67 step 1: mirror the fixed-function GL_MODELVIEW stack. Each entry point
+// is a no-op outside GL_MODELVIEW (the projection stack is unaffected), and each
+// re-publishes s_lastView so GetLastViewMatrix() stays the effective modelview.
+void OpenGLProxy::NoteModelviewLoadIdentity() {
+    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
+    s_modelviewTracker.LoadIdentity();
+    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
+}
+
+void OpenGLProxy::NoteModelviewPush() {
+    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
+    s_modelviewTracker.Push();
+    // GH #67 step 2: record that the first-person pass composes a sub-transform
+    // inside the window -- the exact reason the composed matrix (not the last
+    // loaded base) is what matters. Guarded internally by observe+window.
+    s_viewmodelSuppressor.NoteObservedPush();
+    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
+}
+
+void OpenGLProxy::NoteModelviewPop() {
+    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
+    s_modelviewTracker.Pop();
+    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
+}
+
+void OpenGLProxy::NoteModelviewTranslatef(float x, float y, float z) {
+    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
+    s_modelviewTracker.Translatef(x, y, z);
+    s_viewmodelSuppressor.NoteObservedTranslate();
+    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
 }
 
 bool OpenGLProxy::ShouldSuppressDrawCall() {

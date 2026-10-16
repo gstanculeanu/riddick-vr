@@ -569,6 +569,20 @@ def test_viewmodel_probe_check_skipped_without_lines(td):
     assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
 
 
+def test_viewmodel_probe_counts_matrix_composition(td):
+    log = ("[INFO] ViewmodelProbe [#300]: inside=4 outside=612 sample=1 pushes=3 translates=5\n"
+           "[INFO] ViewmodelProbe [#600]: inside=2 outside=610 sample=1 pushes=1 translates=2\n")
+    s = xrsim.viewmodel_probe_stats(log)
+    assert [ln["pushes"] for ln in s["lines"]] == [3, 1], s["lines"]
+    assert [ln["translates"] for ln in s["lines"]] == [5, 2], s["lines"]
+    assert s["pushes"] == 4 and s["translates"] == 7, s
+    # Backward compatible: a line without the composition fields parses to None/0.
+    old = xrsim.viewmodel_probe_stats(
+        "[INFO] ViewmodelProbe [#300]: inside=4 outside=612 sample=1\n")
+    assert old["lines"][0]["pushes"] is None, old
+    assert old["pushes"] == 0 and old["translates"] == 0, old
+
+
 def test_viewmodel_probe_check_requires_an_in_window_draw(td):
     art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
     base = _content()
@@ -616,6 +630,7 @@ def main() -> int:
              test_window_content_check_is_gameplay_only,
              test_reach_gameplay_report_records_live_gameplay_stats,
              test_viewmodel_probe_stats_parse,
+             test_viewmodel_probe_counts_matrix_composition,
              test_viewmodel_probe_check_skipped_without_lines,
              test_viewmodel_probe_check_requires_an_in_window_draw)
     with tempfile.TemporaryDirectory() as d:

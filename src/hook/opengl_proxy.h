@@ -81,6 +81,16 @@ public:
     static const float* GetLastProjectionMatrix();
     static const float* GetLastViewMatrix();
 
+    // GH #67 step 1: mirror the fixed-function GL_MODELVIEW stack so the matrix
+    // returned by GetLastViewMatrix() is the *effective* modelview (composed
+    // from glLoadMatrixf + glPushMatrix/glTranslatef/glPopMatrix, all RndrGL
+    // uses -- see docs/rea/reference/RndrGL_GL_Path.txt section 3). Fed by the
+    // RndrGL IAT hooks in dllmain.cpp; each is a no-op outside GL_MODELVIEW.
+    static void NoteModelviewLoadIdentity();
+    static void NoteModelviewPush();
+    static void NoteModelviewPop();
+    static void NoteModelviewTranslatef(float x, float y, float z);
+
     // GH #63/#66 (approach 2): per-draw suppression of the engine's own
     // first-person viewmodel. The window state machine lives in
     // viewmodel_suppressor.h and is fed by the already-intercepted glClear /

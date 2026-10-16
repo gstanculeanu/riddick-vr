@@ -77,8 +77,15 @@ Present in RndrGL: `glLoadMatrixf`, `glLoadIdentity`, `glPushMatrix`,
   already intercepted by the hook (projection loads close the suppression
   window).
 
-## 4. Consequence for the suppressor (GH #66)
+**Consequence for the draw-time matrix capture (GH #67 step 1).** Because a pushed
+sub-object is `glLoadMatrixf(base)` then `glPushMatrix(); glTranslatef(...)`, the
+matrix in effect at a draw is `base * translate(...)` -- not the base that
+`glLoadMatrixf` alone records. The hook therefore mirrors the `GL_MODELVIEW` stack
+(`src/hook/gl_matrix_tracker.h`) and IAT-hooks `OPENGL32.dll!glLoadIdentity`,
+`!glPushMatrix`, `!glPopMatrix` and `!glTranslatef` in RndrGL so the reported
+draw-time modelview is the effective one (ADR-0451).
 
+## 4. Consequence for the suppressor (GH #66)
 - Interception targets: **`glDrawElements`** (primary; every 3D mesh) and
   **`glCallList`** (opportunistic). Both are IAT-hooked in `RndrGL.dll`
   (`src/hook/dllmain.cpp`, `InstallRndrGLHooks`) via the same `IATHook` used for

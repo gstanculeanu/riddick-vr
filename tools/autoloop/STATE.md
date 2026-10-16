@@ -2,6 +2,71 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 45 — 2026-10-16 20:15 (scheduled loop)
+- **Unit:** GH **#67 step 1 (remainder)** — make the draw-time `GL_MODELVIEW`
+  capture the **effective** matrix by mirroring the fixed-function modelview stack
+  (`glLoadMatrixf` + `glPushMatrix`/`glTranslatef`/`glPopMatrix`). Hook C++ +
+  tests/docs/tools; off-path (forwarding-only); **no deploy, no game/asset change**.
+- Why this unit: wake 44 landed the step-2 observation probe (ADR-0450) but its
+  captured matrix came from `s_lastView`, which is written **only** by
+  `Hook_glLoadMatrixf` (`src/hook/opengl_proxy.cpp:406`). REA already recorded
+  (`docs/rea/reference/RndrGL_GL_Path.txt` §3) that RndrGL does **not** import
+  `glMultMatrixf`/`glRotatef`; it composes object transforms from `glLoadMatrixf` +
+  `glPushMatrix` + `glTranslatef` + `glPopMatrix`. So a viewmodel pass that pushed a
+  sub-transform was captured as the last *loaded base*, not `base * translate(...)`
+  — step 3 would have built on a wrong matrix. This is #67 plan step 1's stated
+  "add hooks for the matrix concatenation calls", and it is a prerequisite for the
+  step-2 probe to be meaningful. It is the same class of bounded, offline-verifiable
+  unit the loop landed for FK (#58) and placement (#64).
+- Change (code/tests/docs/tools; no deploy):
+  - `src/hook/gl_matrix_tracker.h` (new): header-only, dependency-free
+    `GlMatrixTracker` — column-major, bounded stack (`kMaxDepth=32`), `LoadMatrixf`/
+    `LoadIdentity`/`Multiply`/`Translatef` (`M' = M*T`, column 3)/`Push`/`Pop`;
+    overflow & underflow ignored (never out of range).
+  - `src/hook/opengl_proxy.{h,cpp}`: `s_modelviewTracker`; `Hook_glLoadMatrixf`
+    (MODELVIEW) feeds it and re-publishes `s_lastView`; new
+    `NoteModelviewLoadIdentity/Push/Pop/Translatef` (no-op outside `GL_MODELVIEW`;
+    push/translate also tick the observation counters); reset to identity on
+    `wglMakeCurrent`. `GetLastViewMatrix()` is now the effective modelview.
+  - `src/hook/dllmain.cpp`: `InstallRndrGLHooks` IAT-hooks `OPENGL32.dll!glLoadIdentity`,
+    `!glPushMatrix`, `!glPopMatrix`, `!glTranslatef` (same mechanism as
+    `glDrawElements`/`glCallList`) → `NoteModelview*` then forward verbatim. Never
+    suppresses.
+  - `src/hook/viewmodel_suppressor.h`: observation snapshot gains `pushesInside`/
+    `translatesInside` (`NoteObservedPush`/`NoteObservedTranslate`; no-ops unless
+    observe+window-open) — direct in-game evidence that the pass composes.
+  - `src/hook/opengl_proxy.cpp` probe line →
+    `ViewmodelProbe [#N]: inside=.. outside=.. sample=.. pushes=.. translates=..`.
+  - `tools/xrsim.py`: parse the optional `pushes`/`translates` (backward compatible —
+    a pre-step-1 line leaves them `None`) + aggregate them in `viewmodel_probe`.
+  - `tools/test_xrsim.py` (+1 → **39**): composition parse + backward compatibility.
+  - `tests/gl_matrix_tracker_tests.cpp` (new) + CTest `gl_matrix_tracker`; CMake
+    source list + test. `tests/viewmodel_suppressor_tests.cpp` (+compose counters,
+    inert without observe / outside the window).
+  - `tools/verify_reported_fixes.py` (new GH #67 step-1 invariant),
+    `src/hook/README.md`, `docs/rea/reference/RndrGL_GL_Path.txt` (§3 note),
+    `docs/adr/0451-software-modelview-stack-for-draw-time-capture.md` (new),
+    `tests/xrsim/report.json` (regenerated `--evaluate-only --downscale 4`;
+    `viewmodel_probe` +`pushes`/`translates`, minimal diff).
+- Validation: `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host; no
+  `-Deploy`); CTest **11/11 PASS** on **x86 and x64** (new `gl_matrix_tracker`);
+  `test_xrsim.py` **39/39**; `xrsim.py --selftest` PASS; all 9 `tools/test_*.py` +
+  `validate_addresses` + `verify_hook_init` + `verify_reported_fixes` +
+  `scenario_tests.py --check` PASS.
+- Blocker: **not validated live** — like the step-2 probe, the composed capture only
+  appears in a hook build deployed to the game install, and this loop must not
+  deploy. The tracker is forwarding-only (it changes nothing the engine renders), so
+  landing it is inert until a headset run reads it. **Hand to an interactive
+  session:** `ViewmodelObserve=1`, one frame in 3D gameplay, read
+  `ViewmodelProbe [#N]: ... pushes=.. translates=..` + `ViewmodelProbe matrix:` —
+  non-zero `pushes`/`translates` confirm the pass composes and the matrix is now the
+  effective one.
+- **Next:** with a validated capture (matrix + pushes/translates) #67 step 3
+  re-expresses the modelview in head/controller space; alternatively #63 suppresses
+  the same pass via the unchanged window. Both are hook changes needing one
+  interactive deploy.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 44 — 2026-10-16 19:57 (scheduled loop)
 - **Unit:** GH **#67 step 2** (identify the first-person viewmodel pass) — land an
   **observation-only** probe that reuses the GH #66 depth-only-clear window but

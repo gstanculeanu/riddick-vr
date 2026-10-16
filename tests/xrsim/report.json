@@ -611,7 +611,9 @@
   },
   "viewmodel_probe": {
     "lines": [],
-    "matrix": null
+    "matrix": null,
+    "pushes": 0,
+    "translates": 0
   },
   "host_log": null,
   "display_branch": {}
