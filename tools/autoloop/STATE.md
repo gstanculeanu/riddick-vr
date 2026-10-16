@@ -2,6 +2,70 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 44 — 2026-10-16 19:57 (scheduled loop)
+- **Unit:** GH **#67 step 2** (identify the first-person viewmodel pass) — land an
+  **observation-only** probe that reuses the GH #66 depth-only-clear window but
+  **never skips a draw**, so the engine's own first-person arms/weapon can be
+  identified (and their transform read) before they are driven from the
+  controller (#67) or suppressed (#63). Hook C++ + tools/tests/docs; off by
+  default; **no deploy, no game/asset change**.
+- Why this unit: wake 43's Next was "#72 req 1 via interactive deploy, else #67
+  step 2". #72 req 1 is a hook change blocked on a deploy this loop must not do,
+  so I took #67 step 2. The remaining #67 work is *identify* → *re-express in
+  head/controller space* → *stop the overlay*; identification is the prerequisite
+  and is where the missing evidence is.
+- Design (observation-only, subordinate to suppression): the SAME provisional
+  boundary as #66 (mid-frame depth-only clear opens; projection load / swap
+  closes). The state machine records, per sampled frame, how many intercepted
+  draws fell **inside vs outside** the window and the `GL_MODELVIEW` in effect at
+  the **first in-window draw** (the pass loads one viewmodel-relative matrix and
+  draws its submeshes; a later world/HUD matrix must not overwrite it). The
+  suppression decision is unchanged and evaluated **last**.
+- Change (hook C++ + tools/tests/docs; no deploy):
+  - `src/hook/viewmodel_suppressor.h`: `ViewmodelSuppressionConfig::observe`
+    (default false); `ViewmodelObservationSnapshot`; `NoteObservedDraw()`,
+    `SetObservedSample()`, `ComputeSnapshot()`, `Observing()`.
+  - `src/hook/opengl_proxy.cpp`: `BuildViewmodelSuppressionConfig()` sets
+    `observe` from `ViewmodelObserve`; `ShouldSuppressDrawCall()` records the
+    tallies + first in-window modelview (from `s_lastView`) **before** the
+    unchanged suppress decision; logs `ViewmodelProbe [#N]: inside=.. outside=..
+    sample=..` + a `ViewmodelProbe matrix: [..]x4` line every 300 presented
+    frames.
+  - `src/hook/vr_config.{h,cpp}`: `ViewmodelObserve` (default 0) + INI + the
+    config log line; `riddick_vr.ini` + `tools/riddick_vr.ini.example`.
+  - `tools/xrsim.py`: `viewmodel_probe_stats()` + `viewmodel_probe` report key;
+    graded `viewmodel_pass_identified` (**skip** when the probe was not run, fail
+    when it ran but no draw fell inside the window).
+  - `tests/viewmodel_suppressor_tests.cpp` (+observation cases, incl. "observe
+    never suppresses even with suppression on"), `tools/test_xrsim.py` (+3 →
+    **38**), `tools/verify_reported_fixes.py` (#67 invariant),
+    `src/hook/README.md`, `docs/adr/0450-viewmodel-pass-observation-probe.md`
+    (new), `tests/xrsim/report.json` (regenerated `--evaluate-only --downscale 4`;
+    +1 key).
+- Validation: `build-all -Config Release` OK (x86 `opengl32.dll` + x64 host; no
+  `-Deploy`); CTest **10/10 PASS** on **x86 and x64** (`viewmodel_suppressor_window`
+  now covers observation); `test_xrsim.py` **38/38**; `xrsim.py --selftest` PASS;
+  all 9 `tools/test_*.py` + `validate_addresses` + `verify_hook_init` +
+  `verify_reported_fixes` + `scenario_tests.py --check` PASS.
+- Blocker: **not validated live** — `ViewmodelProbe` only appears in a hook build
+  deployed to the game install, and this loop must not deploy (same boundary
+  wake 43 hit for #72 req 1). The feature is off by default and observation-only,
+  so landing it changes nothing until an interactive session flips
+  `ViewmodelObserve=1`. **Hand to an interactive session:** set
+  `ViewmodelObserve=1`, run one frame in 3D gameplay, read
+  `ViewmodelProbe [#N]: inside=.. outside=..` + the matrix from `riddick_vr.log`.
+- **Ops note (honest):** `tools/autoloop/logs/STATE.log` is gitignored and was
+  accidentally **overwritten** (not appended) this wake. It was reconstructed
+  from the per-run logs (`run-*.log` / `run-*.err.log`, which echo the prior
+  summaries): 45 lines, wakes 2-44. Wakes 1 and 20, and some early-wake bodies,
+  could not be recovered (their run logs have rotated out) — the full narrative
+  for every wake remains in `STATE.md` above.
+- **Next:** either (a) an interactive deploy enables `ViewmodelObserve=1` so the
+  pass boundary + viewmodel transform are captured, then #67 step 3 re-expresses
+  the matrix in head/controller space; or (b) continue #72 req 1 (branch signal)
+  in the same interactive deploy (both are hook changes needing one deploy).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 43 — 2026-10-16 19:43 (scheduled loop)
 - **Unit:** GH **#72 requirement 2** (the "cold-start content gate" half of
   wake 42's stated Next) — keep the all-black GL↔D3D11 interop warm-up **and** a
