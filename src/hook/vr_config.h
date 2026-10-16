@@ -91,6 +91,12 @@ struct VRConfig {
     // depth-only-clear opener (1) or disables the window entirely (0).
     int suppressEngineViewmodel = 0;
     int viewmodelDepthClearWindow = 1;
+    // GH #67 step 2: observation-only identification of the engine's
+    // first-person viewmodel pass. Opens the same depth-only-clear window as
+    // suppression but never skips a draw; emits one `ViewmodelProbe` log line
+    // per sampled frame with the per-frame draw tallies and the modelview in
+    // effect at the first in-window draw. Default OFF.
+    int viewmodelObserve = 0;
 };
 
 extern VRConfig g_vrConfig;

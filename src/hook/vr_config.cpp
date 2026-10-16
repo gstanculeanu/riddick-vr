@@ -126,7 +126,9 @@ void LoadVRConfig() {
         // signature is provisional and must be confirmed on a headset).
         cfg.suppressEngineViewmodel = ReadInt(iniPath, "SuppressEngineViewmodel", cfg.suppressEngineViewmodel) ? 1 : 0;
         cfg.viewmodelDepthClearWindow = ReadInt(iniPath, "ViewmodelDepthClearWindow", cfg.viewmodelDepthClearWindow) ? 1 : 0;
-        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d)",
+        // GH #67 step 2: observation-only first-person viewmodel probe.
+        cfg.viewmodelObserve = ReadInt(iniPath, "ViewmodelObserve", cfg.viewmodelObserve) ? 1 : 0;
+        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d vm_observe=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,
             cfg.nativeHandPose, cfg.nativeHandTexture, cfg.nativeHandYaw,
@@ -134,7 +136,8 @@ void LoadVRConfig() {
             cfg.nativeHandRoll, cfg.guardYMin, cfg.guardYMax,
             cfg.guardZMin, cfg.guardZMax, cfg.guardMaxHandSpan,
             cfg.strikeForwardVz, cfg.strikeHookVx, cfg.strikeUppercutVy,
-            cfg.strikeCrossVx, cfg.suppressEngineViewmodel, cfg.viewmodelDepthClearWindow);
+            cfg.strikeCrossVx, cfg.suppressEngineViewmodel, cfg.viewmodelDepthClearWindow,
+            cfg.viewmodelObserve);
     } else {
         VR_LOG_INFO("VR config: no riddick_vr.ini found, using defaults");
     }

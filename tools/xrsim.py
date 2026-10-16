@@ -108,6 +108,15 @@ DISPLAY_LABEL_FILE = "display_branch.log"
 # report can show the gate doing its job.
 DUMP_SKIP_RE = re.compile(r"DumpGate skip frame=(\d+) reason=(blank|frozen)")
 
+# GH #67 step 2: observation-only probe of the engine's first-person viewmodel
+# pass. The hook (ViewmodelObserve=1) logs, at the sampled frames, how many draws
+# fell inside the depth-only-clear window and the GL_MODELVIEW captured at the
+# first in-window draw. Parsed here so a run can *identify* the pass (the draw
+# count / matrix are the input for driving it from the controller next).
+VIEWMODEL_PROBE_RE = re.compile(
+    r"ViewmodelProbe \[#(\d+)\]: inside=(\d+) outside=(\d+) sample=([01])")
+VIEWMODEL_PROBE_MATRIX_RE = re.compile(r"ViewmodelProbe matrix:")
+_MATRIX_ROW_RE = re.compile(r"\[([-\d.eE ]+)\]")
 # GH #69 requirement 4: `Logger::Initialize` (src/hook/logging.cpp) opens
 # riddick_vr.log with `std::ios::out | std::ios::trunc`, so every game launch
 # rewrites the file from offset 0. A byte offset sampled *before* launch (the old
@@ -325,6 +334,34 @@ def gameplay_capture_stats(artifacts, labels, min_mean=1.0, sig_cache=None):
             blank += 1
     return {"gameplay": total, "cinema": cinema, "unknown": unknown,
             "blank_gameplay": blank, "distinct_gameplay": len(sigs)}
+
+
+def viewmodel_probe_stats(log_text):
+    """GH #67 step 2: summarise the observation-only first-person viewmodel probe.
+
+    Read from the hook log (needs ``ViewmodelObserve=1``): the sampled frames'
+    in/out-of-window draw counts and the GL_MODELVIEW captured at the first
+    in-window draw. Returns ``{"lines": [...], "matrix": [...16 floats]|None}``;
+    an empty ``lines`` list means the probe was not enabled / not present (a
+    pre-#67 hook or a run without the flag), so callers must *skip*, not fail.
+    """
+    lines = []
+    matrix = None
+    text = log_text or ""
+    for m in VIEWMODEL_PROBE_RE.finditer(text):
+        lines.append({"index": int(m.group(1)), "inside": int(m.group(2)),
+                      "outside": int(m.group(3)), "sample": m.group(4) == "1"})
+    mm = VIEWMODEL_PROBE_MATRIX_RE.search(text)
+    if mm:
+        rows = _MATRIX_ROW_RE.findall(text[mm.end():])
+        if len(rows) >= 4:
+            try:
+                vals = [float(v) for row in rows[:4] for v in row.split()]
+            except ValueError:
+                vals = []
+            if len(vals) == 16:
+                matrix = vals
+    return {"lines": lines, "matrix": matrix}
 
 
 def content_gate_stats(host_log):
@@ -586,6 +623,23 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
         hit = marker in fresh_log
         checks.append({"group": "interaction", "check": f"marker:{marker}", "ok": hit,
                        "detail": f"hook log run section ({len(fresh_log)} chars)"})
+    # GH #67 step 2: when the observation-only viewmodel probe is enabled
+    # (ViewmodelObserve=1), assert it actually identified a non-empty
+    # first-person pass -- the input for driving the engine's own arms from the
+    # controller. Skipped (not failed) when the probe was not run, so this does
+    # not fail a normal capture.
+    probe = viewmodel_probe_stats(fresh_log)
+    if probe["lines"]:
+        opened = [p for p in probe["lines"] if p["inside"] > 0]
+        max_inside = max((p["inside"] for p in probe["lines"]), default=0)
+        detail = (f"{len(probe['lines'])} probe line(s), max in-window draws="
+                  f"{max_inside}" + (", matrix sampled" if probe["matrix"] else ""))
+        checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
+                       "ok": bool(opened), "detail": detail})
+    else:
+        checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
+                       "ok": True, "skip": True,
+                       "detail": "no ViewmodelProbe lines (ViewmodelObserve=0 or pre-#67 host)"})
     # 4. comfort
     if lefts:
         _, sub = comfort_checks(lefts[-1])
@@ -673,6 +727,7 @@ def cmd_evaluate_only(args):
                         "markers": marker_summary(checks),
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "content_gate": content_gate_stats(host_text),
+                        "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -742,6 +797,7 @@ def main(argv=None):
                         "markers": marker_summary(checks),
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "content_gate": content_gate_stats(host_log),
+                        "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

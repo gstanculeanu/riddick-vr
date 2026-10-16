@@ -537,6 +537,54 @@ def test_reach_gameplay_report_records_live_gameplay_stats(td):
     assert rc == 0, payload
 
 
+# ------------------------------------- viewmodel probe (GH #67 step 2)
+_VM_PROBE = (
+    "[INFO] ViewmodelProbe [#300]: inside=4 outside=612 sample=1\n"
+    "[INFO] ViewmodelProbe matrix: "
+    "[0.7071 0.0000 -0.7071 0.0000] [0.0000 1.0000 0.0000 0.0000] "
+    "[0.7071 0.0000 0.7071 0.0000] [1.2300 -0.4000 -2.5000 1.0000]\n")
+
+
+def test_viewmodel_probe_stats_parse(td):
+    s = xrsim.viewmodel_probe_stats(_VM_PROBE)
+    assert len(s["lines"]) == 1, s
+    line = s["lines"][0]
+    assert (line["index"], line["inside"], line["outside"], line["sample"]) == (300, 4, 612, True), line
+    assert s["matrix"] is not None and len(s["matrix"]) == 16, s["matrix"]
+    assert abs(s["matrix"][0] - 0.7071) < 1e-6, s["matrix"]
+    assert abs(s["matrix"][15] - 1.0) < 1e-6, s["matrix"]
+    # Absent probe (ViewmodelObserve=0 or pre-#67 host) -> no lines, no matrix.
+    empty = xrsim.viewmodel_probe_stats("[INFO] Viewmodel suppression [#300]: draws=0")
+    assert empty["lines"] == [] and empty["matrix"] is None, empty
+
+
+def test_viewmodel_probe_check_skipped_without_lines(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "viewmodel_pass_identified"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
+
+
+def test_viewmodel_probe_check_requires_an_in_window_draw(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    # Window opens but nothing draws inside it: the pass is NOT identified.
+    _, checks = xrsim.evaluate(_args(), art, "",
+                               "[INFO] ViewmodelProbe [#300]: inside=0 outside=610 sample=0\n")
+    rec = [c for c in checks if c["check"] == "viewmodel_pass_identified"][0]
+    assert rec["ok"] is False, rec
+    # A real in-window draw identifies the pass.
+    _, checks = xrsim.evaluate(_args(), art, "", _VM_PROBE)
+    rec = [c for c in checks if c["check"] == "viewmodel_pass_identified"][0]
+    assert rec["ok"] is True, rec
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -566,7 +614,10 @@ def main() -> int:
              test_content_gate_stats_parses_skip_lines,
              test_blank_gameplay_frame_fails_window_content_check,
              test_window_content_check_is_gameplay_only,
-             test_reach_gameplay_report_records_live_gameplay_stats)
+             test_reach_gameplay_report_records_live_gameplay_stats,
+             test_viewmodel_probe_stats_parse,
+             test_viewmodel_probe_check_skipped_without_lines,
+             test_viewmodel_probe_check_requires_an_in_window_draw)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

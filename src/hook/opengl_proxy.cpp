@@ -114,6 +114,8 @@ static ViewmodelSuppressionConfig BuildViewmodelSuppressionConfig() {
     cfg.opener = (g_vrConfig.viewmodelDepthClearWindow != 0)
         ? ViewmodelWindowOpener::DepthOnlyClear
         : ViewmodelWindowOpener::None;
+    // GH #67 step 2: observation-only identification of the first-person pass.
+    cfg.observe = (g_vrConfig.viewmodelObserve != 0);
     return cfg;
 }
 
@@ -279,6 +281,24 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
             static_cast<unsigned long long>(s_swapFrameCount),
             s_viewmodelSuppressor.LastFrameDraws(), s_viewmodelSuppressor.LastFrameSuppressed(),
             s_viewmodelSuppressor.TotalSuppressed());
+    }
+    // GH #67 step 2: observation-only identification of the first-person
+    // viewmodel pass. One line per sampled frame carrying the window-open count
+    // and the modelview captured at the first in-window draw. The linear part of
+    // that matrix is what must later be re-expressed in head/controller space.
+    if (s_viewmodelSuppressor.Observing() && (s_swapFrameCount % 300) == 0) {
+        const ViewmodelObservationSnapshot snapshot = s_viewmodelSuppressor.ComputeSnapshot();
+        if (snapshot.windowOpened) {
+            VR_LOG_INFO("ViewmodelProbe [#%llu]: inside=%u outside=%u sample=%u",
+                static_cast<unsigned long long>(s_swapFrameCount),
+                snapshot.drawsInside, snapshot.drawsOutside, snapshot.hadSample ? 1u : 0u);
+            if (snapshot.hadSample) {
+                const float* s = snapshot.sample;
+                VR_LOG_INFO("ViewmodelProbe matrix: [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f]",
+                    s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+                    s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]);
+            }
+        }
     }
     StereoRenderer::Instance().OnSwapBuffers(hdc);
     return real_wglSwapBuffers ? real_wglSwapBuffers(hdc) : SwapBuffers(hdc);
@@ -490,6 +510,15 @@ const float* OpenGLProxy::GetLastViewMatrix() {
 }
 
 bool OpenGLProxy::ShouldSuppressDrawCall() {
+    // GH #67 step 2 (observation-only): record this draw against the window and,
+    // for the first in-window draw, capture the modelview in effect. This never
+    // suppresses; the suppression decision is unchanged and stays last.
+    if (s_viewmodelSuppressor.Observing()) {
+        s_viewmodelSuppressor.NoteObservedDraw();
+        if (s_viewmodelSuppressor.WindowOpen()) {
+            s_viewmodelSuppressor.SetObservedSample(s_lastView);
+        }
+    }
     return s_viewmodelSuppressor.ShouldSuppressDraw();
 }
 

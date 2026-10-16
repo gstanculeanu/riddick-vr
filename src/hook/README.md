@@ -113,6 +113,18 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   selects the opener). The signature is PROVISIONAL and is confirmed via the
   per-frame `Viewmodel suppression [#N]: last frame draws=.. suppressed=..` log
   line on a headset before it is trusted. See ADR-0439.
+- **GH #67 step 2 — observation-only identification.** The same depth-only-clear
+  boundary also drives a non-suppressing probe: `ViewmodelObserve=1` opens the
+  window and records, per sampled frame, how many draws fell **inside/outside**
+  it and the `GL_MODELVIEW` in effect at the **first in-window draw** (the
+  first-person pass loads one viewmodel-relative matrix and draws its submeshes),
+  logged as `ViewmodelProbe [#N]: inside=.. outside=.. sample=..` plus a
+  `ViewmodelProbe matrix: [..]` line every 300 presented frames. It **never**
+  skips a draw (the suppression decision is unchanged and stays last). The
+  transform is the input for re-expressing the pass in head/controller space
+  (GH #67) and for the duplicate-hands suppression (GH #63). XRSIM consumes it
+  (`viewmodel_probe` report key; the `viewmodel_pass_identified` check **skips**,
+  not fails, when the probe was not run). See ADR-0450.
 
 
 

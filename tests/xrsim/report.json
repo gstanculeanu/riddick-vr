@@ -574,6 +574,13 @@
       "detail": "no display_branch.log: per-frame display branch unknown (legacy capture or pre-label host)"
     },
     {
+      "group": "viewmodel",
+      "check": "viewmodel_pass_identified",
+      "ok": true,
+      "skip": true,
+      "detail": "no ViewmodelProbe lines (ViewmodelObserve=0 or pre-#67 host)"
+    },
+    {
       "check": "no_green_chroma_glitch",
       "ok": true,
       "detail": "0 green px (frame test_frame_0180.bmp)",
@@ -601,6 +608,10 @@
   "content_gate": {
     "blank_skipped": 0,
     "frozen_skipped": 0
+  },
+  "viewmodel_probe": {
+    "lines": [],
+    "matrix": null
   },
   "host_log": null,
   "display_branch": {}

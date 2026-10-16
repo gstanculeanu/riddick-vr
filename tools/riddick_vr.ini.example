@@ -101,3 +101,8 @@ SuppressEngineViewmodel=0
 ; Which boundary opens the suppression window: 1 = depth-only clear (default),
 ; 0 = never open (inert even when suppression is enabled).
 ViewmodelDepthClearWindow=1
+; GH #67 step 2: 1 = observe-only probe of the first-person viewmodel pass.
+; Opens the same depth-only-clear window but never skips a draw; logs
+; "ViewmodelProbe [#N]: inside=.. outside=.. sample=.." + the sampled
+; GL_MODELVIEW every 300 presented frames. Default 0.
+ViewmodelObserve=0

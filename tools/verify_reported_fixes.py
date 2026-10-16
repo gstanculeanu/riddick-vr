@@ -243,7 +243,29 @@ def main():
             "GH #58: the native hand mesh must support an offline-baked posed "
             "variant selected by NativeHandPose")
 
-    print("[issue-fixes] source invariants passed (#40, #43-47, #52-54)")
+    # GH #67 step 2: the engine's own first-person viewmodel pass must be
+    # *identifiable* before it can be driven from the controller. The observation
+    # mode reuses the GH #66 depth-only-clear boundary, records the in/out-of-
+    # window draw tallies and the modelview at the first in-window draw, never
+    # suppresses, defaults off, and is consumed by XRSIM (which skips, not fails,
+    # when the probe was not run).
+    require("bool observe = false;" in suppressor and
+            "ViewmodelObservationSnapshot" in suppressor and
+            "NoteObservedDraw" in suppressor and "SetObservedSample" in suppressor and
+            "ComputeSnapshot" in suppressor and
+            "viewmodelObserve = 0" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            "ViewmodelObserve" in config and
+            "ViewmodelProbe" in proxy and
+            "s_viewmodelSuppressor.Observing()" in proxy and
+            "s_viewmodelSuppressor.NoteObservedDraw()" in proxy and
+            "s_viewmodelSuppressor.SetObservedSample(s_lastView)" in proxy and
+            "viewmodel_probe_stats" in xrsim_tool and
+            "viewmodel_pass_identified" in xrsim_tool,
+            "GH #67: the first-person viewmodel pass must be identifiable by an "
+            "off-by-default, non-suppressing observation probe consumed by XRSIM")
+
+    print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #62, "
+          "#64-67, #69, #71-72)")
     return 0
 
 
