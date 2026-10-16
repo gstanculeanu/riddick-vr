@@ -2,6 +2,84 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 47 — 2026-10-16 20:45 (scheduled loop)
+- **Unit:** GH **#68 requirement 1 (second half)** — make every XRSIM capture
+  *self-describing in 3D*: the mock host now records the **head/eye pose +
+  projection** it published for each dumped frame (`eye_frames.log`), the harness
+  parses it, and the report carries `eye_frames` + a `capture_metadata_present`
+  check. While live-validating this I hit a **second, concrete defect** and fixed
+  it: a truncated/unreadable eye BMP crashed the whole harness (no report at all),
+  which is exactly what a real run produces (the run ends by `terminate`).
+- **Why this unit (top items are deploy-blocked):** #67 step 3, #64, #63, #62,
+  #65 are hook-side and need a headset deploy this loop must not do; wake 46's
+  Next said so explicitly. #68 is the standing "iteration vehicle" and its
+  requirement 1 ("dump both eyes **and record the eye pose/projection used for
+  each frame**") was half-unmet — the missing half is precisely the camera
+  transform GH #67 step 3 needs to make a captured `GL_MODELVIEW`
+  camera-relative. Host-side ⇒ live-validatable with the freshly built host.
+- **Change (host C++ + tool + tests/docs; no hook change, no deploy):**
+  - `src/host/eye_frame.h` (new): pure, dependency-free
+    `FormatEyeFrameLine(frame, EyeFrameSample)` — one line per dumped frame:
+    `frame=N hmdpos=x,y,z hmdquat=x,y,z,w viewL=[16] viewR=[16] projL=[16]
+    projR=[16]` (column-major, space-separated matrices, 4-decimal pose).
+  - `src/host/openxr_manager.cpp`: on each **dumped** frame, write the published
+    `state.hmdPose` + `leftEyeView/rightEyeView` + `leftEyeProjection/
+    rightEyeProjection` to `<dump-dir>\eye_frames.log` (same truncate-on-first-
+    dump / append-after discipline as `display_branch.log`).
+  - `tools/xrsim.py`: `EYE_FRAMES_FILE` + `EYE_FRAME_RE`; `read_eye_frames()`
+    (`{}` when absent) + `eye_frame_stats()` (`count`, `distinct`, `yaw_span_deg`);
+    a `capture_metadata_present` check (**skipped**, never failed, when absent so
+    legacy captures keep working); `eye_frames` in both report paths; the dump
+    cleanup clears `eye_frames.log` too.
+  - **Robustness fix (found live):** `stereo_metrics` returns
+    `{"read_error": ...}` (and `frame_signature` returns `None`,
+    `comfort_checks` a failing check) for a truncated capture instead of raising;
+    `evaluate` reports a failing `frame_readable_<N>` for that frame. Before this,
+    the run that ended in `terminate` produced **no report at all** (PIL
+    `image file is truncated`).
+  - `tests/eye_frame_tests.cpp` (new) + CTest `eye_frame_record` (x86 **and**
+    x64): pins the exact wire format (7 fields, 3/4-value pose, four 16-float
+    matrices round-trip) + determinism.
+  - `tools/test_xrsim.py` **+5 → 44**: eye-frame parse + yaw span, metadata check
+    skipped-without / present-with, the report key, and the truncated-capture
+    robustness path.
+  - `tools/verify_reported_fixes.py` (new #68 invariant),
+    `src/host/README.md`, `docs/adr/0453-per-frame-camera-transform-capture.md`
+    (new).
+- **Evidence:**
+  - **Live** (`python tools/xrsim.py --reach-gameplay --duration 25 --interval
+    300`, allowed exception, `RIDDICKVR_SIM=1`, **fresh `dist\riddickvr-host.exe`**,
+    scratch artifacts, deleted after): reached live gameplay, **21 dumped frames
+    each with a camera transform** — `eye_frames.log` lines are real (e.g.
+    `frame=300 hmdpos=0.0000,1.7000,0.0000 hmdquat=0.0331,-0.0995,0.0033,0.9945
+    viewL=[... -0.0325 ...] viewR=[... +0.0325 ...] ...`) with the HMD quaternion
+    changing every frame. `--evaluate-only --downscale 4` →
+    `eye_frames {count 21, distinct 21, yaw_span_deg 39.511}` (matches the mock's
+    ±20° oscillation), `capture_metadata_present` **PASS** `21 frame(s) with
+    camera transform, 21 distinct; HMD yaw span 39.511 deg`, and the truncated
+    last frame is now a reported `frame_readable_6600` FAIL instead of a crash
+    (the report was written; before the fix the harness died with
+    `OSError: image file is truncated`).
+  - Offline: `python tools/test_xrsim.py` **44/44 PASS**; `xrsim.py --selftest`
+    PASS; all 9 `tools/test_*.py` + `validate_addresses` + `verify_hook_init` +
+    `verify_reported_fixes` + `scenario_tests.py --check` PASS.
+    `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host; **no
+    `-Deploy`**); CTest **13/13 PASS** on **x86 and x64** (new `eye_frame_record`).
+- **Blocker / honest limit:** the metadata records the **host-published**
+  transform (the transform the hook injects). It is host-side and
+  live-validated; the hook-side `GL_MODELVIEW` capture (ADR-0450/0451) and the
+  step-3 re-expression it enables still need one interactive **deploy** + headset
+  run (the loop must not deploy, and the sim install's hook is stale at 17:56).
+  The live run also re-shows the pre-existing "very dark gameplay frame ⇒
+  `no_vertical_disparity` dy=-4" registration artifact (wake 43/#72) — not
+  claimed as a stereo defect.
+- **Next:** one interactive deploy enables `ViewmodelObserve=1` (+ `NativeHands=1`,
+  `NativeHandTexture=1`) so the FP-pass modelview capture lands with an
+  `eye_frames` transform attached → #67 step 3 re-expresses it in head/controller
+  space. Otherwise #72 req 1 (the BarScan branch signal) is the top remaining
+  #68-adjacent item and is a hook change (blocked on the same deploy).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 46 — 2026-10-16 20:27 (scheduled loop)
 - **Unit:** GH **#61** (real skin diffuse on the native hands) — the standing
   prompt says "the baked diffuse decodes white; fix or keep the skin-tone

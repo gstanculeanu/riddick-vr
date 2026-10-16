@@ -26,3 +26,11 @@ The Host component is an independent 64-bit (x64) application responsible for al
   dumped frame (a frozen static 2D page). Each skip is logged as
   `DumpGate skip frame=N reason=blank|frozen`, parsed by the harness into the
   report's `content_gate` key. This keeps the graded window live and advancing.
+- In mock mode, every dumped frame also records the **camera transform** it was
+  rendered with -- the HMD pose plus the per-eye view and projection matrices --
+  in `<dump-dir>\eye_frames.log` (one line per frame; GH #68 requirement 1,
+  format pinned by the pure helper `src/host/eye_frame.h`). This makes a capture
+  self-describing in 3D: the harness reports it as `eye_frames` and the
+  `capture_metadata_present` check confirms it, and it is the camera transform
+  GH #67 step 3 needs to re-express the engine's first-person viewmodel in
+  head/controller space.

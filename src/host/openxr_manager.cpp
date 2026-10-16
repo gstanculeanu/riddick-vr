@@ -1,5 +1,6 @@
 #include "openxr_manager.h"
 #include "dump_gate.h"
+#include "eye_frame.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -1893,6 +1894,37 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                                   << " cinema=" << (cinemaMode ? 1 : 0)
                                   << " left=" << (okL ? "ok" : "err")
                                   << " right=" << (okR ? "ok" : "err") << "\n";
+                    }
+
+                    // GH #68 requirement 1: record the head/eye transform and
+                    // projection this frame was rendered with, so the capture is
+                    // self-describing in 3D -- the input GH #67 step 3 needs to
+                    // re-express the engine's first-person viewmodel in
+                    // head/controller space for the sampled frame.
+                    EyeFrameSample sample{};
+                    sample.hmdPos[0] = state.hmdPose.position.x;
+                    sample.hmdPos[1] = state.hmdPose.position.y;
+                    sample.hmdPos[2] = state.hmdPose.position.z;
+                    sample.hmdQuat[0] = state.hmdPose.orientation.x;
+                    sample.hmdQuat[1] = state.hmdPose.orientation.y;
+                    sample.hmdQuat[2] = state.hmdPose.orientation.z;
+                    sample.hmdQuat[3] = state.hmdPose.orientation.w;
+                    for (int i = 0; i < 16; ++i) {
+                        sample.viewL[i] = state.leftEyeView.m[i];
+                        sample.viewR[i] = state.rightEyeView.m[i];
+                        sample.projL[i] = state.leftEyeProjection.m[i];
+                        sample.projR[i] = state.rightEyeProjection.m[i];
+                    }
+                    const std::string eyePath = m_dumpDir + "\\eye_frames.log";
+                    std::ofstream eyeFile(eyePath,
+                                          (dumps == 0) ? std::ios::trunc
+                                                       : std::ios::app);
+                    if (eyeFile) {
+                        if (dumps == 0) {
+                            eyeFile << "# frame=NNNN hmdpos=x,y,z hmdquat=x,y,z,w"
+                                       " viewL=[16] viewR=[16] projL=[16] projR=[16]\n";
+                        }
+                        eyeFile << FormatEyeFrameLine(totalFrames, sample) << "\n";
                     }
                     dumps++;
                     // GH #72 requirement 2: remember this dump's signature so a

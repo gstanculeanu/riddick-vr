@@ -226,6 +226,25 @@ def main():
             "GH #72: the XRSIM gameplay window must be content-gated (blank "
             "interop warm-up / frozen repeats excluded) and report why")
 
+    # GH #68 requirement 1: every dumped frame must record the head/eye transform
+    # and projection it was rendered with, so a capture is self-describing in 3D
+    # (the input GH #67 step 3 needs). The wire format is a pure helper
+    # (src/host/eye_frame.h), unit-tested, parsed back by the harness, and
+    # surfaced in the report as `eye_frames`.
+    eye_frame = (ROOT / "src/host/eye_frame.h").read_text(encoding="utf-8")
+    require("FormatEyeFrameLine" in eye_frame and
+            "EyeFrameSample" in eye_frame and
+            "eye_frames.log" in host and
+            "FormatEyeFrameLine(totalFrames, sample)" in host and
+            "tests/eye_frame_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "eye_frame_record" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "def read_eye_frames" in xrsim_tool and
+            "def eye_frame_stats" in xrsim_tool and
+            "capture_metadata_present" in xrsim_tool and
+            '"eye_frames"' in xrsim_tool,
+            "GH #68: the mock host must record each dumped frame's camera "
+            "transform (eye pose/projection) and the harness must parse it")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.
@@ -300,7 +319,7 @@ def main():
             "and the skin-toned bake must stay pinned by a regression test")
 
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-67, #69, #71-72)")
+          "#62, #64-68, #69, #71-72)")
     return 0
 
 

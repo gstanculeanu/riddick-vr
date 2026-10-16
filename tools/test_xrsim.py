@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -599,6 +600,110 @@ def test_viewmodel_probe_check_requires_an_in_window_draw(td):
     assert rec["ok"] is True, rec
 
 
+# ----------------------- per-frame camera transform (GH #68 requirement 1)
+def _eye_frames_file(art, frames):
+    """Write an ``eye_frames.log`` in the host's wire format.
+
+    ``frames`` is a list of ``(frame, yaw_deg)``; the head pose is a pure yaw
+    rotation so the recorded yaw span is easy to assert.
+    """
+    def mat():
+        vals = ["0.0000"] * 16
+        for i in (0, 5, 10, 15):
+            vals[i] = "1.0000"
+        return "[" + " ".join(vals) + "]"
+
+    lines = ["# frame=NNNN hmdpos=x,y,z hmdquat=x,y,z,w "
+             "viewL=[16] viewR=[16] projL=[16] projR=[16]"]
+    for frame, yaw in frames:
+        half = math.radians(yaw) / 2.0
+        qx, qy, qz, qw = 0.0, math.sin(half), 0.0, math.cos(half)
+        lines.append(f"frame={frame} hmdpos=0.0000,1.7000,0.0000 "
+                     f"hmdquat={qx:.4f},{qy:.4f},{qz:.4f},{qw:.4f} "
+                     f"viewL={mat()} viewR={mat()} projL={mat()} projR={mat()}")
+    (art / xrsim.EYE_FRAMES_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_eye_frame_log_parsed(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _eye_frames_file(art, [(15, -20.0), (30, 20.0)])
+    frames = xrsim.read_eye_frames(art)
+    assert set(frames) == {15, 30}, frames
+    rec = frames[15]
+    assert rec["hmd_pos"] == [0.0, 1.7, 0.0], rec
+    assert len(rec["hmd_quat"]) == 4, rec
+    assert len(rec["view_l"]) == 16 and len(rec["proj_r"]) == 16, rec
+    stats = xrsim.eye_frame_stats(art)
+    assert stats["count"] == 2 and stats["distinct"] == 2, stats
+    assert abs(stats["yaw_span_deg"] - 40.0) < 0.5, stats
+    # Absent file -> empty, never fabricated.
+    assert xrsim.read_eye_frames(Path(td) / "nope") == {}
+    assert xrsim.eye_frame_stats(Path(td) / "nope") == {
+        "count": 0, "distinct": 0, "yaw_span_deg": None}
+
+
+def test_eye_frame_check_skipped_without_file(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "capture_metadata_present"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
+
+
+def test_eye_frame_check_present_with_file(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    _eye_frames_file(art, [(15, 0.0)])
+    _, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "capture_metadata_present"][0]
+    assert rec["ok"] is True and not rec.get("skip"), rec
+    assert "camera transform" in rec["detail"], rec
+
+
+def test_eye_frame_report_key_records_yaw_span(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0015.bmp", _content(seed=1))
+    _save(art / "right_0015.bmp", _shift_h(_content(seed=1), 3))
+    _save(art / "test_frame_0030.bmp", _content(seed=2))
+    _save(art / "right_0030.bmp", _shift_h(_content(seed=2), 3))
+    _write_labels(art, {15: False, 30: False})
+    _eye_frames_file(art, [(15, -10.0), (30, 10.0)])
+    rep = Path(td) / "report.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                    "--report-file", str(rep)])
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    assert payload["eye_frames"]["count"] == 2, payload["eye_frames"]
+    assert abs(payload["eye_frames"]["yaw_span_deg"] - 20.0) < 0.5, payload["eye_frames"]
+
+
+def test_truncated_capture_is_reported_not_crashed(td):
+    """A run is ended by ``terminate``, so the last dump can be a partial BMP.
+    One unreadable frame must be *reported*, never abort the harness report."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art / "test_frame_0015.bmp", _content(seed=1))
+    _save(art / "right_0015.bmp", _shift_h(_content(seed=1), 3))
+    _save(art / "test_frame_0030.bmp", _content(seed=2))
+    _save(art / "right_0030.bmp", _shift_h(_content(seed=2), 3))
+    for name in ("test_frame_0030.bmp", "right_0030.bmp"):
+        p = art / name
+        data = p.read_bytes()
+        p.write_bytes(data[: len(data) // 2])
+    rep = Path(td) / "report.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                         "--report-file", str(rep)])
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    assert rc == 1, payload
+    unreadable = [c for c in payload["checks"] if c["check"].startswith("frame_readable")]
+    assert unreadable and unreadable[0]["ok"] is False, payload["checks"]
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -632,7 +737,12 @@ def main() -> int:
              test_viewmodel_probe_stats_parse,
              test_viewmodel_probe_counts_matrix_composition,
              test_viewmodel_probe_check_skipped_without_lines,
-             test_viewmodel_probe_check_requires_an_in_window_draw)
+             test_viewmodel_probe_check_requires_an_in_window_draw,
+             test_eye_frame_log_parsed,
+             test_eye_frame_check_skipped_without_file,
+             test_eye_frame_check_present_with_file,
+             test_eye_frame_report_key_records_yaw_span,
+             test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

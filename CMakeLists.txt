@@ -176,4 +176,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/host
     )
     add_test(NAME dump_gate_gameplay_only COMMAND riddick_vr_dump_gate_tests)
+
+    # GH #68 (requirement 1): the mock host's per-dump eye pose/projection record
+    # (src/host/eye_frame.h) -- the 3D transform that makes a capture
+    # interpretable (and the input GH #67 step 3 needs).
+    add_executable(riddick_vr_eye_frame_tests tests/eye_frame_tests.cpp)
+    target_include_directories(riddick_vr_eye_frame_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
+    )
+    add_test(NAME eye_frame_record COMMAND riddick_vr_eye_frame_tests)
 endif()

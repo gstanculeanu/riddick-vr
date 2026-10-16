@@ -47,12 +47,19 @@ warm-up) or byte-identical to the last dumped frame (a frozen static page), so t
 graded window is live, advancing 3D gameplay. The report carries
 ``content_gate {blank_skipped, frozen_skipped}`` and, for gameplay-only runs, the
 ``gameplay_window_has_content`` check.
+
+Every dumped frame also carries the head/eye transform and projection the mock
+host rendered it with (``eye_frames.log`` in the dump dir, GH #68 requirement 1),
+so a capture is self-describing in 3D. The report's ``eye_frames`` key summarises
+it and the ``capture_metadata_present`` check confirms it when present (skipped
+for legacy captures).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -102,6 +109,17 @@ DISPLAY_LABEL_RE = re.compile(
     r"frame=(\d+)\s+cinema=([01])\s+left=(\w+)\s+right=(\w+)")
 DISPLAY_LABEL_FILE = "display_branch.log"
 
+# GH #68 requirement 1: the mock host writes one line per *dumped* frame with the
+# head/eye transform and projection used to render it (`src/host/eye_frame.h`),
+# so a capture is self-describing in 3D -- the input GH #67 step 3 needs. Parsed
+# here for the report; `capture_metadata_present` is *skipped* when the file is
+# absent (a legacy capture or a host build predating #68), never failed.
+EYE_FRAMES_FILE = "eye_frames.log"
+EYE_FRAME_RE = re.compile(
+    r"frame=(\d+)\s+hmdpos=([-\d.,eE]+)\s+hmdquat=([-\d.,eE]+)\s+"
+    r"viewL=\[([-\d.eE ]+)\]\s+viewR=\[([-\d.eE ]+)\]\s+"
+    r"projL=\[([-\d.eE ]+)\]\s+projR=\[([-\d.eE ]+)\]")
+
 # GH #72 requirement 2: the mock host's content gate logs every gameplay frame
 # it kept out of the graded window (all-black interop warm-up = `blank`; a
 # byte-identical repeat of the last dumped frame = `frozen`). Parsed so the
@@ -138,9 +156,16 @@ def stereo_metrics(left_path: Path, right_path: Path, search=48, downscale=1):
     ``downscale`` (integer >= 1) block-subsamples both images before the search
     so multi-megapixel eye buffers can be analysed quickly; dx/dy are then in
     downscaled pixels (multiply by ``downscale`` for the full-res shift).
+
+    A truncated/unreadable capture (the run is ended by ``terminate``, so the
+    last dump can be partial) returns ``{"read_error": ...}`` instead of raising,
+    so one bad frame cannot abort the whole harness report.
     """
-    L = np.array(Image.open(left_path).convert("L"), dtype=np.float32)
-    R = np.array(Image.open(right_path).convert("L"), dtype=np.float32)
+    try:
+        L = np.array(Image.open(left_path).convert("L"), dtype=np.float32)
+        R = np.array(Image.open(right_path).convert("L"), dtype=np.float32)
+    except (OSError, ValueError, SyntaxError) as exc:
+        return {"read_error": str(exc)}
     ds = max(1, int(downscale))
     if ds > 1:
         L = L[::ds, ::ds]
@@ -229,9 +254,81 @@ def read_display_branch_labels(artifacts: Path):
     return labels
 
 
+def _parse_csv_floats(text):
+    return [float(v) for v in text.split(",") if v != ""]
+
+
+def read_eye_frames(artifacts):
+    """GH #68 requirement 1: map frame number -> camera transform.
+
+    Read from the mock host's ``eye_frames.log`` (``src/host/eye_frame.h``). Each
+    record is the HMD pose plus the per-eye view and projection matrices that
+    produced the dumped frame. Returns ``{}`` when the file is absent (a legacy
+    capture or a host build predating #68).
+    """
+    path = Path(artifacts) / EYE_FRAMES_FILE
+    frames = {}
+    if not path.is_file():
+        return frames
+    for line in path.read_text(errors="ignore").splitlines():
+        m = EYE_FRAME_RE.search(line)
+        if not m:
+            continue
+        try:
+            frames[int(m.group(1))] = {
+                "hmd_pos": _parse_csv_floats(m.group(2)),
+                "hmd_quat": _parse_csv_floats(m.group(3)),
+                "view_l": [float(v) for v in m.group(4).split()],
+                "view_r": [float(v) for v in m.group(5).split()],
+                "proj_l": [float(v) for v in m.group(6).split()],
+                "proj_r": [float(v) for v in m.group(7).split()],
+            }
+        except ValueError:
+            continue
+    return frames
+
+
+def _quat_yaw_deg(q):
+    x, y, z, w = q
+    return math.degrees(math.atan2(2.0 * (w * y + x * z),
+                                   1.0 - 2.0 * (y * y + z * z)))
+
+
+def eye_frame_stats(artifacts):
+    """Summarise the per-dump camera transforms (GH #68 requirement 1).
+
+    ``count`` is how many dumped frames carry a recorded transform, ``distinct``
+    how many distinct HMD poses there were, and ``yaw_span_deg`` the peak-to-peak
+    HMD yaw. A mock run oscillates the head, so a non-zero yaw span is a concrete
+    "the capture window was not a frozen head" signal.
+    """
+    frames = read_eye_frames(artifacts)
+    if not frames:
+        return {"count": 0, "distinct": 0, "yaw_span_deg": None}
+    yaws = []
+    poses = set()
+    for rec in frames.values():
+        q = rec["hmd_quat"]
+        if len(q) != 4:
+            continue
+        yaws.append(_quat_yaw_deg(q))
+        poses.add(tuple(round(v, 3) for v in q) +
+                  tuple(round(v, 3) for v in rec["hmd_pos"]))
+    span = (max(yaws) - min(yaws)) if yaws else None
+    return {"count": len(frames), "distinct": len(poses),
+            "yaw_span_deg": round(span, 3) if span is not None else None}
+
+
 def frame_signature(path: Path):
-    """Cheap 16x16 luma signature used to tell live frames from a static scene."""
-    return Image.open(path).convert("L").resize((16, 16)).tobytes()
+    """Cheap 16x16 luma signature used to tell live frames from a static scene.
+
+    Returns ``None`` for a truncated/unreadable capture so one partial frame
+    cannot abort the harness (the run is ended by ``terminate``).
+    """
+    try:
+        return Image.open(path).convert("L").resize((16, 16)).tobytes()
+    except (OSError, ValueError, SyntaxError):
+        return None
 
 
 def extract_run_section(text: str) -> str:
@@ -283,9 +380,13 @@ def capture_health_checks(lefts):
         checks.append({"check": "scene_advanced", "ok": True, "skip": True,
                        "detail": f"only {len(lefts)} frame(s); cannot judge"})
         return checks
-    sigs = [frame_signature(p) for p in lefts]
+    sigs = [s for s in (frame_signature(p) for p in lefts) if s]
+    if len(sigs) < 2:
+        checks.append({"check": "scene_advanced", "ok": True, "skip": True,
+                       "detail": f"only {len(sigs)} readable frame(s); cannot judge"})
+        return checks
     distinct = len(set(sigs))
-    detail = f"{distinct}/{len(lefts)} distinct frames"
+    detail = f"{distinct}/{len(sigs)} distinct frames"
     if distinct < 2:
         detail += " (frozen capture: cannot validate stereo on a static scene)"
     checks.append({"check": "scene_advanced", "ok": distinct >= 2, "detail": detail})
@@ -415,7 +516,11 @@ def active_rect_fill(log_text):
 
 # ------------------------------------------------------------------ comfort
 def comfort_checks(left_path: Path):
-    arr = np.array(Image.open(left_path).convert("RGB"))
+    try:
+        arr = np.array(Image.open(left_path).convert("RGB"))
+    except (OSError, ValueError, SyntaxError) as exc:
+        return False, [{"check": "frame_readable", "ok": False,
+                        "detail": f"unreadable capture: {exc}"}]
     h, w, _ = arr.shape
     green = (arr[:, :, 1] > 200) & (arr[:, :, 0] < 50) & (arr[:, :, 2] < 50)
     green_n = int(green.sum())
@@ -469,7 +574,8 @@ def build_host_cmd(args, artifacts: Path):
 def run_sim(args, artifacts: Path):
     artifacts.mkdir(parents=True, exist_ok=True)
     for f in (list(artifacts.glob("*.bmp")) + list(artifacts.glob("*.png")) +
-              [artifacts / DISPLAY_LABEL_FILE, artifacts / "host.log"]):
+              [artifacts / DISPLAY_LABEL_FILE, artifacts / EYE_FRAMES_FILE,
+               artifacts / "host.log"]):
         try:
             f.unlink()
         except OSError:
@@ -572,6 +678,11 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
                                "detail": "missing right_*.bmp"})
                 continue
             m = stereo_metrics(lp, rp, downscale=args.downscale)
+            if m.get("read_error"):
+                checks.append({"group": "stereo", "check": f"frame_readable_{n}",
+                               "ok": False, "frame": n, "branch": branch_name,
+                               "detail": f"unreadable eye capture: {m['read_error']}"})
+                continue
             _, sub = assert_stereo(m, require_disparity=args.require_disparity)
             for c in sub:
                 rec = {**c, "group": "stereo", "frame": n, "branch": branch_name,
@@ -625,6 +736,21 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
         checks.append({"group": "capture", "check": "gameplay_full_bleed_reached",
                        "ok": fill is not None and fill >= FULL_BLEED_MIN_FILL,
                        "detail": detail})
+    # GH #68 requirement 1: a capture is only interpretable in 3D if the camera
+    # transform that produced each frame was recorded. Skipped (not failed) when
+    # absent, so legacy captures and pre-#68 hosts keep working.
+    eye_stats = eye_frame_stats(artifacts)
+    if eye_stats["count"]:
+        checks.append({"group": "capture", "check": "capture_metadata_present",
+                       "ok": True,
+                       "detail": (f"{eye_stats['count']} frame(s) with camera "
+                                  f"transform, {eye_stats['distinct']} distinct; "
+                                  f"HMD yaw span {eye_stats['yaw_span_deg']} deg")})
+    else:
+        checks.append({"group": "capture", "check": "capture_metadata_present",
+                       "ok": True, "skip": True,
+                       "detail": f"no {EYE_FRAMES_FILE}: per-frame camera "
+                                 "transform unknown (legacy capture / pre-#68 host)"})
     # 3. interaction markers
     req = []
     if args.scenario and Path(args.scenario).is_file():
@@ -738,6 +864,7 @@ def cmd_evaluate_only(args):
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "content_gate": content_gate_stats(host_text),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
+                        "eye_frames": eye_frame_stats(artifacts),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -808,6 +935,7 @@ def main(argv=None):
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "content_gate": content_gate_stats(host_log),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
+                        "eye_frames": eye_frame_stats(artifacts),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
