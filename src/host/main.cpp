@@ -52,6 +52,7 @@ int main(int argc, char* argv[]) {
     bool verbose = false;
     bool autoExitWithGame = false;
     bool mockMode = false;
+    bool scenarioImmediate = false;
     std::string dumpDir = "";
     std::string configPath = "";
     std::string scenarioPath = "";
@@ -85,6 +86,8 @@ int main(int argc, char* argv[]) {
             scenarioPath = argv[++i];
         } else if (arg == "--scenario" && i + 1 < argc) {
             scenarioName = argv[++i];
+        } else if (arg == "--scenario-immediate") {
+            scenarioImmediate = true;
         } else if (arg == "--scenario-dir" && i + 1 < argc) {
             scenarioDir = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
@@ -101,6 +104,7 @@ int main(int argc, char* argv[]) {
                       << "  --scenario-file <PATH>  Play a JSON mock-controller scenario\n"
                       << "  --scenario <NAME>       Play tools/scenarios/<NAME>.json trajectory in mock mode\n"
                       << "  --scenario-dir <PATH>   Scenario directory override\n"
+                      << "  --scenario-immediate    Start the scenario timeline at frame 0 (default: wait for gameplay)\n"
                       << "  --verbose               Enable verbose debug logging\n"
                       << "  --help, -h              Show this help message\n";
             return 0;
@@ -146,6 +150,7 @@ int main(int argc, char* argv[]) {
         xrManager.SetMockMode(true, dumpDir, maxFrames, dumpInterval);
         xrManager.SetDumpGameplayOnly(dumpGameplayOnly);
     }
+    xrManager.SetScenarioStartOnGameplay(!scenarioImmediate);
     if (!scenarioPath.empty()) {
         xrManager.SetScenarioFile(scenarioPath);
     }

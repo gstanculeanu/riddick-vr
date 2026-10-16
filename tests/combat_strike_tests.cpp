@@ -120,6 +120,47 @@ int main() {
                           0.0f, -0.30f, 0.0f, -0.30f).dualCrossSlash,
           "a raised cross threshold must suppress a weaker cross-slash");
 
+    // GH #65: world velocity -> HMD yaw-only frame.
+    {
+        using RiddickVR::ToHeadYawLocal;
+        // Identity orientation: unchanged.
+        StrikeVelocity id = ToHeadYawLocal(0.3f, -0.4f, -1.5f, 0.0f, 0.0f, 0.0f, 1.0f);
+        Check(std::fabs(id.x - 0.3f) < 1e-5f && std::fabs(id.y + 0.4f) < 1e-5f &&
+              std::fabs(id.z + 1.5f) < 1e-5f, "identity HMD must leave velocity unchanged");
+
+        // Yaw +90 deg about +Y faces world -X; a world -X swing is a forward punch.
+        const float h = 0.70710678f;
+        StrikeVelocity turned = ToHeadYawLocal(-2.0f, 0.0f, 0.0f, 0.0f, h, 0.0f, h);
+        Check(std::fabs(turned.x) < 1e-4f && std::fabs(turned.z + 2.0f) < 1e-4f,
+              "world -X swing while facing -X must be local forward (-Z)");
+        Check(ClassifyStrike(t, still, turned, 0.0f, -0.30f, 0.0f, -0.30f).forwardPunch,
+              "a swing along the facing direction must classify as a forward punch");
+        // The same world velocity without the transform is not a forward punch.
+        Check(!ClassifyStrike(t, still, StrikeVelocity{-2.0f, 0.0f, 0.0f}, 0.0f, -0.30f, 0.0f, -0.30f).forwardPunch,
+              "untransformed sideways world velocity is not a forward punch");
+        // Facing -X, the body's right is world -Z (forward x up).
+        StrikeVelocity side = ToHeadYawLocal(0.0f, 0.0f, -2.0f, 0.0f, h, 0.0f, h);
+        Check(std::fabs(side.x - 2.0f) < 1e-4f && std::fabs(side.z) < 1e-4f,
+              "facing -X, world -Z must be local right (+X)");
+        // Yaw 180 deg: world +Z is forward.
+        StrikeVelocity back = ToHeadYawLocal(0.0f, 0.0f, 2.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        Check(std::fabs(back.z + 2.0f) < 1e-4f, "facing +Z, world +Z must be local forward");
+
+        // Pitched HMD (30 deg about X) keeps Y and the horizontal axes.
+        const float s15 = std::sin(15.0f * 3.14159265f / 180.0f);
+        const float c15 = std::cos(15.0f * 3.14159265f / 180.0f);
+        StrikeVelocity pitched = ToHeadYawLocal(0.2f, 1.7f, -1.4f, s15, 0.0f, 0.0f, c15);
+        Check(std::fabs(pitched.y - 1.7f) < 1e-5f && std::fabs(pitched.x - 0.2f) < 1e-4f &&
+              std::fabs(pitched.z + 1.4f) < 1e-4f, "pitch must not alter the yaw-only frame");
+
+        // Degenerate quaternions pass through.
+        StrikeVelocity zero = ToHeadYawLocal(1.0f, 2.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        Check(zero.x == 1.0f && zero.y == 2.0f && zero.z == 3.0f, "zero quaternion must pass through");
+        // Looking straight up (pitch 90 deg): forward projects to zero length.
+        StrikeVelocity up = ToHeadYawLocal(1.0f, 2.0f, 3.0f, h, 0.0f, 0.0f, h);
+        Check(up.x == 1.0f && up.y == 2.0f && up.z == 3.0f, "looking straight up must pass through");
+    }
+
     if (g_failures == 0) {
         std::puts("combat strike tests passed");
     }

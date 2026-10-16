@@ -99,6 +99,11 @@ void LoadVRConfig() {
         cfg.nativeHandTextureVFlip = ReadInt(iniPath, "NativeHandTextureVFlip", cfg.nativeHandTextureVFlip) ? 1 : 0;
         // GH #58: select the offline-posed mesh variant (ADR-0443).
         cfg.nativeHandPose = ReadInt(iniPath, "NativeHandPose", cfg.nativeHandPose) ? 1 : 0;
+        // GH #64: IK upper-arm tube with native hands; GH #46: weapon fade.
+        cfg.nativeHandUpperArm = ReadInt(iniPath, "NativeHandUpperArm", cfg.nativeHandUpperArm) ? 1 : 0;
+        cfg.handFadeWhenWeapon = ReadInt(iniPath, "HandFadeWhenWeapon", cfg.handFadeWhenWeapon) ? 1 : 0;
+        VR_LOG_INFO("Hand visuals: native_upper_arm=%d fade_when_weapon=%d",
+                    cfg.nativeHandUpperArm, cfg.handFadeWhenWeapon);
         // GH #62: front-of-HMD block/guard envelope (head-local metres). The
         // guard must sit in front of the face, not below the view, so Y is
         // clamped well above the old -0.42 m low-hold floor.
@@ -122,13 +127,56 @@ void LoadVRConfig() {
         cfg.strikeUppercutMaxY = ClampF(ReadFloat(iniPath, "StrikeUppercutMaxY", cfg.strikeUppercutMaxY), -0.60f, 0.20f);
         cfg.strikeUppercutVz = ClampF(ReadFloat(iniPath, "StrikeUppercutVz", cfg.strikeUppercutVz), -8.0f, 0.0f);
         cfg.strikeCrossVx = ClampF(ReadFloat(iniPath, "StrikeCrossVx", cfg.strikeCrossVx), 0.10f, 8.0f);
+        // GH #65: head-local strike velocity and held melee clicks.
+        cfg.headLocalVelocity = ReadInt(iniPath, "HeadLocalVelocity", cfg.headLocalVelocity) ? 1 : 0;
+        cfg.meleeClickHoldMs = ReadInt(iniPath, "MeleeClickHoldMs", cfg.meleeClickHoldMs);
+        if (cfg.meleeClickHoldMs < 0) cfg.meleeClickHoldMs = 0;
+        if (cfg.meleeClickHoldMs > 250) cfg.meleeClickHoldMs = 250;
+        // GH #62: guard pose hysteresis.
+        cfg.guardEngageMs = ReadInt(iniPath, "GuardEngageMs", cfg.guardEngageMs);
+        if (cfg.guardEngageMs < 0) cfg.guardEngageMs = 0;
+        if (cfg.guardEngageMs > 500) cfg.guardEngageMs = 500;
+        cfg.guardReleaseMs = ReadInt(iniPath, "GuardReleaseMs", cfg.guardReleaseMs);
+        if (cfg.guardReleaseMs < 0) cfg.guardReleaseMs = 0;
+        if (cfg.guardReleaseMs > 1000) cfg.guardReleaseMs = 1000;
+        cfg.guardSteadySpeed = ClampF(ReadFloat(iniPath, "GuardSteadySpeed", cfg.guardSteadySpeed), 0.3f, 4.0f);
+        // GH #52: combat stance thresholds; exit is kept below enter.
+        cfg.stanceEnterTrigger = ClampF(ReadFloat(iniPath, "StanceEnterTrigger", cfg.stanceEnterTrigger), 0.20f, 1.0f);
+        cfg.stanceExitTrigger = ClampF(ReadFloat(iniPath, "StanceExitTrigger", cfg.stanceExitTrigger), 0.05f, 1.0f);
+        if (cfg.stanceExitTrigger >= cfg.stanceEnterTrigger) cfg.stanceExitTrigger = cfg.stanceEnterTrigger - 0.05f;
+        cfg.stanceHoldMs = ReadInt(iniPath, "StanceHoldMs", cfg.stanceHoldMs);
+        if (cfg.stanceHoldMs < 0) cfg.stanceHoldMs = 0;
+        if (cfg.stanceHoldMs > 1000) cfg.stanceHoldMs = 1000;
+        cfg.meleeRequiresStance = ReadInt(iniPath, "MeleeRequiresStance", cfg.meleeRequiresStance) ? 1 : 0;
+        VR_LOG_INFO("Combat input config: head_local_velocity=%d melee_click_hold_ms=%d guard_engage_ms=%d guard_release_ms=%d guard_steady=%.2f stance=[%.2f,%.2f,%dms] melee_requires_stance=%d",
+            cfg.headLocalVelocity, cfg.meleeClickHoldMs, cfg.guardEngageMs, cfg.guardReleaseMs, cfg.guardSteadySpeed,
+            cfg.stanceEnterTrigger, cfg.stanceExitTrigger, cfg.stanceHoldMs, cfg.meleeRequiresStance);
         // GH #66: per-draw engine viewmodel suppression (default off; the
         // signature is provisional and must be confirmed on a headset).
         cfg.suppressEngineViewmodel = ReadInt(iniPath, "SuppressEngineViewmodel", cfg.suppressEngineViewmodel) ? 1 : 0;
         cfg.viewmodelDepthClearWindow = ReadInt(iniPath, "ViewmodelDepthClearWindow", cfg.viewmodelDepthClearWindow) ? 1 : 0;
-        // GH #67 step 2: observation-only first-person viewmodel probe.
-        cfg.viewmodelObserve = ReadInt(iniPath, "ViewmodelObserve", cfg.viewmodelObserve) ? 1 : 0;
-        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d vm_observe=%d)",
+        // GH #63/#66/#67: window opener, pass trace and controller-driven engine arms.
+        cfg.viewmodelTrace = ReadInt(iniPath, "ViewmodelTrace", cfg.viewmodelTrace) ? 1 : 0;
+        {
+            // Read as float: GetPrivateProfileInt does not return a usable -1.
+            const int opener = static_cast<int>(ReadFloat(iniPath, "ViewmodelWindowOpener", static_cast<float>(cfg.viewmodelWindowOpener)));
+            cfg.viewmodelWindowOpener = (opener < 0) ? -1 : (opener > 3 ? 3 : opener);
+        }
+        cfg.viewmodelNearRatio = ClampF(ReadFloat(iniPath, "ViewmodelNearRatio", cfg.viewmodelNearRatio), 0.05f, 0.95f);
+        cfg.driveEngineViewmodel = ReadInt(iniPath, "DriveEngineViewmodel", cfg.driveEngineViewmodel) ? 1 : 0;
+        cfg.viewmodelUnitsPerMeter = ClampF(ReadFloat(iniPath, "ViewmodelUnitsPerMeter", cfg.viewmodelUnitsPerMeter), 1.0f, 200.0f);
+        cfg.viewmodelAnchorX = ClampF(ReadFloat(iniPath, "ViewmodelAnchorX", cfg.viewmodelAnchorX), -1.5f, 1.5f);
+        cfg.viewmodelAnchorY = ClampF(ReadFloat(iniPath, "ViewmodelAnchorY", cfg.viewmodelAnchorY), -1.5f, 1.5f);
+        cfg.viewmodelAnchorZ = ClampF(ReadFloat(iniPath, "ViewmodelAnchorZ", cfg.viewmodelAnchorZ), -1.5f, 1.5f);
+        cfg.viewmodelDriveYaw = ClampF(ReadFloat(iniPath, "ViewmodelDriveYaw", cfg.viewmodelDriveYaw), -180.0f, 180.0f);
+        cfg.viewmodelDrivePitch = ClampF(ReadFloat(iniPath, "ViewmodelDrivePitch", cfg.viewmodelDrivePitch), -180.0f, 180.0f);
+        cfg.viewmodelDriveRoll = ClampF(ReadFloat(iniPath, "ViewmodelDriveRoll", cfg.viewmodelDriveRoll), -180.0f, 180.0f);
+        VR_LOG_INFO("Viewmodel config: suppress=%d drive=%d trace=%d opener=%d nearRatio=%.2f upm=%.1f anchor=[%.2f,%.2f,%.2f] rot=[%.0f,%.0f,%.0f]",
+            cfg.suppressEngineViewmodel, cfg.driveEngineViewmodel, cfg.viewmodelTrace,
+            cfg.viewmodelWindowOpener, cfg.viewmodelNearRatio, cfg.viewmodelUnitsPerMeter,
+            cfg.viewmodelAnchorX, cfg.viewmodelAnchorY, cfg.viewmodelAnchorZ,
+            cfg.viewmodelDriveYaw, cfg.viewmodelDrivePitch, cfg.viewmodelDriveRoll);
+        VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,
             cfg.nativeHandPose, cfg.nativeHandTexture, cfg.nativeHandYaw,
@@ -136,8 +184,7 @@ void LoadVRConfig() {
             cfg.nativeHandRoll, cfg.guardYMin, cfg.guardYMax,
             cfg.guardZMin, cfg.guardZMax, cfg.guardMaxHandSpan,
             cfg.strikeForwardVz, cfg.strikeHookVx, cfg.strikeUppercutVy,
-            cfg.strikeCrossVx, cfg.suppressEngineViewmodel, cfg.viewmodelDepthClearWindow,
-            cfg.viewmodelObserve);
+            cfg.strikeCrossVx, cfg.suppressEngineViewmodel, cfg.viewmodelDepthClearWindow);
     } else {
         VR_LOG_INFO("VR config: no riddick_vr.ini found, using defaults");
     }

@@ -58,6 +58,8 @@ NativeHandRoll=0
 ; the fallback when the texture is disabled or unavailable.
 ; VFlip is PROVISIONAL (UV orientation is not yet validated on a headset);
 ; set to 1 if the texture reads vertically mirrored.
+; GH #61: if the hand still reads white, paste the `NativeHand GL state:` line
+; from the log into the issue.
 NativeHandTexture=1
 NativeHandTextureVFlip=0
 ; --- Native hand pose (GH #58) ---
@@ -66,6 +68,12 @@ NativeHandTextureVFlip=0
 ; geometry. 0 = bind (default). The baked pose is an evidence-backed but
 ; unvalidated VR fit -- compare both on a headset before enabling it.
 NativeHandPose=0
+; GH #64: 1 = also draw the IK upper-arm tube (shoulder to elbow) with native
+; hands. 0 = off (the tube does not join the native mesh and reads as a stray block).
+NativeHandUpperArm=0
+; GH #46: 1 = fade the hands to 25% while a weapon is held (trigger or two-handed
+; grip); a boxer guard never fades. 0 = never fade.
+HandFadeWhenWeapon=1
 ; --- Front-of-HMD block/guard window (GH #62) ---
 ; Head-local hand window (metres relative to the HMD: +Y up, -Z forward into the
 ; view). Block = both fists held in front of the face within this window; a low
@@ -90,6 +98,22 @@ StrikeUppercutVy=1.35   ; uppercut: hand Vy above this
 StrikeUppercutMaxY=-0.10 ; ...starting below the view (y < this)
 StrikeUppercutVz=-0.20  ; ...with some forward travel
 StrikeCrossVx=1.10      ; dual cross-slash: opposing |Vx| swing
+; GH #65: 1 = rotate controller world velocity into the HMD yaw frame so swings
+; register whichever way you face; 0 = legacy world axes (only facing stage -Z).
+HeadLocalVelocity=1
+; GH #65: ms (0-250) a melee click stays held; 0 = legacy instant down+up.
+MeleeClickHoldMs=60
+; GH #62: guard pose hold time to engage (ms), survive-pose-loss time (ms), and
+; the hand speed (m/s) below which the hands count as steady.
+GuardEngageMs=40
+GuardReleaseMs=80
+GuardSteadySpeed=1.4
+; GH #52: combat stance trigger thresholds (enter/exit, 0-1) and hold time (ms);
+; MeleeRequiresStance=1 ignores swings outside the stance (0 = swings always live).
+StanceEnterTrigger=0.85
+StanceExitTrigger=0.60
+StanceHoldMs=100
+MeleeRequiresStance=0
 ; --- Engine viewmodel suppression (GH #66, approach 2) ---
 ; 1 = skip the engine's own first-person arms/hands at the draw level so only
 ; the VR/native hands are visible (the duplicate-hands fix). Default 0.
@@ -101,8 +125,28 @@ SuppressEngineViewmodel=0
 ; Which boundary opens the suppression window: 1 = depth-only clear (default),
 ; 0 = never open (inert even when suppression is enabled).
 ViewmodelDepthClearWindow=1
-; GH #67 step 2: 1 = observe-only probe of the first-person viewmodel pass.
-; Opens the same depth-only-clear window but never skips a draw; logs
-; "ViewmodelProbe [#N]: inside=.. outside=.. sample=.." + the sampled
-; GL_MODELVIEW every 300 presented frames. Default 0.
-ViewmodelObserve=0
+; GH #63/#66: log the engine's per-frame GL pass signature every 300 frames
+; ("Viewmodel pass trace"). Tokens: C colour clear, D depth-only clear, P<near>
+; perspective load, O ortho load, d<n> draw run. Paste it in the issue to pin
+; the real first-person pass boundary. 0 = off.
+ViewmodelTrace=0
+; GH #66: what opens the viewmodel window. -1 = derive from
+; ViewmodelDepthClearWindow; 0 none, 1 depth-only clear, 2 near-plane drop
+; (a perspective load with a much shorter near plane), 3 either.
+ViewmodelWindowOpener=-1
+; GH #66: near-plane-drop opens when near < worldNear * this (0.05 - 0.95).
+ViewmodelNearRatio=0.5
+; GH #67: drive the engine's own arms with the dominant controller instead of
+; hiding them. Opt-in, experimental; ignored while SuppressEngineViewmodel=1.
+; Needs a headset run to tune the values below.
+DriveEngineViewmodel=0
+; GH #67: engine units per metre (provisional 30.3 ~ 1/0.033).
+ViewmodelUnitsPerMeter=30.3
+; GH #67: where the engine draws the viewmodel, in head space (metres, -Z forward).
+ViewmodelAnchorX=0.18
+ViewmodelAnchorY=-0.22
+ViewmodelAnchorZ=-0.38
+; GH #67: extra rotation on the controller orientation (degrees).
+ViewmodelDriveYaw=0
+ViewmodelDrivePitch=0
+ViewmodelDriveRoll=0

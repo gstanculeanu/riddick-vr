@@ -1,8 +1,4 @@
 #include "openxr_manager.h"
-#include "comfort_vignette.h"
-#include "dump_gate.h"
-#include "eye_frame.h"
-#include "frame_time_stats.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -10,6 +6,8 @@
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <cstdio>
+#include <cstdint>
 
 namespace RiddickVR {
 
@@ -1323,81 +1321,6 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
     }
 }
 
-// GH #72 requirement 2: mean luma at/below this is the all-black GL<->D3D11
-// interop warm-up. Matches the harness's `blank_gameplay` rule (mean <= 1.0).
-static constexpr float kBlankMeanLuma = 1.0f;
-
-// GH #72 requirement 2: classify a candidate capture's content from the
-// left-eye texture. The mean luma separates the all-black interop warm-up
-// (mean ~0) from real content -- computed over *every* pixel so it matches the
-// harness's full-image rule (a sparse grid can miss a small bright element and
-// misjudge a dark-but-real frame as blank). The 16x16 luma signature lets the
-// caller drop byte-identical repeats (a static 2D startup page). Returns false
-// when the texture cannot be sampled -- the caller then treats the frame as
-// Live, so a probe failure never blocks a capture.
-static bool SampleEyeContent(ID3D11Device* device, ID3D11DeviceContext* context,
-                             ID3D11Texture2D* texture,
-                             float* outMeanLuma, uint64_t* outSignature) {
-    if (!device || !context || !texture) return false;
-    D3D11_TEXTURE2D_DESC desc{};
-    texture->GetDesc(&desc);
-    if (desc.Width == 0 || desc.Height == 0) return false;
-
-    D3D11_TEXTURE2D_DESC stagingDesc = desc;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    stagingDesc.MiscFlags = 0;
-
-    ID3D11Texture2D* staging = nullptr;
-    if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging) {
-        return false;
-    }
-    context->CopyResource(staging, texture);
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-        staging->Release();
-        return false;
-    }
-
-    // Full-image mean luma (plain (R+G+B)/3 average; the harness's near-black
-    // frames are ~0 under any weighting, so the threshold is unambiguous).
-    const uint8_t* base = static_cast<const uint8_t*>(mapped.pData);
-    uint64_t sum = 0;
-    for (uint32_t y = 0; y < desc.Height; ++y) {
-        const uint8_t* row = base + static_cast<size_t>(y) * mapped.RowPitch;
-        for (uint32_t x = 0; x < desc.Width; ++x) {
-            const uint8_t* px = row + static_cast<size_t>(x) * 4; // BGRA8
-            sum += (static_cast<uint32_t>(px[2]) + px[1] + px[0]) / 3; // R,G,B
-        }
-    }
-    const double count = static_cast<double>(desc.Width) * desc.Height;
-
-    // 16x16 luma signature for the frozen (byte-identical repeat) check.
-    const int kGrid = 16;
-    uint64_t hash = 1469598103934665603ull; // FNV-1a 64-bit offset basis
-    for (int gy = 0; gy < kGrid; ++gy) {
-        const uint32_t y = static_cast<uint32_t>(
-            static_cast<uint64_t>(gy) * desc.Height / kGrid);
-        const uint8_t* row = base + static_cast<size_t>(y) * mapped.RowPitch;
-        for (int gx = 0; gx < kGrid; ++gx) {
-            const uint32_t x = static_cast<uint32_t>(
-                static_cast<uint64_t>(gx) * desc.Width / kGrid);
-            const uint8_t* px = row + static_cast<size_t>(x) * 4;
-            const uint8_t luma = static_cast<uint8_t>(
-                (static_cast<int>(px[2]) + px[1] + px[0]) / 3);
-            hash = (hash ^ luma) * 1099511628211ull; // FNV-1a 64-bit prime
-        }
-    }
-
-    context->Unmap(staging, 0);
-    staging->Release();
-
-    if (outMeanLuma) *outMeanLuma = static_cast<float>(sum / count);
-    if (outSignature) *outSignature = hash;
-    return true;
-}
-
 bool OpenXRManager::SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::string& filename) {
     if (!device || !context || !texture) return false;
 
@@ -1549,6 +1472,10 @@ bool OpenXRManager::LoadScenario(const std::string& path) {
 
 void OpenXRManager::ApplyScenarioFrame(RiddickVRSharedState& state, uint32_t frame) {
     if (!m_scenarioLoaded || m_scenarioKeys.empty()) return;
+    // GH #68: hold the timeline at its first key until gameplay is detected.
+    if (m_scenarioStartOnGameplay) {
+        frame = (m_scenarioStartFrame != UINT32_MAX) ? (frame - m_scenarioStartFrame) : 0;
+    }
     const ScenarioKey* a = &m_scenarioKeys.front();
     const ScenarioKey* b = &m_scenarioKeys.back();
     if (frame <= a->frame) { b = a; }
@@ -1612,10 +1539,6 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
         std::cout << "[Host] Simulating Meta Quest 2 VR Headset (2496x2688 @ 90FPS)\n";
         if (!m_dumpDir.empty()) {
             std::cout << "[Host] Artifact frame dump directory: " << m_dumpDir << " (Interval: " << m_dumpInterval << ")\n";
-            if (m_dumpGameplayOnly) {
-                std::cout << "[Host] Dump gate: gameplay-only (skip cinema/menu frames) [GH #69]\n";
-                std::cout << "[Host] Dump gate: content (skip blank warm-up / frozen repeats) [GH #72]\n";
-            }
             CreateDirectoryA(m_dumpDir.c_str(), NULL);
         }
         std::cout << "[Host] ========================================================" << std::endl;
@@ -1635,11 +1558,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
         // GH #21/#38 coverage: observe hook->host haptic pulses in mock mode
         // to prove the publish path works end-to-end without a headset.
         bool sawHookHaptics = false;
+        bool lastFrameCinema = true; // GH #68: until the game says otherwise
         uint32_t hapticFrames = 0;
-        // GH #69 req 1: count *dumped* frames (not loop frames) so the label
-        // file's header/trunc is written for the first capture even when the
-        // gameplay-only gate skips the early cinema frames.
-        uint32_t dumps = 0;
         auto lastClientSeen = std::chrono::steady_clock::now();
 
         while (m_running) {
@@ -1781,15 +1701,22 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
             bool frameReady = ipcHost.WaitForFrameReady(20);
             if (frameReady) {
                 RiddickVRSharedState clientState{};
-                const bool stateRead = ipcHost.ReadState(clientState);
-                // GH #69: the hook publishes which display branch produced the
-                // frame (cinema screen vs 3D gameplay). Label every capture with
-                // it so an identical-eye capture can be *attributed* to cinema
-                // (expected: no IPD shift) instead of guessed at as a defect.
-                const bool cinemaMode = stateRead && clientState.cinemaMode;
-                if (stateRead) {
+                if (ipcHost.ReadState(clientState)) {
                     if (clientState.leftEyeSharedHandle && clientState.rightEyeSharedHandle) {
                         EnsureSharedTextures(clientState.leftEyeSharedHandle, clientState.rightEyeSharedHandle);
+                    }
+                    // GH #68: cinema/menu frames are mono by design and must not
+                    // start the scenario or count toward the frame budget.
+                    lastFrameCinema = clientState.cinemaMode;
+                    if (clientState.cinemaMode) {
+                        m_gameplayStreak = 0;
+                    } else if (m_gameplayStreak < UINT32_MAX) {
+                        m_gameplayStreak++;
+                    }
+                    if (m_scenarioLoaded && m_scenarioStartFrame == UINT32_MAX && m_gameplayStreak >= 30) {
+                        m_scenarioStartFrame = totalFrames;
+                        std::cout << "[Mock Host] Gameplay detected at frame " << totalFrames
+                                  << "; scenario timeline starts" << std::endl;
                     }
                     // GH #21/#38: consume-on-read mirror of RenderFrame — log
                     // hook pulses once, then clear so latching is detectable.
@@ -1808,69 +1735,30 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 totalFrames++;
                 framesCounted++;
 
-                // GH #68 requirement 5 (comfort rules): the hook publishes the
-                // locomotion comfort level it computed from thumbstick
-                // move/turn activity (Track C #9); the mock host reads it back
-                // and summarises it together with the locomotion input it
-                // published, so XRSIM can assert the vignette is actually
-                // applied while the scripted run is moving/turning (a
-                // config/parse regression would otherwise need a headset to
-                // notice). Pure accumulate/format helper in
-                // src/host/comfort_vignette.h (unit-tested).
-                if (stateRead) {
-                    static RiddickVR::ComfortVignetteStats s_comfort;
-                    const float lx = std::fabs(state.leftController.thumbstickX);
-                    const float ly = std::fabs(state.leftController.thumbstickY);
-                    const float rx = std::fabs(state.rightController.thumbstickX);
-                    const bool locomotion =
-                        (lx + ly) >= RiddickVR::kComfortLocomotionMag ||
-                        rx >= RiddickVR::kComfortLocomotionMag;
-                    RiddickVR::AccumulateComfort(s_comfort, clientState.comfortVignette,
-                                                 locomotion);
-                    if ((totalFrames % 30) == 0) {
-                        std::cout << RiddickVR::FormatComfortVignetteLine(s_comfort)
-                                  << std::endl;
-                    }
-                }
-
                 // GH #68: frame-time budget sampling (host frame cadence). Emits a
                 // parseable summary the simulator harness reads; budget = 90 Hz.
-                //
-                // GH #68 requirement 2: the summary now carries p50/p95 in
-                // addition to mean/max/drops, and the harness *asserts* the
-                // p50/p95 budget (a single level-load hitch must not read as a
-                // sustained 90 Hz regression; ADR-0448/0454). The percentile
-                // maths + wire format live in the pure helper
-                // src/host/frame_time_stats.h (unit-tested).
                 {
                     static auto s_prevFrameTs = std::chrono::steady_clock::now();
-                    static std::vector<double> s_frameTimesMs;
                     static double s_sumFrameMs = 0.0, s_maxFrameMs = 0.0;
                     static uint64_t s_frameSamples = 0, s_overBudget = 0;
                     static const double s_budgetMs = 1000.0 / 90.0; // 11.11 ms @ 90 Hz
                     const auto nowTs = std::chrono::steady_clock::now();
                     const double dtMs = std::chrono::duration<double, std::milli>(nowTs - s_prevFrameTs).count();
                     s_prevFrameTs = nowTs;
-                    if (dtMs > 0.0 && dtMs < 1000.0) { // ignore idle gaps
+                    // GH #68: only gameplay frames count; cinema/menu pacing is not the mod's budget.
+                    if (!lastFrameCinema && dtMs > 0.0 && dtMs < 1000.0) { // ignore idle gaps
                         s_sumFrameMs += dtMs;
                         if (dtMs > s_maxFrameMs) s_maxFrameMs = dtMs;
                         if (dtMs > s_budgetMs) s_overBudget++;
                         s_frameSamples++;
-                        // Percentile window (bounded so an open-ended run cannot
-                        // grow without limit; a real run is ~1e4-1e5 samples).
-                        if (s_frameTimesMs.size() < kMaxFrameTimeSamples) {
-                            s_frameTimesMs.push_back(dtMs);
-                        }
-                        if ((s_frameSamples % 30) == 0) {
-                            FrameTimeStats stats =
-                                SummarizeFrameTimes(s_frameTimesMs, s_budgetMs);
-                            // Cumulative fields keep their previous meaning; the
-                            // percentiles come from the sample window.
-                            stats.samples = s_frameSamples;
-                            stats.meanMs = s_sumFrameMs / static_cast<double>(s_frameSamples);
-                            stats.maxMs = s_maxFrameMs;
-                            stats.overBudget = s_overBudget;
-                            std::cout << FormatFrameBudgetLine(stats) << std::endl;
+                        if (s_frameSamples % 30 == 0) {
+                            std::cout << "[Mock Host] FrameBudget samples=" << s_frameSamples
+                                      << " mean_ms=" << std::fixed << std::setprecision(2)
+                                      << (s_sumFrameMs / s_frameSamples)
+                                      << " max_ms=" << s_maxFrameMs
+                                      << " over_budget=" << s_overBudget
+                                      << " budget_ms=" << s_budgetMs
+                                      << " gameplay_only=1" << std::endl;
                         }
                     }
                 }
@@ -1878,37 +1766,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 // GH #68: capture BOTH eyes for the XR-simulator stereo diff.
                 // test_frame_####.bmp stays the LEFT eye (legacy tooling), and
                 // right_####.bmp is the RIGHT eye.
-                //
-                // GH #69 requirement 1: when m_dumpGameplayOnly is set the
-                // window is gated on the hook-published display branch, so the
-                // dump is live 3D gameplay rather than the menu/cinema (and
-                // all-zero interop warm-up) frames whose identical eye pairs
-                // are correct but not a stereo validation.
-                const bool dumpDue = (totalFrames == 1 || totalFrames % m_dumpInterval == 0);
-                // GH #72 requirement 2: classify the candidate frame's content
-                // (blank interop warm-up vs frozen static page vs live) before
-                // the branch gate decides. Only sampled when a dump is actually
-                // due and the gameplay-only branch gate would otherwise pass.
-                RiddickVR::FrameContent content = RiddickVR::FrameContent::Live;
-                uint64_t contentSignature = 0;
-                bool contentSampled = false;
-                if (dumpDue && m_dumpGameplayOnly && stateRead && !cinemaMode &&
-                    !m_dumpDir.empty() && m_sharedLeftTex) {
-                    float meanLuma = 0.0f;
-                    uint64_t sig = 0;
-                    if (SampleEyeContent(m_d3d11Device, m_d3d11Context, m_sharedLeftTex,
-                                         &meanLuma, &sig)) {
-                        contentSampled = true;
-                        contentSignature = sig;
-                        if (meanLuma <= kBlankMeanLuma) {
-                            content = RiddickVR::FrameContent::Blank;
-                        } else if (m_hasLastDumpSignature && sig == m_lastDumpSignature) {
-                            content = RiddickVR::FrameContent::Frozen;
-                        }
-                    }
-                }
                 if (!m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
-                    ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content)) {
+                    (totalFrames == 1 || totalFrames % m_dumpInterval == 0)) {
                     char leftPath[MAX_PATH];
                     char rightPath[MAX_PATH];
                     sprintf_s(leftPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
@@ -1917,74 +1776,32 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     const bool okR = SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedRightTex, rightPath);
                     std::cout << "[Mock Host] Captured stereo frame " << totalFrames
                               << " (L=" << (okL ? "ok" : "err") << " R=" << (okR ? "ok" : "err")
-                              << ") cinema=" << (cinemaMode ? 1 : 0)
-                              << " -> " << leftPath << " / " << rightPath << std::endl;
-
-                    // GH #69: persist the per-frame display branch next to the
-                    // captures. The harness reads this to give each frame a
-                    // cinema-vs-gameplay label, so a byte-identical eye pair is
-                    // judged against the branch that produced it (cinema frames
-                    // legitimately have no IPD shift).
-                    const std::string labelPath = m_dumpDir + "\\display_branch.log";
-                    std::ofstream labelFile(labelPath,
-                                            (dumps == 0) ? std::ios::trunc
-                                                         : std::ios::app);
-                    if (labelFile) {
-                        if (dumps == 0) {
-                            labelFile << "# frame=NNNN cinema=<0|1> left=<ok|err> right=<ok|err>\n";
-                        }
-                        labelFile << "frame=" << totalFrames
-                                  << " cinema=" << (cinemaMode ? 1 : 0)
-                                  << " left=" << (okL ? "ok" : "err")
-                                  << " right=" << (okR ? "ok" : "err") << "\n";
+                              << ") -> " << leftPath << " / " << rightPath
+                              << " mode=" << (lastFrameCinema ? "cinema" : "gameplay") << std::endl;
+                    // GH #68: per-frame pose/matrix sidecar so a capture can be checked offline.
+                    char metaPath[MAX_PATH];
+                    sprintf_s(metaPath, "%s\\frame_%04u.json", m_dumpDir.c_str(), totalFrames);
+                    FILE* meta = nullptr;
+                    if (fopen_s(&meta, metaPath, "w") == 0 && meta) {
+                        auto writeMat = [&](const char* name, const float* m, bool last) {
+                            fprintf(meta, "  \"%s\": [", name);
+                            for (int i = 0; i < 16; ++i)
+                                fprintf(meta, "%s%.6g", i ? ", " : "", static_cast<double>(m[i]));
+                            fprintf(meta, "]%s\n", last ? "" : ",");
+                        };
+                        fprintf(meta, "{\n  \"frame\": %u,\n  \"mode\": \"%s\",\n", totalFrames,
+                                lastFrameCinema ? "cinema" : "gameplay");
+                        fprintf(meta, "  \"hmd\": {\"pos\": [%.6g, %.6g, %.6g], \"quat\": [%.6g, %.6g, %.6g, %.6g]},\n",
+                                static_cast<double>(state.hmdPose.position.x), static_cast<double>(state.hmdPose.position.y),
+                                static_cast<double>(state.hmdPose.position.z),
+                                static_cast<double>(state.hmdPose.orientation.x), static_cast<double>(state.hmdPose.orientation.y),
+                                static_cast<double>(state.hmdPose.orientation.z), static_cast<double>(state.hmdPose.orientation.w));
+                        writeMat("leftEyeView", state.leftEyeView.m, false);
+                        writeMat("rightEyeView", state.rightEyeView.m, false);
+                        writeMat("leftEyeProjection", state.leftEyeProjection.m, true);
+                        fprintf(meta, "}\n");
+                        fclose(meta);
                     }
-
-                    // GH #68 requirement 1: record the head/eye transform and
-                    // projection this frame was rendered with, so the capture is
-                    // self-describing in 3D -- the input GH #67 step 3 needs to
-                    // re-express the engine's first-person viewmodel in
-                    // head/controller space for the sampled frame.
-                    EyeFrameSample sample{};
-                    sample.hmdPos[0] = state.hmdPose.position.x;
-                    sample.hmdPos[1] = state.hmdPose.position.y;
-                    sample.hmdPos[2] = state.hmdPose.position.z;
-                    sample.hmdQuat[0] = state.hmdPose.orientation.x;
-                    sample.hmdQuat[1] = state.hmdPose.orientation.y;
-                    sample.hmdQuat[2] = state.hmdPose.orientation.z;
-                    sample.hmdQuat[3] = state.hmdPose.orientation.w;
-                    for (int i = 0; i < 16; ++i) {
-                        sample.viewL[i] = state.leftEyeView.m[i];
-                        sample.viewR[i] = state.rightEyeView.m[i];
-                        sample.projL[i] = state.leftEyeProjection.m[i];
-                        sample.projR[i] = state.rightEyeProjection.m[i];
-                    }
-                    const std::string eyePath = m_dumpDir + "\\eye_frames.log";
-                    std::ofstream eyeFile(eyePath,
-                                          (dumps == 0) ? std::ios::trunc
-                                                       : std::ios::app);
-                    if (eyeFile) {
-                        if (dumps == 0) {
-                            eyeFile << "# frame=NNNN hmdpos=x,y,z hmdquat=x,y,z,w"
-                                       " viewL=[16] viewR=[16] projL=[16] projR=[16]\n";
-                        }
-                        eyeFile << FormatEyeFrameLine(totalFrames, sample) << "\n";
-                    }
-                    dumps++;
-                    // GH #72 requirement 2: remember this dump's signature so a
-                    // byte-identical repeat (a frozen 2D page) is skipped.
-                    if (contentSampled) {
-                        m_lastDumpSignature = contentSignature;
-                        m_hasLastDumpSignature = true;
-                    }
-                } else if (dumpDue && m_dumpGameplayOnly && stateRead && !cinemaMode &&
-                           content != RiddickVR::FrameContent::Live) {
-                    // GH #72 requirement 2: the branch says gameplay but the
-                    // content is not gradable -- report why the frame was kept
-                    // out of the window (the harness parses this line).
-                    std::cout << "[Mock Host] DumpGate skip frame=" << totalFrames
-                              << " reason="
-                              << (content == RiddickVR::FrameContent::Blank ? "blank" : "frozen")
-                              << std::endl;
                 }
 
                 ipcHost.SignalFrameConsumed();

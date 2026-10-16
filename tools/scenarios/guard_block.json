@@ -1,0 +1,9 @@
+{
+  "name": "guard_block",
+  "description": "Boxer guard: both fists up in front of the face with grips closed; the physical block must engage and stay engaged. Timeline starts when the game shows gameplay.",
+  "markers": ["Combat State: BOXER GUARD / BLOCK MODE engaged (Physical Gesture)"],
+  "keys": [
+    {"frame": 0, "lx": -0.12, "ly": 1.65, "lz": -0.3, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.12, "ry": 1.65, "rz": -0.3, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 60, "lx": -0.12, "ly": 1.65, "lz": -0.3, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.12, "ry": 1.65, "rz": -0.3, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0}
+  ]
+}

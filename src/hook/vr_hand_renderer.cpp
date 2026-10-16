@@ -5,6 +5,8 @@
 #include "native_hand_pose.h" // GH #46: model-space -> hand-local placement
 #include "native_hand_texture.h" // GH #61: baked Riddick skin diffuse (DXT1)
 #include "bc1.h" // GH #61: BC1/DXT1 block decoder
+#include "hand_visuals.h" // GH #64/#46: cue tint and fade helpers
+#include "combat_guard.h" // GH #46: shared guard envelope (boxer-guard fade exemption)
 #include "opengl_proxy.h"
 #include "logging.h"
 #include <cmath>
@@ -53,6 +55,19 @@ typedef void (APIENTRY *glTexEnvi_t)(GLenum target, GLenum pname, GLint param);
 typedef void (APIENTRY *glTexCoord2f_t)(GLfloat s, GLfloat t);
 typedef void (APIENTRY *glLightModeli_t)(GLenum pname, GLint param);
 
+typedef GLboolean (APIENTRY *glIsTexture_t)(GLuint texture);
+typedef void (APIENTRY *glGetTexLevelParameteriv_t)(GLenum target, GLint level, GLenum pname, GLint *params);
+typedef void (APIENTRY *glGetTexParameteriv_t)(GLenum target, GLenum pname, GLint *params);
+typedef GLenum (APIENTRY *glGetError_t)(void);
+typedef void (APIENTRY *glPixelStorei_t)(GLenum pname, GLint param);
+typedef void (APIENTRY *glPushClientAttrib_t)(GLbitfield mask);
+typedef void (APIENTRY *glPopClientAttrib_t)(void);
+typedef void (APIENTRY *glGetFloatv_t)(GLenum pname, GLfloat *params);
+typedef GLboolean (APIENTRY *glIsEnabled_t)(GLenum cap);
+typedef void (APIENTRY *glLoadIdentity_t)(void);
+typedef void (APIENTRY *glGetTexEnviv_t)(GLenum target, GLenum pname, GLint *params);
+
+typedef void (APIENTRY *PFNGLACTIVETEXTUREPROC)(GLenum texture);
 typedef void (APIENTRY *PFNGLUSEPROGRAMPROC)(GLuint program);
 typedef void (APIENTRY *PFNGLBINDBUFFERPROC)(GLenum target, GLuint buffer);
 
@@ -94,7 +109,20 @@ struct GLDispatch {
     glTexEnvi_t glTexEnvi = nullptr;
     glTexCoord2f_t glTexCoord2f = nullptr;
     glLightModeli_t glLightModeli = nullptr;
+    glIsTexture_t glIsTexture = nullptr;
+    glGetTexLevelParameteriv_t glGetTexLevelParameteriv = nullptr;
+    glGetTexParameteriv_t glGetTexParameteriv = nullptr;
+    glGetError_t glGetError = nullptr;
+    glPixelStorei_t glPixelStorei = nullptr;
+    glPushClientAttrib_t glPushClientAttrib = nullptr;
+    glPopClientAttrib_t glPopClientAttrib = nullptr;
+    glGetFloatv_t glGetFloatv = nullptr;
+    glIsEnabled_t glIsEnabled = nullptr;
+    glLoadIdentity_t glLoadIdentity = nullptr;
+    glGetTexEnviv_t glGetTexEnviv = nullptr;
 
+    PFNGLACTIVETEXTUREPROC glActiveTexture = nullptr;
+    bool hasArbFragmentProgram = false;
     PFNGLUSEPROGRAMPROC glUseProgram = nullptr;
     PFNGLBINDBUFFERPROC glBindBuffer = nullptr;
     bool initialized = false;
@@ -145,6 +173,17 @@ struct GLDispatch {
         LOAD_GL(glTexEnvi);
         LOAD_GL(glTexCoord2f);
         LOAD_GL(glLightModeli);
+        LOAD_GL(glIsTexture);
+        LOAD_GL(glGetTexLevelParameteriv);
+        LOAD_GL(glGetTexParameteriv);
+        LOAD_GL(glGetError);
+        LOAD_GL(glPixelStorei);
+        LOAD_GL(glPushClientAttrib);
+        LOAD_GL(glPopClientAttrib);
+        LOAD_GL(glGetFloatv);
+        LOAD_GL(glIsEnabled);
+        LOAD_GL(glLoadIdentity);
+        LOAD_GL(glGetTexEnviv);
         #undef LOAD_GL
 
         typedef PROC (WINAPI *wglGetProcAddress_t)(LPCSTR);
@@ -154,6 +193,11 @@ struct GLDispatch {
             if (!glUseProgram) glUseProgram = (PFNGLUSEPROGRAMPROC)wglGetProc("glUseProgramObjectARB");
             glBindBuffer = (PFNGLBINDBUFFERPROC)wglGetProc("glBindBuffer");
             if (!glBindBuffer) glBindBuffer = (PFNGLBINDBUFFERPROC)wglGetProc("glBindBufferARB");
+            // GH #61: multitexture + ARB program entry points, used to switch
+            // off engine state that would otherwise change how our hand samples.
+            glActiveTexture = (PFNGLACTIVETEXTUREPROC)wglGetProc("glActiveTexture");
+            if (!glActiveTexture) glActiveTexture = (PFNGLACTIVETEXTUREPROC)wglGetProc("glActiveTextureARB");
+            hasArbFragmentProgram = wglGetProc("glProgramStringARB") != nullptr;
         }
 
         initialized = (glBegin != nullptr && glVertex3f != nullptr);
@@ -267,6 +311,12 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     s_gl.Init();
     if (!s_gl.initialized) return;
 
+    m_currentFrameIndex = state.frameIndex;
+
+    // GH #61: log the engine's GL state once, before we change any of it, so a
+    // hand that still reads white can be diagnosed from the log alone.
+    LogNativeHandGlStateOnce();
+
     // 1. Push complete OpenGL pipeline attributes to preserve game render state
     // GH #61: GL_TEXTURE_BIT also saves/restores the 2D texture binding and the
     // texture-env mode the native hand texture draw mutates.
@@ -306,6 +356,15 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     // 3. Clear depth buffer for the hand overlay pass (ensures hands never clip through distant geometry)
     s_gl.glClearDepth(1.0f);
     s_gl.glClear(GL_DEPTH_BUFFER_BIT);
+
+    // GH #61: the engine may leave a non-identity texture matrix; force identity
+    // for our pass so the baked UVs sample where they are meant to.
+    const bool texMatrixPushed = (s_gl.glLoadIdentity != nullptr);
+    if (texMatrixPushed) {
+        s_gl.glMatrixMode(GL_TEXTURE);
+        s_gl.glPushMatrix();
+        s_gl.glLoadIdentity();
+    }
 
     // 4. Configure stereoscopic projection matrix
     s_gl.glMatrixMode(GL_PROJECTION);
@@ -371,6 +430,7 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         s_gl.glDisable(GL_BLEND);
     }
     s_gl.glDisable(GL_TEXTURE_2D);
+    SanitizeTextureStateForHands();
 
     // Check if Boxer Guard is active (both fists clenched and raised)
     bool isBoxerGuard = (leftCtrl.grip > 0.45f && rightCtrl.grip > 0.45f &&
@@ -457,7 +517,12 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
         m_currentFade = isLeft ? m_leftFade : m_rightFade;
         // Prisoner uniform cloth, tapering at elbow and wrist. Hand geometry
         // continues from the same tracked wrist target.
-        DrawArmSegment(shoulder, elbow, 0.050f * armScale, 0.040f * armScale, 0.45f, 0.43f, 0.37f);
+        // GH #64: the native mesh is placed from its own bounds, so the IK
+        // upper-arm tube does not join it and reads as a stray block. Draw it
+        // only for the procedural arm, or when NativeHandUpperArm opts in.
+        if (!g_vrConfig.nativeHands || g_vrConfig.nativeHandUpperArm) {
+            DrawArmSegment(shoulder, elbow, 0.050f * armScale, 0.040f * armScale, 0.45f, 0.43f, 0.37f);
+        }
         // GH #46: when the native arm mesh is enabled it carries the forearm,
         // so only the upper-arm cloth is drawn procedurally (no doubling).
         if (!g_vrConfig.nativeHands) {
@@ -490,8 +555,20 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
     // view (firing grip, ADS pose, two-handed hold) so we don't double-render
     // over the game's arms. Full opacity for open/interacting hands.
     bool twoHanded = (leftCtrl.grip > 0.70f && rightCtrl.grip > 0.70f);
-    float leftFade = (leftCtrl.trigger > 0.60f || twoHanded) ? 0.25f : 1.0f;
-    float rightFade = (rightCtrl.trigger > 0.60f || twoHanded) ? 0.25f : 1.0f;
+    // GH #46: a boxer guard (both fists up in front of the face, no trigger
+    // pulled) also has both grips closed; it must not fade the hands out.
+    GuardEnvelope guardVolume;
+    guardVolume.yMin = g_vrConfig.guardYMin;
+    guardVolume.yMax = g_vrConfig.guardYMax;
+    guardVolume.zMin = g_vrConfig.guardZMin;
+    guardVolume.zMax = g_vrConfig.guardZMax;
+    guardVolume.maxHandSpan = g_vrConfig.guardMaxHandSpan;
+    const bool fadeBoxerGuard = twoHanded && leftCtrl.trigger <= 0.60f && rightCtrl.trigger <= 0.60f &&
+        InGuardEnvelope(guardVolume, leftLocal.y, leftLocal.z, rightLocal.y, rightLocal.z,
+                        leftLocal.x - rightLocal.x);
+    const int fadeEnabled = g_vrConfig.handFadeWhenWeapon;
+    float leftFade = ComputeHandFade(leftCtrl.trigger, twoHanded, fadeBoxerGuard, fadeEnabled);
+    float rightFade = ComputeHandFade(rightCtrl.trigger, twoHanded, fadeBoxerGuard, fadeEnabled);
     VRHandRenderer::Instance().SetHandFade(leftFade, rightFade);
     // Grab proximity (vents, biometric terminals, guard throat-grip corridor):
     // hand forward of chest with grip closed (grab) or index extended (poke).
@@ -544,6 +621,14 @@ void VRHandRenderer::RenderHands(const RiddickVRSharedState& state, bool isLeftE
 
     s_gl.glMatrixMode(GL_PROJECTION);
     s_gl.glPopMatrix();
+
+    if (texMatrixPushed) {
+        s_gl.glMatrixMode(GL_TEXTURE);
+        s_gl.glPopMatrix();
+    }
+    if (s_gl.glActiveTexture) {
+        s_gl.glActiveTexture((GLenum)m_prevActiveUnit);
+    }
 
     // Explicitly undo enable/disable changes (mirrors section 5 setup).
     s_gl.glDisable(GL_LIGHT0);
@@ -612,7 +697,9 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     // which are authored for the procedural geometry and otherwise float as
     // stray blocks (GH #64). `native` reflects an actual native draw (flag on,
     // mesh + placement valid); anything else keeps the full procedural hand.
-    const bool native = DrawNativeHand(side);
+    // GH #64: interaction cues show as a skin tint on the native mesh.
+    const HandCueTint cue = ComputeNativeHandCueTint(interactionGlow, holdingCartridge, palmHeal, grabGlow);
+    const bool native = DrawNativeHand(side, cue);
     if (!native) {
         DrawForearmGauntlet(side);
 
@@ -675,17 +762,171 @@ void VRHandRenderer::DrawTacticalHand(HandSide side, float grip, float trigger, 
     s_gl.glPopMatrix();
 }
 
-// GH #61: create the GL texture for the baked Riddick skin diffuse.
+// GH #61: log the engine's GL state the first time hands are drawn, before
+// RenderHands changes anything. One line is enough to tell whether another
+// texture unit/target, a texture matrix or an ARB program was left active.
+void VRHandRenderer::LogNativeHandGlStateOnce() {
+    if (m_glStateLogged) return;
+    m_glStateLogged = true;
+
+    GLint activeUnit = 0;
+    GLint maxUnits = 0;
+    if (s_gl.glGetIntegerv) {
+        s_gl.glGetIntegerv(0x84E0 /* GL_ACTIVE_TEXTURE */, &activeUnit);
+        s_gl.glGetIntegerv(0x84E2 /* GL_MAX_TEXTURE_UNITS */, &maxUnits);
+    }
+    const int cube = s_gl.glIsEnabled ? (s_gl.glIsEnabled(0x8513 /* GL_TEXTURE_CUBE_MAP */) ? 1 : 0) : -1;
+    const int tex3d = s_gl.glIsEnabled ? (s_gl.glIsEnabled(0x806F /* GL_TEXTURE_3D */) ? 1 : 0) : -1;
+    const int fp = s_gl.glIsEnabled ? (s_gl.glIsEnabled(0x8804 /* GL_FRAGMENT_PROGRAM_ARB */) ? 1 : 0) : -1;
+    int texMatIdentity = -1;
+    if (s_gl.glGetFloatv) {
+        GLfloat tm[16] = {};
+        s_gl.glGetFloatv(0x0BA8 /* GL_TEXTURE_MATRIX */, tm);
+        const GLfloat identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        texMatIdentity = 1;
+        for (int i = 0; i < 16; ++i) {
+            if (fabsf(tm[i] - identity[i]) > 1e-4f) { texMatIdentity = 0; break; }
+        }
+    }
+    GLint envMode = 0;
+    if (s_gl.glGetTexEnviv) {
+        s_gl.glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &envMode);
+    }
+    VR_LOG_INFO("NativeHand GL state: activeUnit=%d maxUnits=%d cube=%d tex3d=%d fp=%d texMatIdentity=%d envMode=0x%X",
+                (int)(activeUnit - 0x84C0), (int)maxUnits, cube, tex3d, fp, texMatIdentity, (unsigned)envMode);
+}
+
+// GH #61: switch off every texture state the engine might have left on that
+// would change how the hand's GL_TEXTURE_2D sampling resolves. Called with
+// GL_ENABLE_BIT | GL_TEXTURE_BIT pushed, so glPopAttrib restores all of it.
+void VRHandRenderer::SanitizeTextureStateForHands() {
+    m_prevActiveUnit = 0x84C0;
+    if (s_gl.glActiveTexture) {
+        GLint prevUnit = 0x84C0;
+        GLint maxUnits = 0;
+        if (s_gl.glGetIntegerv) {
+            s_gl.glGetIntegerv(0x84E0 /* GL_ACTIVE_TEXTURE */, &prevUnit);
+            s_gl.glGetIntegerv(0x84E2 /* GL_MAX_TEXTURE_UNITS */, &maxUnits);
+        }
+        if (prevUnit >= 0x84C0 && prevUnit < 0x84C0 + 32) m_prevActiveUnit = prevUnit;
+        if (maxUnits > 8) maxUnits = 8;
+        for (GLint u = 1; u < maxUnits; ++u) {
+            s_gl.glActiveTexture((GLenum)(0x84C0 + u));
+            s_gl.glDisable(GL_TEXTURE_1D);
+            s_gl.glDisable(GL_TEXTURE_2D);
+            s_gl.glDisable(0x806F /* GL_TEXTURE_3D */);
+            s_gl.glDisable(0x8513 /* GL_TEXTURE_CUBE_MAP */);
+            s_gl.glDisable(0x84F5 /* GL_TEXTURE_RECTANGLE */);
+        }
+        s_gl.glActiveTexture(0x84C0 /* GL_TEXTURE0 */);
+    }
+    // Unit 0: only our 2D texture may be on, and no coordinate generation.
+    s_gl.glDisable(GL_TEXTURE_1D);
+    s_gl.glDisable(0x806F /* GL_TEXTURE_3D */);
+    s_gl.glDisable(0x8513 /* GL_TEXTURE_CUBE_MAP */);
+    s_gl.glDisable(0x84F5 /* GL_TEXTURE_RECTANGLE */);
+    s_gl.glDisable(GL_TEXTURE_GEN_S);
+    s_gl.glDisable(GL_TEXTURE_GEN_T);
+    s_gl.glDisable(GL_TEXTURE_GEN_R);
+    s_gl.glDisable(GL_TEXTURE_GEN_Q);
+    if (s_gl.hasArbFragmentProgram) {
+        s_gl.glDisable(0x8804 /* GL_FRAGMENT_PROGRAM_ARB */);
+        s_gl.glDisable(0x8620 /* GL_VERTEX_PROGRAM_ARB */);
+    }
+}
+
+// GH #61: decode the baked DXT1 diffuse and upload it into a freshly generated
+// texture id with the unpack state forced to known values (the engine may leave
+// odd alignment/row-length/skip, a bound pixel-unpack buffer or a clipped mip
+// range behind). Returns 0 on failure.
+GLuint VRHandRenderer::UploadNativeHandTexture() {
+    const NativeHandTexture* tex = FindNativeHandTexture("Riddick_ArmScar_D");
+    if (!tex || !tex->dxt1 || tex->width == 0 || tex->height == 0) {
+        return 0;
+    }
+    if (tex->dxt1_bytes < Bc1SurfaceBytes(tex->width, tex->height)) {
+        return 0;
+    }
+
+    std::vector<unsigned char> rgba(
+        static_cast<size_t>(tex->width) * tex->height * 4u);
+    Bc1DecodeSurface(tex->dxt1, tex->width, tex->height, rgba.data());
+
+    if (s_gl.glGetError) {
+        for (int i = 0; i < 16 && s_gl.glGetError() != 0; ++i) {} // drain engine errors
+    }
+
+    GLuint id = 0;
+    s_gl.glGenTextures(1, &id);
+    if (id == 0) {
+        return 0;
+    }
+
+    const bool clientAttrib = s_gl.glPushClientAttrib && s_gl.glPopClientAttrib && s_gl.glPixelStorei;
+    if (clientAttrib) {
+        s_gl.glPushClientAttrib(0x1 /* GL_CLIENT_PIXEL_STORE_BIT */);
+        s_gl.glPixelStorei(0x0CF5 /* GL_UNPACK_ALIGNMENT */, 4);
+        s_gl.glPixelStorei(0x0CF2 /* GL_UNPACK_ROW_LENGTH */, 0);
+        s_gl.glPixelStorei(0x0CF3 /* GL_UNPACK_SKIP_ROWS */, 0);
+        s_gl.glPixelStorei(0x0CF4 /* GL_UNPACK_SKIP_PIXELS */, 0);
+        s_gl.glPixelStorei(0x0CF0 /* GL_UNPACK_SWAP_BYTES */, 0);
+        s_gl.glPixelStorei(0x0CF1 /* GL_UNPACK_LSB_FIRST */, 0);
+    }
+    GLint prevUnpackBuffer = 0;
+    const bool unbindPbo = (s_gl.glBindBuffer != nullptr && s_gl.glGetIntegerv != nullptr);
+    if (unbindPbo) {
+        s_gl.glGetIntegerv(0x88EF /* GL_PIXEL_UNPACK_BUFFER_BINDING */, &prevUnpackBuffer);
+        s_gl.glBindBuffer(0x88EC /* GL_PIXEL_UNPACK_BUFFER */, 0);
+    }
+
+    s_gl.glBindTexture(GL_TEXTURE_2D, id);
+    SetNativeHandTextureParams();
+    s_gl.glTexParameteri(GL_TEXTURE_2D, 0x813C /* GL_TEXTURE_BASE_LEVEL */, 0);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */, 0);
+    s_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)tex->width,
+                      (GLsizei)tex->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                      rgba.data());
+
+    if (unbindPbo) {
+        s_gl.glBindBuffer(0x88EC /* GL_PIXEL_UNPACK_BUFFER */, (GLuint)prevUnpackBuffer);
+    }
+    if (clientAttrib) {
+        s_gl.glPopClientAttrib();
+    }
+
+    if (s_gl.glGetError) {
+        const GLenum err = s_gl.glGetError();
+        if (err != 0) {
+            VR_LOG_WARN("native hand texture: glTexImage2D raised GL error 0x%X", (unsigned)err);
+        }
+    }
+    VR_LOG_INFO("native hand texture: %s mip %d %ux%u (%u DXT1 bytes) uploaded",
+                tex->name, tex->mip, tex->width, tex->height, tex->dxt1_bytes);
+    return id;
+}
+
+void VRHandRenderer::SetNativeHandTextureParams() {
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+}
+
+// GH #61: create the GL texture for the baked Riddick skin diffuse, and once
+// per host frame verify it is still ours.
 //
-// Runs at most once per process (the game's GL context is already current when
-// RenderHands is called). Decodes the verbatim DXT1 blocks from
-// native_hand_texture.h with bc1.h, matching the shipped texture exactly, and
-// uploads uncompressed RGBA8 -- no GL extension is required. Returns false
-// (permanently, until the process restarts) when the flag is off, the asset is
-// missing, or the GL entry points are unavailable, so DrawNativeHand keeps its
-// flat skin-tone fallback.
+// The engine shares this GL context and can reuse or overwrite the id we
+// generated, which leaves an incomplete texture bound (samples as white). The
+// check asks the driver for the object's size and min filter and re-uploads
+// into a fresh id (never deleting the old one: the engine may own it now) or
+// re-sets the sampling parameters. Returns false (permanently, until the
+// process restarts) when the flag is off, the asset is missing, or the GL entry
+// points are unavailable, so DrawNativeHand keeps its flat skin-tone fallback.
 bool VRHandRenderer::EnsureNativeHandTexture() {
     if (m_nativeTextureTried) {
+        if (m_nativeTextureReady) {
+            VerifyNativeHandTexture();
+        }
         return m_nativeTextureReady;
     }
     m_nativeTextureTried = true;
@@ -698,37 +939,50 @@ bool VRHandRenderer::EnsureNativeHandTexture() {
         return false;
     }
 
-    const NativeHandTexture* tex = FindNativeHandTexture("Riddick_ArmScar_D");
-    if (!tex || !tex->dxt1 || tex->width == 0 || tex->height == 0) {
-        return false;
-    }
-    if (tex->dxt1_bytes < Bc1SurfaceBytes(tex->width, tex->height)) {
-        return false;
-    }
-
-    std::vector<unsigned char> rgba(
-        static_cast<size_t>(tex->width) * tex->height * 4u);
-    Bc1DecodeSurface(tex->dxt1, tex->width, tex->height, rgba.data());
-
-    GLuint id = 0;
-    s_gl.glGenTextures(1, &id);
+    const GLuint id = UploadNativeHandTexture();
     if (id == 0) {
         return false;
     }
-    s_gl.glBindTexture(GL_TEXTURE_2D, id);
-    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    s_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    s_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)tex->width,
-                      (GLsizei)tex->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                      rgba.data());
-
     m_nativeHandTexture = id;
     m_nativeTextureReady = true;
-    VR_LOG_INFO("native hand texture: %s mip %d %ux%u (%u DXT1 bytes) uploaded",
-                tex->name, tex->mip, tex->width, tex->height, tex->dxt1_bytes);
+    m_lastTexCheckFrame = m_currentFrameIndex;
     return true;
+}
+
+void VRHandRenderer::VerifyNativeHandTexture() {
+    if (m_currentFrameIndex == m_lastTexCheckFrame) return;
+    m_lastTexCheckFrame = m_currentFrameIndex;
+    if (!s_gl.glIsTexture || !s_gl.glGetTexLevelParameteriv || !s_gl.glGetTexParameteriv) {
+        return;
+    }
+    const NativeHandTexture* tex = FindNativeHandTexture("Riddick_ArmScar_D");
+    if (!tex) return;
+
+    const bool isTexture = s_gl.glIsTexture(m_nativeHandTexture) != 0;
+    GLint w = 0, h = 0, minFilter = 0;
+    if (isTexture) {
+        s_gl.glBindTexture(GL_TEXTURE_2D, m_nativeHandTexture);
+        s_gl.glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x1000 /* GL_TEXTURE_WIDTH */, &w);
+        s_gl.glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x1001 /* GL_TEXTURE_HEIGHT */, &h);
+        s_gl.glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &minFilter);
+    }
+    const NativeTextureCheck verdict = CheckNativeTextureIntegrity(
+        isTexture, w, h, minFilter, tex->width, tex->height, GL_LINEAR);
+    if (verdict == NativeTextureCheck::Ok) return;
+
+    if (verdict == NativeTextureCheck::Reparam) {
+        SetNativeHandTextureParams();
+        return;
+    }
+
+    const GLuint fresh = UploadNativeHandTexture();
+    if (fresh == 0) return;
+    if (m_currentFrameIndex - m_lastClobberLogFrame >= 300u || m_lastClobberLogFrame == 0xFFFFFFFFu) {
+        m_lastClobberLogFrame = m_currentFrameIndex;
+        VR_LOG_WARN("native hand texture: id %u clobbered (w=%d h=%d), re-uploaded as %u",
+                    (unsigned)m_nativeHandTexture, (int)w, (int)h, (unsigned)fresh);
+    }
+    m_nativeHandTexture = fresh;
 }
 
 // GH #46: draw the baked native Riddick arm/hand mesh for one hand.
@@ -744,7 +998,7 @@ bool VRHandRenderer::EnsureNativeHandTexture() {
 // is unavailable the flat skin tone is kept. Deliberately built on the
 // already-loaded immediate-mode GL entry points, matching the rest of this
 // renderer: it mutates no state that RenderHands does not already restore.
-bool VRHandRenderer::DrawNativeHand(HandSide side) {
+bool VRHandRenderer::DrawNativeHand(HandSide side, const HandCueTint& cue) {
     if (!g_vrConfig.nativeHands) {
         return false;
     }
@@ -819,9 +1073,10 @@ bool VRHandRenderer::DrawNativeHand(HandSide side) {
     // Fallback skin tone approximating the RIDDICK_ARMSCAR_D diffuse. When the
     // baked texture is bound the tint goes to white so MODULATE shows the real
     // texture at full strength (the fade still scales alpha/colour).
-    const float r = textured ? 1.0f : 0.55f;
-    const float g = textured ? 1.0f : 0.42f;
-    const float b = textured ? 1.0f : 0.33f;
+    // GH #64: the cue tint multiplies the base so glow/heal/grab cues stay visible.
+    const float r = (textured ? 1.0f : 0.55f) * cue.r;
+    const float g = (textured ? 1.0f : 0.42f) * cue.g;
+    const float b = (textured ? 1.0f : 0.33f) * cue.b;
     // GH #64: native hands must never inherit the overlay's cull-away fade.
     // The 0.25 fade existed to hide the *procedural* hands when the engine's own
     // arms dominate; with native hands there is nothing to hide from, and the

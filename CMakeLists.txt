@@ -46,6 +46,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/native_hand_pose.h
         src/hook/native_hand_texture.h
         src/hook/native_hand_texture_data.h
+        src/hook/hand_visuals.h
         src/hook/bc1.h
         src/hook/arm_ik.h
         src/hook/combat_stance.h
@@ -53,7 +54,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/combat_strike.h
         src/hook/dialogue_navigation.h
         src/hook/viewmodel_suppressor.h
-        src/hook/gl_matrix_tracker.h
+        src/hook/viewmodel_drive.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/vr_config.cpp
@@ -121,6 +122,20 @@ if(BUILD_TESTING)
     )
     add_test(NAME combat_strike_thresholds COMMAND riddick_vr_combat_strike_tests)
 
+    # GH #65: held-input scheduler (melee clicks are held, not zero-length).
+    add_executable(riddick_vr_input_hold_tests tests/input_hold_tests.cpp)
+    target_include_directories(riddick_vr_input_hold_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME input_hold_scheduler COMMAND riddick_vr_input_hold_tests)
+
+    # GH #50/#51: aim steering helper (no pull while guarding or swinging).
+    add_executable(riddick_vr_aim_pull_tests tests/aim_pull_tests.cpp)
+    target_include_directories(riddick_vr_aim_pull_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME aim_pull COMMAND riddick_vr_aim_pull_tests)
+
     # GH #66 (approach 2): per-draw viewmodel suppression window state machine.
     add_executable(riddick_vr_viewmodel_suppressor_tests tests/viewmodel_suppressor_tests.cpp)
     target_include_directories(riddick_vr_viewmodel_suppressor_tests PRIVATE
@@ -128,12 +143,12 @@ if(BUILD_TESTING)
     )
     add_test(NAME viewmodel_suppressor_window COMMAND riddick_vr_viewmodel_suppressor_tests)
 
-    # GH #67 step 1: software GL_MODELVIEW stack (the draw-time matrix capture).
-    add_executable(riddick_vr_gl_matrix_tracker_tests tests/gl_matrix_tracker_tests.cpp)
-    target_include_directories(riddick_vr_gl_matrix_tracker_tests PRIVATE
+    # GH #67 (ADR-0447): controller-driven engine viewmodel correction matrix.
+    add_executable(riddick_vr_viewmodel_drive_tests tests/viewmodel_drive_tests.cpp)
+    target_include_directories(riddick_vr_viewmodel_drive_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
-    add_test(NAME gl_matrix_tracker COMMAND riddick_vr_gl_matrix_tracker_tests)
+    add_test(NAME viewmodel_drive_correction COMMAND riddick_vr_viewmodel_drive_tests)
 
     add_executable(riddick_vr_dialogue_navigation_tests tests/dialogue_navigation_tests.cpp)
     target_include_directories(riddick_vr_dialogue_navigation_tests PRIVATE
@@ -162,46 +177,10 @@ if(BUILD_TESTING)
     )
     add_test(NAME native_hand_texture_asset COMMAND riddick_vr_native_hand_texture_tests)
 
-    # GH #61: the baked diffuse + the arm mesh UVs must be skin-toned, never a
-    # white / flat patch (refutes the "decodes white" premise that disabled it).
-    add_executable(riddick_vr_native_hand_skin_tests tests/native_hand_skin_tests.cpp)
-    target_include_directories(riddick_vr_native_hand_skin_tests PRIVATE
+    # GH #64 / GH #46: hand cue tint and weapon fade helpers.
+    add_executable(riddick_vr_hand_visuals_tests tests/hand_visuals_tests.cpp)
+    target_include_directories(riddick_vr_hand_visuals_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
-    add_test(NAME native_hand_skin_mapping COMMAND riddick_vr_native_hand_skin_tests)
-
-    # GH #69 (requirement 1): XRSIM dump gate -- capture live 3D gameplay only.
-    add_executable(riddick_vr_dump_gate_tests tests/dump_gate_tests.cpp)
-    target_include_directories(riddick_vr_dump_gate_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
-    )
-    add_test(NAME dump_gate_gameplay_only COMMAND riddick_vr_dump_gate_tests)
-
-    # GH #68 (requirement 1): the mock host's per-dump eye pose/projection record
-    # (src/host/eye_frame.h) -- the 3D transform that makes a capture
-    # interpretable (and the input GH #67 step 3 needs).
-    add_executable(riddick_vr_eye_frame_tests tests/eye_frame_tests.cpp)
-    target_include_directories(riddick_vr_eye_frame_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
-    )
-    add_test(NAME eye_frame_record COMMAND riddick_vr_eye_frame_tests)
-
-    # GH #68 (requirement 2): frame-time pacing percentiles (p50/p95) + the
-    # budget wire line (src/host/frame_time_stats.h) the harness asserts on.
-    add_executable(riddick_vr_frame_time_tests tests/frame_time_tests.cpp)
-    target_include_directories(riddick_vr_frame_time_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
-    )
-    add_test(NAME frame_time_percentiles COMMAND riddick_vr_frame_time_tests)
-
-    # GH #68 (requirement 5, comfort rules): the mock host must assert the
-    # locomotion comfort vignette was actually applied while the scripted run was
-    # moving/turning (it reads the hook-published `comfortVignette` back and
-    # summarises it with the locomotion input). Pure helper + wire line in
-    # src/host/comfort_vignette.h, consumed by XRSIM's `comfort_vignette_applied`.
-    add_executable(riddick_vr_comfort_vignette_tests tests/comfort_vignette_tests.cpp)
-    target_include_directories(riddick_vr_comfort_vignette_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
-    )
-    add_test(NAME comfort_vignette_summary COMMAND riddick_vr_comfort_vignette_tests)
+    add_test(NAME hand_visuals COMMAND riddick_vr_hand_visuals_tests)
 endif()

@@ -7,6 +7,8 @@
 #include "combat_stance.h"
 #include "combat_guard.h"
 #include "combat_strike.h"
+#include "input_hold.h"
+#include "aim_pull.h"
 #include "dialogue_navigation.h"
 #include "gesture_tap.h"
 #include <algorithm>
@@ -150,9 +152,11 @@ static void SendMouseMove(int dx, int dy) {
     SendInput(1, &in, sizeof(INPUT));
 }
 
-static void SendMouseClick(bool leftButton, bool isDown) {
+// requireForeground=false is only for releasing a held button (GH #65), so a
+// focus change can never leave a button stuck down.
+static void SendMouseClick(bool leftButton, bool isDown, bool requireForeground = true) {
     if (SimModeNoInput()) return; // GH #68
-    if (!IsGameForeground()) return;
+    if (requireForeground && !IsGameForeground()) return;
     INPUT in = {};
     in.type = INPUT_MOUSE;
     in.mi.dwFlags = leftButton
@@ -207,8 +211,9 @@ inline void MergeHaptic(float& slot, float v) {
     if (v > slot) slot = v;
 }
 
-static void SendKey(WORD vk, bool isDown) {
-    if (!IsGameForeground()) return;
+static void SendKey(WORD vk, bool isDown, bool requireForeground = true) {
+    if (SimModeNoInput()) return; // GH #68: never inject desktop input under the XRSIM harness
+    if (requireForeground && !IsGameForeground()) return;
     UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
 
     // 1. DirectInput 8 Scan Code hardware event
@@ -245,6 +250,58 @@ static void SendKeyTap(WORD vk) {
     SendKey(vk, true);
     Sleep(15);
     SendKey(vk, false);
+}
+
+// GH #65: held clicks. A DOWN+UP pair inside one frame is often missed by the
+// engine's polled input, so the DOWN goes out now and the UP is sent from the
+// top of a later CameraHook::Update (FlushDueHeldInputs).
+static InputHoldScheduler s_inputHold;
+static bool s_loggedSimNoInput = false;
+
+static unsigned long MeleeHoldMs() {
+    return static_cast<unsigned long>(g_vrConfig.meleeClickHoldMs > 0 ? g_vrConfig.meleeClickHoldMs : 0);
+}
+
+// Tap the left (melee) or right mouse button, held for MeleeClickHoldMs.
+static void SendMouseTap(bool left) {
+    const unsigned long hold = MeleeHoldMs();
+    if (hold == 0) { // legacy instant down+up
+        SendMouseClick(left, true);
+        SendMouseClick(left, false);
+        return;
+    }
+    const HeldInput kind = left ? HeldInput::MouseLeft : HeldInput::MouseRight;
+    if (s_inputHold.Press(kind, 0, GetTickCount(), hold)) {
+        SendMouseClick(left, true);
+    }
+}
+
+// Hold a direction/modifier key slightly longer than the click it accompanies.
+static void SendKeyHeld(WORD vk) {
+    const unsigned long hold = MeleeHoldMs() + 20;
+    if (s_inputHold.Press(HeldInput::Key, vk, GetTickCount(), hold)) {
+        SendKey(vk, true);
+    }
+}
+
+static void ReleaseHeld(const HeldRelease& r) {
+    switch (r.kind) {
+        case HeldInput::MouseLeft: SendMouseClick(true, false, false); break;
+        case HeldInput::MouseRight: SendMouseClick(false, false, false); break;
+        case HeldInput::Key: SendKey(r.vk, false, false); break;
+    }
+}
+
+static void FlushDueHeldInputs(unsigned long now) {
+    HeldRelease due[InputHoldScheduler::kCapacity];
+    const int n = s_inputHold.CollectDue(now, due, InputHoldScheduler::kCapacity);
+    for (int i = 0; i < n; ++i) ReleaseHeld(due[i]);
+}
+
+static void FlushHeldInputs() {
+    HeldRelease all[InputHoldScheduler::kCapacity];
+    const int n = s_inputHold.CollectAll(all, InputHoldScheduler::kCapacity);
+    for (int i = 0; i < n; ++i) ReleaseHeld(all[i]);
 }
 
 static void SendAction(VRAction action, bool isDown) {
@@ -1194,7 +1251,7 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                                      const RiddickVRTrackedPose& ctrlPose,
                                      bool recenterEdge, bool isReloading, bool aimHeld,
                                      bool physicalBlockEngaged, bool twoHandedActive,
-                                     bool southpaw, bool meleeEquipped) {
+                                     bool southpaw, bool meleeEquipped, bool guardPoseLike) {
     HeadLookIntent out;
     if (!hmdPose.isValid) {
         st.hasPrevHmdOrientation = false;
@@ -1274,7 +1331,8 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                          (ctrlLocal.z >= -0.36f && ctrlLocal.z <= -0.10f) &&
                          (ctrlLocal.x >= 0.02f && ctrlLocal.x <= 0.22f);
 
-    if (inAdsCorridor && !isReloading && !physicalBlockEngaged) {
+    // GH #50/#51: the fist guard sits inside this corridor; never latch ADS from it.
+    if (inAdsCorridor && !isReloading && !physicalBlockEngaged && !guardPoseLike) {
         if (st.adsEnterStartTime == 0) {
             st.adsEnterStartTime = now;
         } else if (now - st.adsEnterStartTime > 50) { // 50ms hold to confirm ADS
@@ -1359,34 +1417,23 @@ static HeadLookIntent UpdateHeadLook(HeadLookState& st, DWORD now,
                     st.prevCtrlYaw = ctrlYaw;
                     st.prevCtrlPitch = ctrlPitch;
 
-                    // GH #50/#51: DELTA-based aim steering. The old code pulled
-                    // from the ABSOLUTE HMD-relative aim angle, so any arm held
-                    // away from view-center (swings, guard pose) injected a
-                    // constant spin every frame. Deltas only move the view
-                    // while the aim itself is moving; a steady arm (even far
-                    // off-center) injects nothing. Clamped per frame.
-                    // Melee equipped (fists/blades, incl. trigger-block guard):
-                    // no aim pull at all - swings must never steer the camera.
-                    constexpr float AIM_DELTA_DEADZONE = 0.0015f; // ~0.09 deg
-                    constexpr float AIM_DELTA_CLAMP = 0.05f;      // max rad/frame
-                    float dYaw = meleeEquipped ? 0.0f : deltaCtrlYaw;
-                    float dPitch = meleeEquipped ? 0.0f : deltaCtrlPitch;
-                    if (fabsf(dYaw) < AIM_DELTA_DEADZONE) dYaw = 0.0f;
-                    if (fabsf(dPitch) < AIM_DELTA_DEADZONE) dPitch = 0.0f;
-                    if (dYaw > AIM_DELTA_CLAMP) dYaw = AIM_DELTA_CLAMP;
-                    if (dYaw < -AIM_DELTA_CLAMP) dYaw = -AIM_DELTA_CLAMP;
-                    if (dPitch > AIM_DELTA_CLAMP) dPitch = AIM_DELTA_CLAMP;
-                    if (dPitch < -AIM_DELTA_CLAMP) dPitch = -AIM_DELTA_CLAMP;
-                    pullYaw = dYaw;
-                    pullPitch = dPitch;
-
-                    // Aim weights: only pull aim when actively aiming (ADS or two-handed stabilization or aiming trigger)
-                    isActivelyAiming = (st.isPhysicalADS || twoHandedActive || aimHeld) && !physicalBlockEngaged && !isReloading;
-                    if (isActivelyAiming) {
-                        wPull = st.isPhysicalADS ? 0.12f : 0.08f;
-                    } else {
-                        wPull = 0.0f;
-                    }
+                    // GH #50/#51: DELTA-based aim steering (aim_pull.h). A steady arm
+                    // injects nothing; melee and the boxer-guard pose never steer.
+                    AimPullInputs pullIn;
+                    pullIn.deltaYaw = deltaCtrlYaw;
+                    pullIn.deltaPitch = deltaCtrlPitch;
+                    pullIn.isPhysicalADS = st.isPhysicalADS;
+                    pullIn.twoHanded = twoHandedActive;
+                    pullIn.aimHeld = aimHeld;
+                    pullIn.physicalBlock = physicalBlockEngaged;
+                    pullIn.reloading = isReloading;
+                    pullIn.meleeEquipped = meleeEquipped;
+                    pullIn.guardPoseLike = guardPoseLike;
+                    const AimPullResult pull = ComputeAimPull(pullIn);
+                    pullYaw = pull.pullYaw;
+                    pullPitch = pull.pullPitch;
+                    isActivelyAiming = pull.active;
+                    wPull = pull.weight;
                 }
             }
         }
@@ -3884,7 +3931,16 @@ static AimIntent UpdateAim(AimState& st, DWORD now,
     return out;
 }
 
+void CameraHook::Shutdown() {
+    FlushHeldInputs(); // GH #65: never leave a held click/key down on unload
+}
+
 void CameraHook::Update(RiddickVRSharedState& vrState) {
+    FlushDueHeldInputs(GetTickCount()); // GH #65: release held clicks even when VR is inactive
+    if (SimModeNoInput() && !s_loggedSimNoInput) {
+        s_loggedSimNoInput = true;
+        VR_LOG_INFO("XRSIM: RIDDICKVR_SIM=1 - desktop input injection disabled");
+    }
     if (!m_initialized || !vrState.vrActive) return;
 
     DWORD now = GetTickCount();
@@ -3912,8 +3968,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // input mapping section. Default (southpaw=0): dom=right, off=left.
     const RiddickVRControllerInput& domCtrl = g_vrConfig.southpaw ? vrState.leftController : vrState.rightController;
     const RiddickVRControllerInput& offCtrl = g_vrConfig.southpaw ? vrState.rightController : vrState.leftController;
+    CombatStanceThresholds stanceThresholds;
+    stanceThresholds.enter = g_vrConfig.stanceEnterTrigger;
+    stanceThresholds.exit = g_vrConfig.stanceExitTrigger;
+    stanceThresholds.holdMs = static_cast<uint32_t>(g_vrConfig.stanceHoldMs);
     CombatStanceIntent combatStance = UpdateCombatStance(s_combatStance,
-        vrState.leftController, vrState.rightController, static_cast<uint32_t>(now));
+        vrState.leftController, vrState.rightController, static_cast<uint32_t>(now), stanceThresholds);
     if (combatStance.entered) {
         VR_LOG_INFO("Combat Stance: COMBAT MODE entered (both triggers held)");
         HapticRequest(0, 0.35f, kHapticUi);
@@ -3965,6 +4025,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // no longer overrides it — menus/cinematics get the cinema screen path,
     // gameplay gets full-bleed immersion with bar-crop.
 
+    // Transform controller positions into HMD-relative space for spatial gestures
+    // (computed before head-look so the guard-pose test can use them, GH #50/#51)
+    RiddickVRVector3 leftLocal = WorldToHmdLocal(vrState.leftController.gripPose.position, vrState.hmdPose);
+    RiddickVRVector3 rightLocal = WorldToHmdLocal(vrState.rightController.gripPose.position, vrState.hmdPose);
+
     // 0. Singularity-Free Relative Quaternion Head Tracking Look Input (ADR 0409)
     // GH #17 step 7: math delegated to UpdateHeadLook (explicit HeadLookState,
     // no behavior change); side effects (mouse move, ADS detent haptic) stay here.
@@ -3974,11 +4039,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_stabilizedAimPose : (domCtrl.aimPose.isValid ? domCtrl.aimPose : domCtrl.gripPose); // Track C #14
         bool lookReloading = (now - s_reload.lastReloadGestureTime <= 1100);
         bool lookAimHeld = s_isAimingOrBlocking || (offCtrl.trigger > 0.5f); // Track C #14
+        // GH #50/#51: both fists in the front-of-face guard envelope (or just
+        // after a swing) is combat, not aiming: the arms must not steer the view.
+        const bool guardPoseLike = (!s_twoHandedStabilizationActive &&
+            InGuardEnvelope(GetGuardEnvelope(), leftLocal.y, leftLocal.z, rightLocal.y, rightLocal.z,
+                            leftLocal.x - rightLocal.x)) ||
+            (now - s_melee.lastPunchTime < 300);
         HeadLookIntent lookIntent = UpdateHeadLook(s_headlook, now,
             vrState.hmdPose, ctrlAimPose,
             recenterEdge, lookReloading, lookAimHeld,
             s_physicalBlockEngaged, s_twoHandedStabilizationActive,
-            g_vrConfig.southpaw, (s_activeWeaponSlot == 3)); // GH #51: melee/guard never steers
+            g_vrConfig.southpaw, (s_activeWeaponSlot == 3), // GH #51: melee/guard never steers
+            guardPoseLike);
         // GH #45: use the latching Has3DGameplayProjection() instead of the
         // per-frame Has3DThisFrame() — the latter caused judder by silently
         // dropping look deltas during brief ortho-HUD passes within gameplay.
@@ -4048,12 +4120,19 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         }
     }
 
-    // Transform controller positions into HMD-relative space for spatial gestures
-    RiddickVRVector3 leftLocal = WorldToHmdLocal(vrState.leftController.gripPose.position, vrState.hmdPose);
-    RiddickVRVector3 rightLocal = WorldToHmdLocal(vrState.rightController.gripPose.position, vrState.hmdPose);
-
-    const auto& rVel = vrState.rightController.gripPose.linearVelocity;
-    const auto& lVel = vrState.leftController.gripPose.linearVelocity;
+    // GH #65: controller velocity arrives in world/stage space but every gesture
+    // threshold is head-local (-Z = away from the body). Rotate into the HMD yaw
+    // frame so a swing registers whichever way the player faces. Speeds are
+    // rotation-invariant. HeadLocalVelocity=0 restores the legacy world frame.
+    RiddickVRVector3 rVel = vrState.rightController.gripPose.linearVelocity;
+    RiddickVRVector3 lVel = vrState.leftController.gripPose.linearVelocity;
+    if (g_vrConfig.headLocalVelocity && vrState.hmdPose.isValid) {
+        const RiddickVRQuaternion& hq = vrState.hmdPose.orientation;
+        const StrikeVelocity r = ToHeadYawLocal(rVel.x, rVel.y, rVel.z, hq.x, hq.y, hq.z, hq.w);
+        const StrikeVelocity l = ToHeadYawLocal(lVel.x, lVel.y, lVel.z, hq.x, hq.y, hq.z, hq.w);
+        rVel = RiddickVRVector3{r.x, r.y, r.z};
+        lVel = RiddickVRVector3{l.x, l.y, l.z};
+    }
     float rSpeed = sqrtf(rVel.x * rVel.x + rVel.y * rVel.y + rVel.z * rVel.z);
     float lSpeed = sqrtf(lVel.x * lVel.x + lVel.y * lVel.y + lVel.z * lVel.z);
 
@@ -4360,11 +4439,25 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             vrState.leftController.grip, vrState.rightController.grip,
             vrState.leftController.trigger, vrState.rightController.trigger);
 
+        // GH #52: optional gate. With MeleeRequiresStance=1 a classified swing
+        // outside the two-trigger stance is dropped (exploration mode).
+        if (g_vrConfig.meleeRequiresStance && !combatStance.active && meleeCounters.isMeleeStrike) {
+            static DWORD s_lastStanceRejectLog = 0;
+            if (now - s_lastStanceRejectLog > 1000) {
+                s_lastStanceRejectLog = now;
+                VR_LOG_INFO("MELEE STRIKE REJECTED (exploration; MeleeRequiresStance=1)");
+            }
+            meleeCounters.isMeleeStrike = false;
+            meleeCounters.dualCrossSlash = false;
+            meleeCounters.isForwardPunch = false;
+            meleeCounters.isHookPunch = false;
+            meleeCounters.isUppercutPunch = false;
+        }
+
         if (meleeCounters.dualRifleStrip) {
             s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: GUARD RIFLE STRIP & MAG EJECTION DISARM (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
-            SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-            SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+            SendMouseTap(true); // GH #65: held click
             SendGestureTap('R', "melee/rifle-strip-eject"); // Track C #15
             SendGestureTap('1', "melee/rifle-strip-equip");
             HapticRequest(1, (0.95f), kHapticFinisher); // Receiver wrenching shockwave (280 Hz)
@@ -4376,16 +4469,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             SendGestureTap('E', "melee/ash-riposte"); // Track C #15
             SendGestureTap(VK_TAB, "melee/ash-riposte-tab");
             SendKey('W', true);
-            SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-            SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+            SendMouseTap(true); // GH #65: held click
             SendKey('W', false);
             HapticRequest(1, (0.85f), kHapticReload); // Particulate scatter & strike snap (220 Hz)
         } else if (meleeCounters.isShieldPryDisarm) {
             s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: RIOT SHIELD WEDGE PRY & DISARM (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
             SendGestureTap('E', "melee/shield-pry"); // Track C #15
-            SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-            SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+            SendMouseTap(true); // GH #65: held click
             SendGestureTap('1', "melee/shield-seize");
             HapticRequest(0, (0.95f), kHapticFinisher); // Metallic shear crack (280 Hz)
             HapticRequest(1, (0.95f), kHapticFinisher);
@@ -4393,15 +4484,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Counter: INMATE SHIV EYE-GOUGE RIPOSTE (Rz: %.2f, Ry: %.2f, Ey: %.2f)", rVel.z, rVel.y, rightLocal.y);
             SendKey('W', true);
-            SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-            SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+            SendMouseTap(true); // GH #65: held click
             SendKey('W', false);
             HapticRequest(1, (0.95f), kHapticFinisher); // Perforation & orbital bone crunch (280 Hz)
         } else if (meleeCounters.isForwardParry) {
             s_melee.lastPunchTime = now;
             VR_LOG_INFO("Physical Gesture: PARRY / COUNTER-STRIKE THRUST (Rz: %.2f, Lz: %.2f while Blocking)", rVel.z, lVel.z);
-            SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-            SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+            SendMouseTap(true); // GH #65: held click
             HapticRequest(1, (0.95f), kHapticFinisher); // High-frequency bone-cracking parry shockwave (280 Hz)
         } else if (meleeCounters.isMeleeStrike) {
             // Immediately disengage block if currently blocking so attacks are not canceled or stuck
@@ -4559,46 +4648,37 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-universal-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -4656,12 +4736,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumZygomaticPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
@@ -4672,8 +4750,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(VK_RETURN, false);
                 SendKey('Q', false);
@@ -4725,43 +4802,35 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-macrocosm-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -4818,12 +4887,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumMandiblePinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
@@ -4833,8 +4900,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
@@ -4885,40 +4951,33 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-trans-cosmic-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-trans-cosmic-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-trans-cosmic-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -4974,12 +5033,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumSternumPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
@@ -4988,8 +5045,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
@@ -5039,36 +5095,30 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -5121,12 +5171,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumScapulaPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
@@ -5134,8 +5182,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(VK_SPACE, false);
@@ -5184,31 +5231,26 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-multiverse-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-multiverse-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -5258,20 +5300,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumClaviclePinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_RETURN, false);
@@ -5319,26 +5358,22 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-continuum-singularity-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-continuum-singularity-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -5385,19 +5420,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumRibSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(VK_RETURN, false);
                 SendKey(VK_TAB, false);
@@ -5444,13 +5476,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-interdimensional-overdrive");
@@ -5458,8 +5488,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-interdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-interdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -5504,19 +5533,16 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumKneeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
@@ -5563,20 +5589,17 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-transdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-transdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -5619,18 +5642,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumArmbarDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
                 SendKey('Q', false);
@@ -5676,18 +5696,15 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-hyperdimensional-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-hyperdimensional-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-hyperdimensional-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -5728,17 +5745,14 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialFulcrumChokeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_TAB, false);
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
@@ -5783,13 +5797,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_TAB, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
                 SendKey(VK_RETURN, false);
@@ -5827,16 +5839,13 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialLeverPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
@@ -5880,13 +5889,11 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
                 SendGestureTap(VK_TAB, "melee/stun-baton-omniverse-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
                 SendGestureTap(VK_RETURN, "melee/stun-baton-omniverse-overdrive");
                 SendGestureTap(VK_SPACE, "melee/stun-baton-omniverse-overdrive");
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
                 // Track C #15: release folded into debounced tap above.
@@ -5924,15 +5931,12 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialPivotSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(VK_SPACE, false);
@@ -5974,8 +5978,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_TAB, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_TAB, false);
@@ -6014,12 +6017,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialPivotTwistDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
@@ -6060,8 +6061,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_TAB, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_TAB, false);
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
@@ -6098,11 +6098,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialDoubleStrikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
@@ -6176,8 +6174,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialStompDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, true);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_SPACE, false);
@@ -6248,8 +6245,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialPostImpactDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.cranialPostImpactDirKey, false);
@@ -6316,8 +6312,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialGrindDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.cranialGrindDirKey, false);
@@ -6382,8 +6377,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cervicalDeckPinDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.cervicalDeckPinDirKey, false);
@@ -6414,8 +6408,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_TAB, true);
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
@@ -6446,8 +6439,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.sternumKneeSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.sternumKneeSpikeDirKey, false);
@@ -6476,8 +6468,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_RETURN, true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_TAB, false);
                 SendKey('Q', false);
                 SendKey(VK_RETURN, false);
@@ -6506,8 +6497,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cranialDeckDriverDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.cranialDeckDriverDirKey, false);
@@ -6534,8 +6524,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_RETURN, true);
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_RETURN, false);
@@ -6562,8 +6551,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.sternumElbowDropDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.sternumElbowDropDirKey, false);
@@ -6588,8 +6576,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_TAB, true);
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
@@ -6614,8 +6601,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.thoracicPinLockDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.thoracicPinLockDirKey, false);
@@ -6639,8 +6625,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_RETURN, true);
                 SendKey(VK_TAB, true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
                 SendKey(VK_RETURN, false);
@@ -6664,8 +6649,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.thoracicMatSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.thoracicMatSlamDirKey, false);
@@ -6688,8 +6672,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
                 SendKey(VK_TAB, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_TAB, false);
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
@@ -6712,8 +6695,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.thoracicDislocationDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.thoracicDislocationDirKey, false);
@@ -6735,8 +6717,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
@@ -6758,8 +6739,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.hyperextensionFinisherDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.hyperextensionFinisherDirKey, false);
@@ -6780,8 +6760,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_RETURN, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(VK_RETURN, false);
@@ -6802,8 +6781,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cervicalGratingSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.cervicalGratingSlamDirKey, false);
@@ -6823,8 +6801,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
@@ -6844,8 +6821,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.sternumGratingSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.sternumGratingSlamDirKey, false);
@@ -6864,8 +6840,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_TAB, true);
                 SendKey(VK_SPACE, true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
@@ -6884,8 +6859,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.sternumFractureSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.sternumFractureSpikeDirKey, false);
@@ -6903,8 +6877,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey(VK_TAB, false);
                 SendKey('Q', false);
@@ -6922,8 +6895,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.sternumKneeDropDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.sternumKneeDropDirKey, false);
@@ -6941,8 +6913,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(VK_TAB, false);
                 SendKey('Q', false);
@@ -6960,8 +6931,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.whizzerGroundDislocationDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.whizzerGroundDislocationDirKey, false);
@@ -6978,8 +6948,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('Q', true);
                 SendKey(VK_TAB, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_TAB, false);
                 SendKey('Q', false);
                 SendKey('W', false);
@@ -6996,8 +6965,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.whizzerGroundFinisherDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.whizzerGroundFinisherDirKey, false);
@@ -7014,8 +6982,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('Q', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('Q', false);
                 SendKey('W', false);
@@ -7032,8 +6999,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.hyperextensionSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.hyperextensionSpikeDirKey, false);
@@ -7050,8 +7016,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('Q', true);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 SendKey('Q', false);
                 SendKey('W', false);
@@ -7068,8 +7033,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.thoracicSlamDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.thoracicSlamDirKey, false);
@@ -7086,8 +7050,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('Q', true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey('Q', false);
                 SendKey('W', false);
@@ -7104,8 +7067,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.cervicalSpikeDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.cervicalSpikeDirKey, false);
@@ -7122,8 +7084,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('Q', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('Q', false);
                 SendKey('W', false);
@@ -7140,8 +7101,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.whizzerCounterDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.whizzerCounterDirKey, false);
@@ -7157,8 +7117,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', true);
                 SendKey('W', true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey('S', false);
@@ -7174,8 +7133,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.lateralSuplexDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.lateralSuplexDirKey, false);
@@ -7192,8 +7150,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('Q', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('Q', false);
                 SendKey('W', false);
@@ -7209,8 +7166,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey(s_melee.thaiPlumElbowDirKey, true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey(s_melee.thaiPlumElbowDirKey, false);
                 SendKey('W', false);
@@ -7225,8 +7181,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
@@ -7242,8 +7197,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.hipTossDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.hipTossDirKey, false);
@@ -7259,8 +7213,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', true);
                 SendKey('W', true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey('S', false);
@@ -7276,8 +7229,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.whizzerDirKey, true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey(s_melee.whizzerDirKey, false);
@@ -7293,8 +7245,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
@@ -7310,8 +7261,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey('W', false);
@@ -7328,8 +7278,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.radialDisarmDirKey, true);
                 SendKey('W', true);
                 SendKey('E', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('E', false);
                 SendKey('W', false);
                 SendKey(s_melee.radialDisarmDirKey, false);
@@ -7347,8 +7296,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey('W', false);
@@ -7367,8 +7315,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
                 SendKey(VK_RETURN, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_RETURN, false);
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
@@ -7387,8 +7334,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
@@ -7406,8 +7352,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(s_melee.crossParryDirKey, true);
                 SendKey('W', true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('W', false);
                 SendKey(s_melee.crossParryDirKey, false);
@@ -7424,8 +7369,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey('S', false);
@@ -7441,8 +7385,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(VK_SPACE, true);
                 SendKey('S', true);
                 SendKey('W', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('W', false);
                 SendKey('S', false);
                 SendKey(VK_SPACE, false);
@@ -7457,8 +7400,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', true);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
                 SendKey('C', false);
@@ -7475,8 +7417,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
@@ -7495,8 +7436,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(throwDirKey, true);
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey(VK_SPACE, false);
                 SendKey(throwDirKey, false);
@@ -7513,8 +7453,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
                 SendKey('E', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('E', false);
                 SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
                 SendKey('W', false);
@@ -7531,8 +7470,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
@@ -7549,8 +7487,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('S', true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey('S', false);
                 SendKey('W', false);
@@ -7565,8 +7502,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', true);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 SendKey('C', false);
@@ -7581,8 +7517,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
@@ -7598,8 +7533,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey('C', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('C', false);
                 SendKey('W', false);
@@ -7615,8 +7549,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey(dirKey, true);
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey(dirKey, false);
@@ -7631,8 +7564,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', true);
                 SendKey('A', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('A', false);
                 SendKey('S', false);
@@ -7647,8 +7579,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
@@ -7662,8 +7593,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL OUTSIDE TRIP & MOUNT POUND EXECUTED (Lx: %.2f, Rz: %.2f)", lVel.x, rVel.z);
                 SendKey('W', true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey('W', false);
                 HapticRequest(0, (0.80f), kHapticReload);  // Ankle hook resistance impact (170 Hz)
@@ -7693,8 +7623,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
@@ -7709,8 +7638,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON LATERAL CROSS-SWEEP DEFLECTION & DISARM (Rx: %.2f)", rVel.x);
                 SendKey(dirKey, true);
                 SendKey('E', true);
-                SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
-                SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
+                SendMouseTap(false); // GH #65: held click
                 SendKey('E', false);
                 SendKey(dirKey, false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Electromagnetic repulsion arc blast (310 Hz)
@@ -7724,8 +7652,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: OVERHAND HAMMERFIST COMPLETED COMBO (Ry: %.2f)", rVel.y);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Skeletal hammerfist shockwave (280 Hz)
@@ -7738,8 +7665,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED HIGH-ARC DOWNWARD SKULL BREAKER CLEAVED (Ry: %.2f)", rVel.y);
                 SendKey('W', true);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Electro-kinetic cranial detonation blast (340 Hz)
@@ -7753,8 +7679,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: GUILLOTINE CHOKE LOCKED (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey('S', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Tracheal compression chokehold pulse (280 Hz)
@@ -7768,8 +7693,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
@@ -7784,8 +7708,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: CERVICAL SNAP COMPLETED COMBO (Lx: %.2f)", lVel.x);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 HapticRequest(0, (0.98f), kHapticFinisher); // Cervical vertebrae fracture snap (300 Hz)
@@ -7804,8 +7727,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.isCrossChestArcWall) {
                 SendKey('S', true);
                 SendKey('Q', true);
-                SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
-                SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
+                SendMouseTap(false); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('S', false);
                 goto combat_gesture_done;
@@ -7814,8 +7736,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON INDUCTION COIL OVERHEAT ARC DETONATED");
                 SendKey('S', true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('S', false);
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Blinding EMP arc detonation shockwave (300 Hz)
@@ -7825,8 +7746,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.isDischargingArcWave) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON OVERLOAD RADIAL ARC WAVE DISCHARGED (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 SendKeyTap(VK_SPACE);
                 SendKeyTap('Q');
@@ -7841,8 +7761,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 SendKey('C', true);
                 SendKey('S', true);
                 SendKey('Q', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('Q', false);
                 SendKey('S', false);
                 SendKey('C', false);
@@ -7856,8 +7775,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL COLLAR TIE CLINCH & HEADBUTT STUN (Lz: %.2f, Rz: %.2f)", lVel.z, rVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Concussive cranial skull collision shockwave (180 Hz)
@@ -7871,8 +7789,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: STERNUM ELBOW SMASH COMPLETED COMBO (Ry: %.2f)", rVel.y);
                 SendKey('W', true);
                 SendKey('A', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('A', false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Bone-fracturing sternum blunt crack (280 Hz)
@@ -7884,8 +7801,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON CHARGED UNDERARM SPEAR THRUST (Rz: %.2f)", rVel.z);
                 SendKey('W', true);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // High-voltage linear shockwave (310 Hz)
@@ -7898,8 +7814,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL SHIN KICK & KNEE HYPER-EXTENSION (Ry: %.2f, Lz: %.2f)", rVel.y, lVel.z);
                 SendKey('C', true);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 SendKey('C', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Joint-crushing skeletal fracture shockwave (240 Hz)
@@ -7912,8 +7827,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL LEAD KNEE THRUST (Ry: %.2f, Ly: %.2f)", rVel.y, lVel.y);
                 SendKey('W', true);
                 SendKey('C', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('C', false);
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Concussive abdominal organ shockwave (200 Hz)
@@ -7926,8 +7840,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DUCK-UNDER KIDNEY COUNTER-JAB (Rx: %.2f, Rz: %.2f)", rVel.x, rVel.z);
                 SendKey('C', true);
                 SendKey('D', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('D', false);
                 SendKey('C', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Visceral renal concussive shockwave (220 Hz)
@@ -7940,8 +7853,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: DIRT/ASH BLIND RECOVERY RIPOSTE DISPATCHED (Rz: %.2f)", rVel.z);
                 SendKey(VK_SPACE, true);
                 SendKey('W', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('W', false);
                 SendKey(VK_SPACE, false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Retaliatory counter-strike blast (240 Hz)
@@ -7953,8 +7865,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE SHIV FOREARM DEFENSIVE PARRY-AND-SNAP (Lx: %.2f, Ry: %.2f)", lVel.x, rVel.y);
                 SendKey('W', true);
                 SendKey('E', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('E', false);
                 SendKey('W', false);
                 HapticRequest(0, (0.80f), kHapticReload);  // Forearm deflection snap (220 Hz)
@@ -7967,8 +7878,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Tactical Melee: STUN BATON RIB-JAB & GROUND TAKEDOWN (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('S', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('S', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Neuromuscular shock & ground deck impact (290 Hz)
@@ -7980,8 +7890,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE PIT BRAWL DOUBLE-EAR CONCUSSIVE CLAP (Lx: %.2f, Rx: %.2f)", lVel.x, rVel.x);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 HapticRequest(0, (0.98f), kHapticFinisher);  // Concussive acoustic blast (160 Hz)
@@ -7995,8 +7904,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: STUN DART COUNTER-JAB DISPATCHED (Rz: %.2f)", rVel.z);
                 SendKey('E', true);
                 SendKey('3', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('3', false);
                 SendKey('E', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Bio-electric discharge shockwave (320 Hz)
@@ -8008,8 +7916,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 VR_LOG_INFO("Physical Combat: INMATE SHIV RIB-CAGE UNDERHOOK PUNCTURE & LIFT (Ry: %.2f, Rz: %.2f)", rVel.y, rVel.z);
                 SendKey('W', true);
                 SendKey(VK_SPACE, true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey(VK_SPACE, false);
                 SendKey('W', false);
                 HapticRequest(1, (0.95f), kHapticFinisher); // Cartilage perforation & body lift rumble (280 Hz)
@@ -8018,8 +7925,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.dualSledgeOverhead) {
                 VR_LOG_INFO("Physical Gesture: HEAVY ORE SLEDGEHAMMER OVERHEAD CRUSH (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Catastrophic blunt fracture shockwave (80 Hz)
                 HapticRequest(0, (0.98f), kHapticFinisher);
@@ -8028,8 +7934,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.stealthCarotidSlash) {
                 VR_LOG_INFO("Physical Stealth: CAROTID ARTERIAL JUGULAR SLASH (SpeedX: %.2f m/s, Ry: %.2f)", rVel.x, rightLocal.y);
                 SendKey('W', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('W', false);
                 HapticRequest(1, (0.95f), kHapticFinisher); // Arterial release incision & spray (260 Hz)
                 goto combat_gesture_done;
@@ -8037,8 +7942,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.twoHandedBatonSlam) {
                 VR_LOG_INFO("Physical Gesture: TWO-HANDED STUN BATON DEFIBRILLATOR SLAM (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Electro-kinetic shockwave blast (280 Hz)
                 HapticRequest(0, (0.98f), kHapticFinisher);
@@ -8047,8 +7951,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.mechPowerPunch) {
                 VR_LOG_INFO("Physical Gesture: EXOSKELETON POWER FIST KINETIC SHOCKWAVE PUNCH (Rz: %.2f m/s)", rVel.z);
                 SendKey('W', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('W', false);
                 HapticRequest(1, (0.98f), kHapticFinisher); // Piston shockwave blast (100 Hz)
                 HapticRequest(0, (0.85f), kHapticReload);
@@ -8057,8 +7960,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.droneEmpSnap) {
                 VR_LOG_INFO("Physical Combat: SECURITY DRONE EMP OVERLOAD & CHASSIS SNAP (TorqueRelY: %.2f)", fabsf(lVel.y - rVel.y));
                 SendKeyTap('E');
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 HapticRequest(1, (0.95f), kHapticFinisher); // Mechanical spine crunch & EMP arc wave (280 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
@@ -8066,8 +7968,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.leftTrayBatter) {
                 VR_LOG_INFO("Physical Gesture: INMATE MESS TRAY CONCUSSIVE BATTER (Lz: %.2f)", lVel.z);
                 SendKey('W', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('W', false);
                 HapticRequest(0, (0.90f), kHapticFinisher); // Sheet metal concussive clatter (160 Hz)
                 goto combat_gesture_done;
@@ -8075,8 +7976,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.dualShieldBash) {
                 VR_LOG_INFO("Physical Gesture: RIOT SHIELD CONCUSSIVE BASH (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
                 SendKey('W', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('W', false);
                 HapticRequest(1, (0.95f), kHapticFinisher); // Shield rim blunt shockwave (140 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);
@@ -8094,8 +7994,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if (meleeStrikes.dualStoolHeavySmash) {
                 VR_LOG_INFO("Physical Gesture: INMATE STOOL / BLUNT WEAPON HEAVY SMASH (LSpd: %.2f, RSpd: %.2f)", lSpeed, rSpeed);
                 SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 SendKey('S', false);
                 HapticRequest(1, (0.95f), kHapticFinisher); // Bone-shattering blunt fracture (120 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);
@@ -8103,28 +8002,23 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (meleeStrikes.dualPalmShove) {
                 VR_LOG_INFO("Physical Gesture: PIT FIGHTING ARENA DUAL-PALM CONCUSSIVE SHOVE (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
-                SendKey('W', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                SendKey('W', false);
+                SendKeyHeld('W');
+                SendMouseTap(true); // GH #65: held click
                 HapticRequest(1, (0.85f), kHapticReload); // Elastic ring boundary / concussive shockwave (140 Hz)
                 HapticRequest(0, (0.85f), kHapticReload);
                 goto combat_gesture_done;
             }
             if (meleeStrikes.isLookingDown && meleeStrikes.isDownwardPlunge) {
                 VR_LOG_INFO("Physical Gesture: DEATH-FROM-ABOVE AERIAL TAKEDOWN / DROP AMBUSH (Pitch: %.2f rad, Vy: %.2f m/s)", s_headlook.lastHmdPitch, activeVel.y);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
                 HapticRequest(1, (0.95f), kHapticFinisher); // Bone-shattering ground impact shockwave (280 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);
                 goto combat_gesture_done;
             }
             if (meleeStrikes.dualOverheadSlam) {
                 VR_LOG_INFO("Physical Gesture: TWO-HANDED OVERHEAD CRUSHING SLAM / PIPE STRIKE (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
-                SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                SendKey('S', false);
+                SendKeyHeld('S');
+                SendMouseTap(true); // GH #65: held click
 
                 HapticRequest(1, (0.95f), kHapticFinisher); // Heavy blunt concussive shockwave (120 Hz)
                 HapticRequest(0, (0.95f), kHapticFinisher);
@@ -8132,15 +8026,10 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (meleeCounters.dualCrossSlash) {
                 VR_LOG_INFO("Physical Gesture: DUAL ULAK SCISSOR CROSS-SLASH (Rx: %.2f, Lx: %.2f)", rVel.x, lVel.x);
-                SendKey('A', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                SendKey('A', false);
-
-                SendKey('D', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                SendKey('D', false);
+                // Held inputs cannot be sequenced within one frame: A+D together cancel,
+                // so one held slash goes the way the dominant hand swept.
+                SendKeyHeld((rVel.x < 0.0f) ? 'A' : 'D');
+                SendMouseTap(true); // GH #65: held click
 
                 HapticRequest(1, (0.95f), kHapticFinisher);
                 HapticRequest(0, (0.95f), kHapticFinisher);
@@ -8148,10 +8037,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             }
             if (activeVel.y < -1.35f && (activeLocal.y > -0.10f || s_posture.isPhysicallyCrouched)) {
                 VR_LOG_INFO("Physical Gesture: OVERHEAD SHIV PLUNGE / FINISHER (Vy: %.2f m/s, Y: %.2fm)", activeVel.y, activeLocal.y);
-                SendKey('S', true);
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                SendKey('S', false);
+                SendKeyHeld('S');
+                SendMouseTap(true); // GH #65: held click
 
                 if (rSpeed > lSpeed) HapticRequest(1, (0.95f), kHapticFinisher);
                 else HapticRequest(0, (0.95f), kHapticFinisher);
@@ -8160,8 +8047,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             if ((s_posture.isPhysicallyCrouched || s_posture.isStealthPeeking) && activeLocal.z < -0.25f && (activeVel.z < -1.1f || fabsf(activeVel.x) > 1.1f)) {
                 VR_LOG_INFO("Physical Gesture: STEALTH TAKEDOWN / THROAT-SLIT initiated (Vz: %.2f, Vx: %.2f)", activeVel.z, activeVel.x);
                 SendKeyTap('E');
-                SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+                SendMouseTap(true); // GH #65: held click
 
                 if (rSpeed > lSpeed) HapticRequest(1, (0.90f), kHapticFinisher);
                 else HapticRequest(0, (0.90f), kHapticFinisher);
@@ -8178,10 +8064,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     bool isBatonArcJab = (vrState.rightController.trigger > 0.60f);
                     VR_LOG_INFO("Physical Gesture: %s detected (Vz: %.2f m/s, Speed: %.2f m/s)",
                         isBatonArcJab ? "RIOT BATON ARC JAB" : "STRAIGHT JAB / BLADE THRUST", fwdZ, (rSpeed > lSpeed) ? rSpeed : lSpeed);
-                    SendKey('W', true);
-                    SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                    SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                    SendKey('W', false);
+                    SendKeyHeld('W');
+                    SendMouseTap(true); // GH #65: held click
 
                     float pulse = isBatonArcJab ? 0.95f : 0.90f;
                     if (rSpeed > lSpeed) HapticRequest(1, pulse, kHapticFinisher); // GH #32: finisher
@@ -8191,10 +8075,8 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                 // Uppercut: upward vertical speed dominates forward & lateral
                 else if (activeVel.y > 1.10f && activeVel.y > absX && activeVel.y > fwdZ) {
                     VR_LOG_INFO("Physical Gesture: UPPERCUT detected (Vy: %.2f m/s)", activeVel.y);
-                    SendKey('S', true);
-                    SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                    SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                    SendKey('S', false);
+                    SendKeyHeld('S');
+                    SendMouseTap(true); // GH #65: held click
 
                     if (rSpeed > lSpeed) HapticRequest(1, (0.9f), kHapticFinisher);
                     else HapticRequest(0, (0.9f), kHapticFinisher);
@@ -8205,16 +8087,18 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
                     char hookKey = (activeVel.x > 0.0f) ? 'D' : 'A';
                     VR_LOG_INFO("Physical Gesture: %s HOOK / BLADE SLASH detected (Vx: %.2f m/s)",
                         (hookKey == 'D') ? "RIGHT" : "LEFT", activeVel.x);
-                    SendKey(hookKey, true);
-                    SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-                    SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
-                    SendKey(hookKey, false);
+                    SendKeyHeld(hookKey);
+                    SendMouseTap(true); // GH #65: held click
 
                     if (rSpeed > lSpeed) HapticRequest(1, (0.9f), kHapticFinisher);
                     else HapticRequest(0, (0.9f), kHapticFinisher);
                     goto combat_gesture_done;
                 }
             }
+            // GH #65: a classified strike no branch above dispatched (e.g. a diagonal
+            // swing with no dominant axis) still lands as a plain click.
+            VR_LOG_INFO("Physical Gesture: GENERIC STRIKE (Vx: %.2f, Vy: %.2f, Vz: %.2f)", activeVel.x, activeVel.y, activeVel.z);
+            SendMouseTap(true);
         combat_gesture_done:
             s_melee.lastPunchTime = now;
         }
@@ -8225,6 +8109,9 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // lower-priority env tap/click dispatches below so one gesture fires once.
     bool meleeFiredThisFrame =
         (s_melee.lastPunchTime != punchAtEntry) || (s_melee.lastFinisherTime != finisherAtEntry);
+    if (meleeFiredThisFrame) {
+        VR_LOG_INFO("MELEE STRIKE DISPATCHED (hold=%ums)", static_cast<unsigned>(g_vrConfig.meleeClickHoldMs));
+    }
 
     // 5b. Physical Boxer Guard Pose Detection ("holding both fists up in front of the VR")
     // Criteria (ADR 0400):
@@ -8249,39 +8136,28 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     bool inFrontOfFace = (leftLocal.z >= guardEnv.zMin && leftLocal.z <= guardEnv.zMax) &&
                          (rightLocal.z >= guardEnv.zMin && rightLocal.z <= guardEnv.zMax);
     bool handsClose = fabsf(leftLocal.x - rightLocal.x) < guardEnv.maxHandSpan;
-    bool handsSteady = (rSpeed < 1.4f && lSpeed < 1.4f);
+    bool handsSteady = (rSpeed < g_vrConfig.guardSteadySpeed && lSpeed < g_vrConfig.guardSteadySpeed);
     bool notPunching = (now - s_melee.lastPunchTime > 120) && (now - s_melee.lastFinisherTime > 120); // GH #31
 
     bool guardPoseDetected = !isClimbingActive && !s_twoHandedStabilizationActive &&
                              chinLevel && inFrontOfFace && handsClose && handsSteady && notPunching;
 
-    // Temporal Hysteresis & Debouncing:
-    // Require guard pose to hold for ~40ms to engage
-    if (guardPoseDetected) {
-        s_melee.guardPoseReleaseTimer = 0;
-        if (s_melee.guardPoseHoldTimer == 0) {
-            s_melee.guardPoseHoldTimer = now;
-        } else if (now - s_melee.guardPoseHoldTimer >= 40) {
-            s_physicalBlockEngaged = true;
-        }
-    } else {
-        s_melee.guardPoseHoldTimer = 0;
-        if (s_physicalBlockEngaged) {
-            // If throwing an actual directional punch, release block instantly (0ms)
-            bool isThrowingPunch = (rVel.z < -1.15f || lVel.z < -1.15f) || (fabsf(rVel.x) > 1.30f || fabsf(lVel.x) > 1.30f) || (rVel.y < -1.25f || lVel.y < -1.25f);
-            if (isThrowingPunch) {
-                s_physicalBlockEngaged = false;
-                s_melee.guardPoseReleaseTimer = 0;
-            } else {
-                // When hands drop naturally, require 80ms release buffer to eliminate jitter
-                if (s_melee.guardPoseReleaseTimer == 0) {
-                    s_melee.guardPoseReleaseTimer = now;
-                } else if (now - s_melee.guardPoseReleaseTimer >= 80) {
-                    s_physicalBlockEngaged = false;
-                    s_melee.guardPoseReleaseTimer = 0;
-                }
-            }
-        }
+    // Temporal hysteresis & debouncing (GH #62, combat_guard.h): engage after
+    // GuardEngageMs, release after GuardReleaseMs, or instantly on a real punch.
+    // The timers stay in s_melee so the existing resets keep working.
+    {
+        const bool isThrowingPunch = (rVel.z < -1.15f || lVel.z < -1.15f) || (fabsf(rVel.x) > 1.30f || fabsf(lVel.x) > 1.30f) || (rVel.y < -1.25f || lVel.y < -1.25f);
+        GuardPoseState guardState;
+        guardState.holdStart = s_melee.guardPoseHoldTimer;
+        guardState.releaseStart = s_melee.guardPoseReleaseTimer;
+        guardState.engaged = s_physicalBlockEngaged;
+        GuardPoseTiming guardTiming;
+        guardTiming.engageMs = static_cast<unsigned>(g_vrConfig.guardEngageMs);
+        guardTiming.releaseMs = static_cast<unsigned>(g_vrConfig.guardReleaseMs);
+        guardTiming.steadySpeed = g_vrConfig.guardSteadySpeed;
+        s_physicalBlockEngaged = UpdateGuardPose(guardState, guardPoseDetected, isThrowingPunch, now, guardTiming);
+        s_melee.guardPoseHoldTimer = guardState.holdStart;
+        s_melee.guardPoseReleaseTimer = guardState.releaseStart;
     }
 
     // 6. Tactical Weapon Reload Gestures (F.E.A.R. / Riddick VR Style)
@@ -8347,8 +8223,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (reloadIntent.flareIgnited) { // GH #31: melee priority evaluated in UpdateReload
         VR_LOG_INFO("Tactical Decoy: THERMAL MAGNESIUM FLARE IGNITED (ShearVelY: %.2f, ShearVelX: %.2f)", reloadIntent.flareShearY, reloadIntent.flareShearX);
         SendKeyTap('4'); // Equip flare / throwable slot
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         HapticRequest(0, (0.85f), kHapticReload);  // Sulfur percussion strike snap (260 Hz)
         HapticRequest(1, (0.85f), kHapticReload);
     }
@@ -8587,8 +8462,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (s_twoHandedStabilizationActive && pointBlankLock && breachForwardThrust && triggerBreachPull && !meleeFiredThisFrame && (now - s_lastShotgunBreachTime > 1800)) { // GH #31
         s_lastShotgunBreachTime = now;
         VR_LOG_INFO("Physical Gunplay: SHOTGUN BREACHING BLAST & DOOR KICK (Rz: %.2f, Lz: %.2f)", rVel.z, lVel.z);
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         SendKeyTap('W');
         SendKeyTap(VK_SPACE);
         HapticRequest(1, (0.98f), kHapticFinisher); // Point-blank concussive muzzle blast (90 Hz)
@@ -8621,8 +8495,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
         VR_LOG_INFO("Environmental Gesture: MINING PNEUMATIC JACKHAMMER GROUND CHISEL PLUNGE (Ly: %.2f, Ry: %.2f)", lVel.y, rVel.y);
         SendKeyTap('S');
         SendKeyTap(VK_SPACE);
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         HapticRequest(0, (0.98f), kHapticFinisher);  // Seismic percussive hammer strike (50 Hz)
         HapticRequest(1, (0.98f), kHapticFinisher);
     }
@@ -8739,8 +8612,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
             s_lastScarDetonateTime = now;
             s_scarDetonatorDown = true;
             VR_LOG_INFO("Tactical Gesture: SCAR AIR MINE DETONATION TRIGGERED (Off-Hand Clench)");
-            SendMouseClick(false, true); // GH #33: foreground-guarded (was mouse_event RIGHTDOWN)
-            SendMouseClick(false, false); // GH #33: foreground-guarded (was mouse_event RIGHTUP)
+            SendMouseTap(false); // GH #65: held click
             HapticRequest(0, (0.95f), kHapticFinisher); // Heavy explosive shockwave (280 Hz)
             HapticRequest(1, (0.95f), kHapticFinisher);
         } else if (!wantDetonate) {
@@ -8947,8 +8819,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (gripsIntent.leftThrow) {
         VR_LOG_INFO("Physical Gesture: OBJECT THROW / PROPULSION executed (Speed: %.2f m/s, Vel: [%.2f, %.2f, %.2f])",
             gripsIntent.throwSpeed, gripsIntent.throwVel.x, gripsIntent.throwVel.y, gripsIntent.throwVel.z);
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         HapticRequest(0, (0.60f), kHapticLadder); // Tactile release impulse
     } else if (gripsIntent.leftDrop) {
         SendKey('E', false); // Gentle drop at feet
@@ -8975,8 +8846,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (gripsIntent.ashThrow) {
         VR_LOG_INFO("Combat Dirty Tactic: DIRT / ASH THROWN INTO ENEMY EYES (Vy: %.2f, Vz: %.2f)", gripsIntent.ashVy, gripsIntent.ashVz);
         SendKeyTap('E');
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         HapticRequest(1, (0.50f), kHapticUi); // Fine particulate scatter burst (180 Hz)
     }
 
@@ -8984,8 +8854,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (gripsIntent.fanScatter) {
         VR_LOG_INFO("Combat Dirty Tactic: DUAL-HANDED SAND / ASH FAN SCATTER (Lx: %.2f, Rx: %.2f)", gripsIntent.fanLx, gripsIntent.fanRx);
         SendKeyTap('E');
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         HapticRequest(0, (0.65f), kHapticLadder); // Dual wide-arc particulate scatter pulses (180 Hz)
         HapticRequest(1, (0.65f), kHapticLadder);
     }
@@ -8998,8 +8867,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     if (gripsIntent.fanBurst) {
         VR_LOG_INFO("Combat Dirty Tactic: DIRT/ASH TWO-HANDED FAN CLENCH & BURST (Lx: %.2f, Rx: %.2f)", gripsIntent.burstLx, gripsIntent.burstRx);
         SendKeyTap('E');
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         SendKeyTap(VK_TAB);
         HapticRequest(0, (0.70f), kHapticReload);  // Wide particulate cloud rush (175 Hz)
         HapticRequest(1, (0.70f), kHapticReload);
@@ -9056,8 +8924,7 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     // Cervical Twist Finisher: rapid lateral jerk of right hand (|rVel.x| > 0.80 m/s)
     if (gripsIntent.chokeFinisher) {
         VR_LOG_INFO("Stealth Takedown: SILENT CERVICAL NECK SNAP FINISHER executed (Vx: %.2f m/s)", gripsIntent.chokeVx);
-        SendMouseClick(true, true); // GH #33: foreground-guarded (was mouse_event LEFTDOWN)
-        SendMouseClick(true, false); // GH #33: foreground-guarded (was mouse_event LEFTUP)
+        SendMouseTap(true); // GH #65: held click
         HapticRequest(1, (0.95f), kHapticFinisher); // Bone-cracking crunch (280 Hz)
         HapticRequest(0, (0.95f), kHapticFinisher);
     }

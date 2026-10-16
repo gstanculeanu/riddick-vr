@@ -61,6 +61,13 @@ struct VRConfig {
     // backed but unvalidated VR fit; tune/compare on a headset. Ignored when no
     // posed variant exists for a mesh.
     int nativeHandPose = 0;
+    // GH #64: draw the IK upper-arm tube (shoulder to elbow) with native hands.
+    // Default OFF: the native mesh is placed from its own bounds, so the tube
+    // does not join it and floats as a stray block.
+    int nativeHandUpperArm = 0;
+    // GH #46: fade the overlay hands to 0.25 while a weapon is held (trigger
+    // pulled or two-handed grip). Never applies to a boxer guard. 0 = never fade.
+    int handFadeWhenWeapon = 1;
     // GH #62: front-of-HMD block/guard envelope (head-local metres; +Y up,
     // -Z forward). Block is a hand *pose* held in front of the face, never a
     // low hold. Both the guard pose and the strike-suppression gate share these
@@ -83,6 +90,25 @@ struct VRConfig {
     float strikeUppercutMaxY = -0.10f;
     float strikeUppercutVz = -0.20f;
     float strikeCrossVx = 1.10f;
+    // GH #65: rotate the controller's world velocity into the HMD yaw frame
+    // before classifying strikes, so a swing registers whichever way the player
+    // faces. 0 = legacy (world axes; only works facing stage -Z).
+    int headLocalVelocity = 1;
+    // GH #65: milliseconds a melee mouse click stays held before release (0 =
+    // legacy instant down+up, which the engine's polled input often misses).
+    int meleeClickHoldMs = 60;
+    // GH #62: guard pose hysteresis (ms) and the hand speed limit (m/s) below
+    // which the hands count as steady. Defaults are the old hard-coded values.
+    int guardEngageMs = 40;
+    int guardReleaseMs = 80;
+    float guardSteadySpeed = 1.4f;
+    // GH #52: two-trigger combat stance thresholds (trigger 0..1, hold in ms).
+    // Defaults are the old constants. MeleeRequiresStance=1 ignores swings
+    // outside the stance (exploration mode); default 0 keeps swings always live.
+    float stanceEnterTrigger = 0.85f;
+    float stanceExitTrigger = 0.60f;
+    int stanceHoldMs = 100;
+    int meleeRequiresStance = 0;
     // GH #66 (approach 2): suppress the engine's own first-person viewmodel
     // (arms/hands) at the draw level, since approach 1 (the RPG `noviewmodel`
     // bit) was falsified in ADR-0438. Default OFF: the pass signature is a
@@ -91,12 +117,23 @@ struct VRConfig {
     // depth-only-clear opener (1) or disables the window entirely (0).
     int suppressEngineViewmodel = 0;
     int viewmodelDepthClearWindow = 1;
-    // GH #67 step 2: observation-only identification of the engine's
-    // first-person viewmodel pass. Opens the same depth-only-clear window as
-    // suppression but never skips a draw; emits one `ViewmodelProbe` log line
-    // per sampled frame with the per-frame draw tallies and the modelview in
-    // effect at the first in-window draw. Default OFF.
-    int viewmodelObserve = 0;
+    // GH #63/#66: log the per-frame GL pass signature every 300 swaps (0 = off).
+    int viewmodelTrace = 0;
+    // GH #66: window opener. -1 = derive from viewmodelDepthClearWindow;
+    // 0 none, 1 depth-only clear, 2 near-plane drop, 3 either.
+    int viewmodelWindowOpener = -1;
+    float viewmodelNearRatio = 0.5f;
+    // GH #67 (ADR-0447): drive the engine's own viewmodel with the dominant
+    // controller instead of hiding it. Opt-in; ignored while
+    // suppressEngineViewmodel is on.
+    int driveEngineViewmodel = 0;
+    float viewmodelUnitsPerMeter = 30.3f;
+    float viewmodelAnchorX = 0.18f;
+    float viewmodelAnchorY = -0.22f;
+    float viewmodelAnchorZ = -0.38f;
+    float viewmodelDriveYaw = 0.0f;
+    float viewmodelDrivePitch = 0.0f;
+    float viewmodelDriveRoll = 0.0f;
 };
 
 extern VRConfig g_vrConfig;

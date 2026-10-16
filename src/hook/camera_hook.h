@@ -11,6 +11,8 @@ public:
 
     bool Initialize();
     void Update(RiddickVRSharedState& vrState);
+    // Releases any held injected input (GH #65). Safe to call repeatedly.
+    void Shutdown();
 
     // Matrix injection and horizon stabilization
     void StabilizeViewMatrix(float* outView, const float* inView, const RiddickVRSharedState& vrState, int eyePass);

@@ -61,6 +61,9 @@ public:
         float hyaw = 0, hpitch = 0; // fixed head pose (deg); 999 = keep oscillation
     };
     void SetScenarioFile(const std::string& path) { m_scenarioPath = path; }
+    // GH #68: by default the scenario timeline starts only once the game shows
+    // real gameplay (not cinema/menu); false restores frame-0 start.
+    void SetScenarioStartOnGameplay(bool enable) { m_scenarioStartOnGameplay = enable; }
     bool LoadScenario(const std::string& path);
     void ApplyScenarioFrame(RiddickVRSharedState& state, uint32_t frame);
     void SetAmmoQuadCrop(float x, float y, float width, float height) {
@@ -166,6 +169,9 @@ private:
     std::string m_scenarioPath;
     std::vector<ScenarioKey> m_scenarioKeys;
     bool m_scenarioLoaded = false;
+    uint32_t m_scenarioStartFrame = UINT32_MAX;
+    uint32_t m_gameplayStreak = 0;
+    bool m_scenarioStartOnGameplay = true;
     float m_ammoQuadCropX = 0.75f;
     float m_ammoQuadCropY = 0.75f;
     float m_ammoQuadCropW = 0.23f;

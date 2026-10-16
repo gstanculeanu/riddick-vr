@@ -4,7 +4,7 @@
 #include "camera_hook.h"
 #include "vr_config.h"
 #include "viewmodel_suppressor.h"
-#include "gl_matrix_tracker.h"
+#include "viewmodel_drive.h"
 #include "logging.h"
 #include <string>
 
@@ -82,11 +82,6 @@ static PFN_glClear          real_glClear = nullptr;
 static GLenum s_currentMatrixMode = 0x1700; // GL_MODELVIEW
 static float s_lastProjection[16] = {0};
 static float s_lastView[16] = {0};
-// GH #67 step 1: software mirror of the GL_MODELVIEW stack. `s_lastView` is kept
-// equal to the tracker's current matrix, so GetLastViewMatrix() (consumed by the
-// GH #67 step-2 observation probe) reports the *effective* modelview at a draw,
-// not merely the last loaded base.
-static GlMatrixTracker s_modelviewTracker;
 static bool s_hasProjection = false;
 static bool s_has3DGameplayProjection = false;
 // GH #43/#44: per-frame 3D freshness. Menus/cinematics use ortho/2D
@@ -114,15 +109,67 @@ static uint32_t s_modelviewMatrixCount = 0;
 // the INI on every clear so a config edit takes effect without a rebuild.
 static ViewmodelSuppressor s_viewmodelSuppressor;
 
+// GH #67: drive the engine viewmodel with the controller only when it is not
+// being suppressed (suppression wins; warned once in BuildViewmodelSuppressionConfig).
+static bool ViewmodelDriveActive() {
+    return g_vrConfig.driveEngineViewmodel != 0 && g_vrConfig.suppressEngineViewmodel == 0;
+}
+
 static ViewmodelSuppressionConfig BuildViewmodelSuppressionConfig() {
+    static bool s_warnedDriveAndSuppress = false;
+    if (g_vrConfig.driveEngineViewmodel != 0 && g_vrConfig.suppressEngineViewmodel != 0 &&
+        !s_warnedDriveAndSuppress) {
+        s_warnedDriveAndSuppress = true;
+        VR_LOG_WARN("DriveEngineViewmodel=1 ignored: SuppressEngineViewmodel=1 hides the engine arms (suppression wins)");
+    }
     ViewmodelSuppressionConfig cfg;
     cfg.enabled = (g_vrConfig.suppressEngineViewmodel != 0);
-    cfg.opener = (g_vrConfig.viewmodelDepthClearWindow != 0)
-        ? ViewmodelWindowOpener::DepthOnlyClear
-        : ViewmodelWindowOpener::None;
-    // GH #67 step 2: observation-only identification of the first-person pass.
-    cfg.observe = (g_vrConfig.viewmodelObserve != 0);
+    cfg.track = ViewmodelDriveActive() || g_vrConfig.viewmodelTrace != 0;
+    switch (g_vrConfig.viewmodelWindowOpener) {
+        case 0: cfg.opener = ViewmodelWindowOpener::None; break;
+        case 1: cfg.opener = ViewmodelWindowOpener::DepthOnlyClear; break;
+        case 2: cfg.opener = ViewmodelWindowOpener::NearPlaneDrop; break;
+        case 3: cfg.opener = ViewmodelWindowOpener::Either; break;
+        default:
+            cfg.opener = (g_vrConfig.viewmodelDepthClearWindow != 0)
+                ? ViewmodelWindowOpener::DepthOnlyClear
+                : ViewmodelWindowOpener::None;
+            break;
+    }
+    cfg.nearRatio = g_vrConfig.viewmodelNearRatio;
     return cfg;
+}
+
+// GH #67: correction matrix for the current viewmodel window, computed once on
+// the first modelview load inside the window and reused for later loads.
+static bool s_driveCorrectionCached = false;
+static bool s_driveCorrectionValid = false;
+static float s_driveCorrection[16] = {0};
+
+static bool ComputeDriveCorrectionForWindow() {
+    const RiddickVRSharedState& st = StereoRenderer::Instance().GetLatestState();
+    const RiddickVRControllerInput& hand = g_vrConfig.southpaw ? st.leftController : st.rightController;
+    if (!st.hmdPose.isValid || !hand.isConnected || !hand.gripPose.isValid) return false;
+
+    ViewmodelDriveConfig dc;
+    dc.enabled = true;
+    dc.unitsPerMeter = g_vrConfig.viewmodelUnitsPerMeter;
+    dc.anchor[0] = g_vrConfig.viewmodelAnchorX;
+    dc.anchor[1] = g_vrConfig.viewmodelAnchorY;
+    dc.anchor[2] = g_vrConfig.viewmodelAnchorZ;
+    dc.yawDeg = g_vrConfig.viewmodelDriveYaw;
+    dc.pitchDeg = g_vrConfig.viewmodelDrivePitch;
+    dc.rollDeg = g_vrConfig.viewmodelDriveRoll;
+
+    DrivePose hmd;
+    hmd.pos[0] = st.hmdPose.position.x; hmd.pos[1] = st.hmdPose.position.y; hmd.pos[2] = st.hmdPose.position.z;
+    hmd.quat[0] = st.hmdPose.orientation.x; hmd.quat[1] = st.hmdPose.orientation.y;
+    hmd.quat[2] = st.hmdPose.orientation.z; hmd.quat[3] = st.hmdPose.orientation.w;
+    DrivePose ctrl;
+    ctrl.pos[0] = hand.gripPose.position.x; ctrl.pos[1] = hand.gripPose.position.y; ctrl.pos[2] = hand.gripPose.position.z;
+    ctrl.quat[0] = hand.gripPose.orientation.x; ctrl.quat[1] = hand.gripPose.orientation.y;
+    ctrl.quat[2] = hand.gripPose.orientation.z; ctrl.quat[3] = hand.gripPose.orientation.w;
+    return ComputeViewmodelCorrection(dc, hmd, ctrl, s_driveCorrection);
 }
 
 static void RawProxyLog(const char* msg) {
@@ -271,10 +318,6 @@ BOOL WINAPI OpenGLProxy::Hook_wglMakeCurrent(HDC hdc, HGLRC hglrc) {
     RiddickVR_EnsureHookInitialized();
     BOOL result = real_wglMakeCurrent ? real_wglMakeCurrent(hdc, hglrc) : FALSE;
     if (result && hglrc != nullptr) {
-        // GH #67 step 1: a new context starts with an identity modelview stack.
-        s_currentMatrixMode = 0x1700 /* GL_MODELVIEW */;
-        s_modelviewTracker.Reset();
-        memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
         QueryContextExtensions();
         StereoRenderer::Instance().Initialize(hdc, hglrc);
     }
@@ -292,25 +335,13 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
             s_viewmodelSuppressor.LastFrameDraws(), s_viewmodelSuppressor.LastFrameSuppressed(),
             s_viewmodelSuppressor.TotalSuppressed());
     }
-    // GH #67 step 2: observation-only identification of the first-person
-    // viewmodel pass. One line per sampled frame carrying the window-open count
-    // and the modelview captured at the first in-window draw. The linear part of
-    // that matrix is what must later be re-expressed in head/controller space.
-    if (s_viewmodelSuppressor.Observing() && (s_swapFrameCount % 300) == 0) {
-        const ViewmodelObservationSnapshot snapshot = s_viewmodelSuppressor.ComputeSnapshot();
-        if (snapshot.windowOpened) {
-            VR_LOG_INFO("ViewmodelProbe [#%llu]: inside=%u outside=%u sample=%u pushes=%u translates=%u",
-                static_cast<unsigned long long>(s_swapFrameCount),
-                snapshot.drawsInside, snapshot.drawsOutside, snapshot.hadSample ? 1u : 0u,
-                snapshot.pushesInside, snapshot.translatesInside);
-            if (snapshot.hadSample) {
-                const float* s = snapshot.sample;
-                VR_LOG_INFO("ViewmodelProbe matrix: [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f]",
-                    s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-                    s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]);
-            }
-        }
+    if (g_vrConfig.viewmodelTrace != 0 && (s_swapFrameCount % 300) == 0) {
+        VR_LOG_INFO("Viewmodel pass trace [#%llu]: %s | draws=%u suppressed=%u",
+            static_cast<unsigned long long>(s_swapFrameCount),
+            s_viewmodelSuppressor.LastFrameTrace(),
+            s_viewmodelSuppressor.LastFrameDraws(), s_viewmodelSuppressor.LastFrameSuppressed());
     }
+    s_driveCorrectionCached = false;
     StereoRenderer::Instance().OnSwapBuffers(hdc);
     return real_wglSwapBuffers ? real_wglSwapBuffers(hdc) : SwapBuffers(hdc);
 }
@@ -372,7 +403,18 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
     if (!m) return;
 
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
-        s_viewmodelSuppressor.NoteProjectionLoad(); // GH #66: the first-person pass ends here
+        // GH #66: classify from the ORIGINAL matrix (before any aspect correction).
+        // Perspective has m[15]==0; near = m[14] / (m[10] - 1).
+        const bool loadIsPerspective = fabsf(m[15]) < 0.01f;
+        float loadNear = 0.0f;
+        if (loadIsPerspective) {
+            const float denom = m[10] - 1.0f;
+            if (fabsf(denom) > 1.0e-6f) {
+                const float n = m[14] / denom;
+                if (n == n && n > 0.0f && n < 1.0e9f) loadNear = n; // rejects NaN/inf/negative
+            }
+        }
+        s_viewmodelSuppressor.NoteProjectionLoad(loadIsPerspective, loadNear);
         memcpy(s_lastProjection, m, sizeof(s_lastProjection));
         s_hasProjection = true;
         s_projMatrixCount++;
@@ -414,10 +456,22 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
                 s_projMatrixCount, m[0], m[5], m[10], m[14], m[1], m[2], m[3], m[15]);
         }
     } else if (s_currentMatrixMode == 0x1700 /* GL_MODELVIEW */) {
-        // GH #67 step 1: LoadMatrixf replaces the current modelview; mirror it
-        // into the software stack so the draw-time sample is the effective one.
-        s_modelviewTracker.LoadMatrixf(m);
-        memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
+        // GH #67: inside the viewmodel window, move the engine's arms to the controller.
+        if (ViewmodelDriveActive() && s_viewmodelSuppressor.WindowOpen()) {
+            if (!s_driveCorrectionCached) {
+                s_driveCorrectionValid = ComputeDriveCorrectionForWindow();
+                s_driveCorrectionCached = true;
+            }
+            if (s_driveCorrectionValid && real_glLoadMatrixf) {
+                GLfloat driven[16];
+                MulColMajor4(s_driveCorrection, m, driven);
+                real_glLoadMatrixf(driven);
+                return;
+            }
+        } else {
+            s_driveCorrectionCached = false;
+        }
+        memcpy(s_lastView, m, sizeof(s_lastView));
         s_modelviewMatrixCount++;
         if (s_modelviewMatrixCount == 1 || s_modelviewMatrixCount % 300 == 0) {
             VR_LOG_INFO("glLoadMatrixf [MODELVIEW #%u]: Pos(%.2f, %.2f, %.2f)",
@@ -434,7 +488,7 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
     RiddickVR_EnsureHookInitialized();
     VR_LOG_INFO("glFrustum called: L=%.2f R=%.2f B=%.2f T=%.2f Near=%.2f Far=%.2f", left, right, bottom, top, zNear, zFar);
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
-        s_viewmodelSuppressor.NoteProjectionLoad(); // GH #66: the first-person pass ends here
+        s_viewmodelSuppressor.NoteProjectionLoad(true, static_cast<float>(zNear));
         memset(s_lastProjection, 0, sizeof(s_lastProjection));
         s_lastProjection[0] = static_cast<float>((2.0 * zNear) / (right - left));
         s_lastProjection[5] = static_cast<float>((2.0 * zNear) / (top - bottom));
@@ -458,7 +512,7 @@ void WINAPI OpenGLProxy::Hook_glFrustum(GLdouble left, GLdouble right, GLdouble 
 void WINAPI OpenGLProxy::Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
     RiddickVR_EnsureHookInitialized();
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
-        s_viewmodelSuppressor.NoteProjectionLoad(); // GH #66: the first-person pass ends here
+        s_viewmodelSuppressor.NoteProjectionLoad(false, 0.0f); // GH #66: ortho (HUD) ends the pass
         memset(s_lastProjection, 0, sizeof(s_lastProjection));
         s_lastProjection[0] = static_cast<float>(2.0 / (right - left));
         s_lastProjection[5] = static_cast<float>(2.0 / (top - bottom));
@@ -523,48 +577,7 @@ const float* OpenGLProxy::GetLastViewMatrix() {
     return s_lastView;
 }
 
-// GH #67 step 1: mirror the fixed-function GL_MODELVIEW stack. Each entry point
-// is a no-op outside GL_MODELVIEW (the projection stack is unaffected), and each
-// re-publishes s_lastView so GetLastViewMatrix() stays the effective modelview.
-void OpenGLProxy::NoteModelviewLoadIdentity() {
-    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
-    s_modelviewTracker.LoadIdentity();
-    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
-}
-
-void OpenGLProxy::NoteModelviewPush() {
-    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
-    s_modelviewTracker.Push();
-    // GH #67 step 2: record that the first-person pass composes a sub-transform
-    // inside the window -- the exact reason the composed matrix (not the last
-    // loaded base) is what matters. Guarded internally by observe+window.
-    s_viewmodelSuppressor.NoteObservedPush();
-    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
-}
-
-void OpenGLProxy::NoteModelviewPop() {
-    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
-    s_modelviewTracker.Pop();
-    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
-}
-
-void OpenGLProxy::NoteModelviewTranslatef(float x, float y, float z) {
-    if (s_currentMatrixMode != 0x1700 /* GL_MODELVIEW */) return;
-    s_modelviewTracker.Translatef(x, y, z);
-    s_viewmodelSuppressor.NoteObservedTranslate();
-    memcpy(s_lastView, s_modelviewTracker.Current(), sizeof(s_lastView));
-}
-
 bool OpenGLProxy::ShouldSuppressDrawCall() {
-    // GH #67 step 2 (observation-only): record this draw against the window and,
-    // for the first in-window draw, capture the modelview in effect. This never
-    // suppresses; the suppression decision is unchanged and stays last.
-    if (s_viewmodelSuppressor.Observing()) {
-        s_viewmodelSuppressor.NoteObservedDraw();
-        if (s_viewmodelSuppressor.WindowOpen()) {
-            s_viewmodelSuppressor.SetObservedSample(s_lastView);
-        }
-    }
     return s_viewmodelSuppressor.ShouldSuppressDraw();
 }
 

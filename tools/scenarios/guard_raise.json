@@ -1,0 +1,11 @@
+{
+  "name": "guard_raise",
+  "description": "Raise both fists from chest to face height in a guard; the block must engage at the top without a jab or uppercut being classified on the way up.",
+  "markers": ["Combat State: BOXER GUARD / BLOCK MODE engaged (Physical Gesture)"],
+  "forbidden_markers": ["MELEE STRIKE DISPATCHED", "Physical Gesture: UPPERCUT detected", "Physical Gesture: STRAIGHT JAB / BLADE THRUST detected"],
+  "keys": [
+    {"frame": 0, "lx": -0.12, "ly": 1.3, "lz": -0.3, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.12, "ry": 1.3, "rz": -0.3, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 90, "lx": -0.12, "ly": 1.65, "lz": -0.3, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.12, "ry": 1.65, "rz": -0.3, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 120, "lx": -0.12, "ly": 1.65, "lz": -0.3, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.12, "ry": 1.65, "rz": -0.3, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0}
+  ]
+}

@@ -66,6 +66,27 @@ inline const NativeHandTexture& NativeHandTextureAt(int index) {
     return NativeHandTextureData::kTextures[index];
 }
 
+// GH #61: result of comparing our GL texture object against what the driver now
+// reports for that id. The engine shares the GL context and may reuse or
+// overwrite the id we generated, which leaves an incomplete or wrong-size
+// texture bound (samples as white). Ok = nothing to do, Reparam = only the min
+// filter changed (re-set the four parameters), Reupload = the object is gone or
+// no longer ours (generate a fresh id and upload again).
+enum class NativeTextureCheck { Ok, Reparam, Reupload };
+
+inline NativeTextureCheck CheckNativeTextureIntegrity(bool isTexture, int w, int h, int minFilter,
+                                                      unsigned expectW, unsigned expectH,
+                                                      int expectMinFilter) {
+    if (!isTexture || w < 0 || h < 0 ||
+        static_cast<unsigned>(w) != expectW || static_cast<unsigned>(h) != expectH) {
+        return NativeTextureCheck::Reupload;
+    }
+    if (minFilter != expectMinFilter) {
+        return NativeTextureCheck::Reparam;
+    }
+    return NativeTextureCheck::Ok;
+}
+
 inline const NativeHandTexture* FindNativeHandTexture(const char* name) {
     if (!name) {
         return nullptr;

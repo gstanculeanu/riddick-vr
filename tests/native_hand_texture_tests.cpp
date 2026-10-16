@@ -6,8 +6,11 @@
 // (tools/mos_xtc.py). No GL context, no game install, no input synthesis.
 
 #include "bc1.h"
+#include "native_hand_mesh.h"
 #include "native_hand_texture.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -185,6 +188,76 @@ int main() {
                 ++g_failures;
             }
         }
+    }
+
+    // --- GH #61: every arm vertex UV must land on skin, not white ----------
+    {
+        const NativeHandTexture* tex = FindNativeHandTexture("Riddick_ArmScar_D");
+        Check(tex != nullptr, "texture present for UV coverage check");
+        if (tex) {
+            std::vector<unsigned char> rgba(
+                static_cast<size_t>(tex->width) * tex->height * 4u);
+            Bc1DecodeSurface(tex->dxt1, tex->width, tex->height, rgba.data());
+            const char* names[2] = {"Riddick_LeftArm", "Riddick_RightArm"};
+            for (const char* name : names) {
+                const RiddickVR::NativeHandMesh* mesh = RiddickVR::FindNativeHandMesh(name);
+                Check(mesh != nullptr, "arm mesh present for UV coverage check");
+                if (!mesh) continue;
+                for (int flip = 0; flip < 2; ++flip) {
+                    unsigned int whiteTexels = 0;
+                    double sumR = 0, sumG = 0, sumB = 0;
+                    unsigned int n = 0;
+                    for (unsigned int i = 0; i < mesh->vertex_count; ++i) {
+                        float u = mesh->vertices[i].uv[0];
+                        float v = mesh->vertices[i].uv[1];
+                        if (flip) v = 1.0f - v;
+                        u -= std::floor(u);  // GL_REPEAT
+                        v -= std::floor(v);
+                        unsigned int x = (unsigned int)(u * tex->width);
+                        unsigned int y = (unsigned int)(v * tex->height);
+                        if (x >= tex->width) x = tex->width - 1;
+                        if (y >= tex->height) y = tex->height - 1;
+                        const unsigned char* p = &rgba[((size_t)y * tex->width + x) * 4u];
+                        unsigned char mn = (std::min)(p[0], (std::min)(p[1], p[2]));
+                        if (mn > 220) ++whiteTexels;
+                        sumR += p[0]; sumG += p[1]; sumB += p[2];
+                        ++n;
+                    }
+                    Check(n > 0, "arm mesh has vertices");
+                    if (n == 0) continue;
+                    const double mr = sumR / n, mg = sumG / n, mb = sumB / n;
+                    std::printf("native hand texture: %s flip=%d mean=(%.0f,%.0f,%.0f) white=%u/%u\n",
+                                name, flip, mr, mg, mb, whiteTexels, n);
+                    Check(whiteTexels == 0, "no near-white texel at any arm UV");
+                    Check(mr >= 130.0 && mr <= 210.0, "mean R at arm UVs is skin-range");
+                    Check(mr > mg && mg > mb, "arm UV texels read R>G>B (skin)");
+                }
+            }
+        }
+    }
+
+    // --- GH #61: texture integrity decision ------------------------------
+    {
+        using RiddickVR::CheckNativeTextureIntegrity;
+        using RiddickVR::NativeTextureCheck;
+        const unsigned W = 256, H = 512;
+        const int F = 0x2601; // GL_LINEAR
+        Check(CheckNativeTextureIntegrity(true, 256, 512, F, W, H, F) == NativeTextureCheck::Ok,
+              "intact texture is Ok");
+        Check(CheckNativeTextureIntegrity(false, 256, 512, F, W, H, F) == NativeTextureCheck::Reupload,
+              "deleted id needs reupload");
+        Check(CheckNativeTextureIntegrity(true, 0, 0, F, W, H, F) == NativeTextureCheck::Reupload,
+              "incomplete texture (0x0) needs reupload");
+        Check(CheckNativeTextureIntegrity(true, 256, 256, F, W, H, F) == NativeTextureCheck::Reupload,
+              "wrong height needs reupload");
+        Check(CheckNativeTextureIntegrity(true, 128, 512, F, W, H, F) == NativeTextureCheck::Reupload,
+              "wrong width needs reupload");
+        Check(CheckNativeTextureIntegrity(true, -1, 512, F, W, H, F) == NativeTextureCheck::Reupload,
+              "negative size needs reupload");
+        Check(CheckNativeTextureIntegrity(true, 256, 512, 0x2703, W, H, F) == NativeTextureCheck::Reparam,
+              "min filter drift only needs reparam");
+        Check(CheckNativeTextureIntegrity(false, 0, 0, 0x2703, W, H, F) == NativeTextureCheck::Reupload,
+              "reupload wins over reparam");
     }
 
     // --- Lookup contract --------------------------------------------------

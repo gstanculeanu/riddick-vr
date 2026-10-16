@@ -1,13 +1,13 @@
 {
   "name": "melee",
-  "description": "Walk forward into the level, enter the two-trigger combat stance, release the block, then deliver a fast forward right-hand jab (baton arc jab, right trigger held).",
+  "description": "Enter two-trigger combat stance, then deliver a fast forward punch outside the guard volume. Head pinned straight ahead; the timeline starts when the game shows gameplay.",
   "markers": ["COMBAT MODE entered", "RIOT BATON ARC JAB"],
   "keys": [
-    {"frame": 0, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.90, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.90, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0},
-    {"frame": 30, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.90, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.90, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.85, "stickRX": 0.0},
-    {"frame": 36, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.10, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.50, "rtrig": 0.90, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
-    {"frame": 44, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.10, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.26, "rgrip": 0.50, "rtrig": 0.90, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
-    {"frame": 47, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.10, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.42, "rgrip": 0.50, "rtrig": 0.90, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0},
-    {"frame": 60, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.50, "ltrig": 0.10, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.42, "rgrip": 0.50, "rtrig": 0.90, "rbtn": 384, "stickLX": 0.0, "stickLY": 0.0, "stickRX": 0.0}
+    {"frame": 0, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.70, "ltrig": 0.90, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.70, "rtrig": 0.90, "rbtn": 384, "hyaw": 0, "hpitch": 0},
+    {"frame": 16, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.70, "ltrig": 0.90, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.70, "rtrig": 0.90, "rbtn": 384, "hyaw": 0, "hpitch": 0},
+    {"frame": 22, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.70, "ltrig": 0.90, "lbtn": 384, "rx": 0.20, "ry": 1.00, "rz": -0.30, "rgrip": 0.70, "rtrig": 0.90, "rbtn": 384, "hyaw": 0, "hpitch": 0},
+    {"frame": 25, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.70, "ltrig": 0.90, "lbtn": 384, "rx": 0.20, "ry": 1.00, "rz": -0.43, "rgrip": 0.70, "rtrig": 0.90, "rbtn": 384, "hyaw": 0, "hpitch": 0},
+    {"frame": 40, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.70, "ltrig": 0.90, "lbtn": 384, "rx": 0.20, "ry": 1.00, "rz": -0.43, "rgrip": 0.70, "rtrig": 0.90, "rbtn": 384, "hyaw": 0, "hpitch": 0},
+    {"frame": 55, "lx": -0.20, "ly": 1.20, "lz": -0.30, "lgrip": 0.70, "ltrig": 0.10, "lbtn": 384, "rx": 0.20, "ry": 1.20, "rz": -0.30, "rgrip": 0.70, "rtrig": 0.10, "rbtn": 384, "hyaw": 0, "hpitch": 0}
   ]
 }

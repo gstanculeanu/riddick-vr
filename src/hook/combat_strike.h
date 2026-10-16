@@ -53,6 +53,25 @@ struct StrikeIntent {
     bool strike = false;  // any of the above (the combined melee-strike gate)
 };
 
+// GH #65: rotate a world-space velocity into the HMD *yaw-only* frame
+// (+X right, +Y up, -Z body-forward). The classifier thresholds are head-local
+// (-Z = punching away from the body), but the controller velocity arrives in
+// world/stage space, so a punch only registered while the player faced stage
+// -Z. Yaw only (no pitch/roll) so looking up or tilting the head does not turn
+// a forward punch into an upward one. A degenerate (looking straight up/down or
+// zero) orientation passes the velocity through unchanged.
+inline StrikeVelocity ToHeadYawLocal(float vx, float vy, float vz,
+                                     float qx, float qy, float qz, float qw) {
+    float fx = -2.0f * (qx * qz + qw * qy);
+    float fz = -(1.0f - 2.0f * (qx * qx + qy * qy));
+    const float n = std::sqrt(fx * fx + fz * fz);
+    if (!(n > 1e-4f)) return StrikeVelocity{vx, vy, vz};
+    fx /= n;
+    fz /= n;
+    // right = (-fz, 0, fx)
+    return StrikeVelocity{vx * (-fz) + vz * fx, vy, -(vx * fx + vz * fz)};
+}
+
 // Classify a frame's two controller samples into strike intents. Both velocity
 // and hand-position thresholds are strict (`<` / `>`), matching the original
 // inline classifier; `leftLocalY/Z` and `rightLocalY/Z` are head-local metres.

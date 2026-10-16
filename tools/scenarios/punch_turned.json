@@ -1,0 +1,14 @@
+{
+  "name": "punch_turned",
+  "description": "Head turned 90 degrees (facing world -X); right fist punches along world -X. Regression for head-local strike velocity (GH #65): the punch must register when not facing stage -Z.",
+  "markers": ["MELEE STRIKE DISPATCHED"],
+  "markers_any": ["Physical Gesture:", "Tactical Melee:", "Physical Combat:"],
+  "keys": [
+    {"frame": 0, "lx": -0.25, "ly": 1.2, "lz": 0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": -0.25, "ry": 1.45, "rz": -0.2, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 90, "hpitch": 0},
+    {"frame": 20, "lx": -0.25, "ly": 1.2, "lz": 0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": -0.25, "ry": 1.45, "rz": -0.2, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 90, "hpitch": 0},
+    {"frame": 26, "lx": -0.25, "ly": 1.2, "lz": 0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": -0.6, "ry": 1.45, "rz": -0.2, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 90, "hpitch": 0},
+    {"frame": 46, "lx": -0.25, "ly": 1.2, "lz": 0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": -0.6, "ry": 1.45, "rz": -0.2, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 90, "hpitch": 0},
+    {"frame": 66, "lx": -0.25, "ly": 1.2, "lz": 0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": -0.25, "ry": 1.45, "rz": -0.2, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 90, "hpitch": 0},
+    {"frame": 80, "lx": -0.25, "ly": 1.2, "lz": 0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": -0.25, "ry": 1.45, "rz": -0.2, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 90, "hpitch": 0}
+  ]
+}

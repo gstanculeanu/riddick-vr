@@ -47,4 +47,51 @@ inline bool InGuardEnvelope(const GuardEnvelope& env,
            span < env.maxHandSpan;
 }
 
+// GH #62: guard pose engage/release hysteresis. A raw pose test flickers when
+// the hands jitter at the edge of the envelope, which dropped the block in the
+// middle of a fight. The pose must hold `engageMs` to engage; once engaged it
+// survives pose loss for `releaseMs`, except that a real punch releases it at
+// once (a swing leaves the window by design). `steadySpeed` is the hand speed
+// limit for "hands steady" (m/s).
+struct GuardPoseTiming {
+    unsigned engageMs = 40;
+    unsigned releaseMs = 80;
+    float steadySpeed = 1.4f;
+};
+
+// Timers use 0 as "not running", so a tick count of exactly 0 is not supported
+// (same as the inline code this replaced).
+struct GuardPoseState {
+    unsigned long holdStart = 0;
+    unsigned long releaseStart = 0;
+    bool engaged = false;
+};
+
+// Returns the new engaged flag (also stored in `st.engaged`).
+inline bool UpdateGuardPose(GuardPoseState& st, bool poseDetected, bool throwingPunch,
+                            unsigned long now, const GuardPoseTiming& timing) {
+    if (poseDetected) {
+        st.releaseStart = 0;
+        if (st.holdStart == 0) {
+            st.holdStart = now;
+        } else if (now - st.holdStart >= timing.engageMs) {
+            st.engaged = true;
+        }
+    } else {
+        st.holdStart = 0;
+        if (st.engaged) {
+            if (throwingPunch) {
+                st.engaged = false;
+                st.releaseStart = 0;
+            } else if (st.releaseStart == 0) {
+                st.releaseStart = now;
+            } else if (now - st.releaseStart >= timing.releaseMs) {
+                st.engaged = false;
+                st.releaseStart = 0;
+            }
+        }
+    }
+    return st.engaged;
+}
+
 } // namespace RiddickVR

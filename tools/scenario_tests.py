@@ -38,10 +38,15 @@ def load_manifest():
         profile = json.loads(path.read_text(encoding="utf-8"))
         if profile.get("name") != path.stem or not isinstance(profile.get("keys"), list) or not profile["keys"]:
             raise ValueError(f"{path.name}: expected matching name and non-empty keys")
-        markers = profile.get("markers")
-        if not isinstance(markers, list) or not markers or not all(isinstance(m, str) and m for m in markers):
-            raise ValueError(f"{path.name}: expected non-empty marker strings")
-        for marker in markers:
+        for field in ("markers", "markers_any", "forbidden_markers"):
+            value = profile.get(field, [])
+            if not isinstance(value, list) or not all(isinstance(m, str) and m for m in value):
+                raise ValueError(f"{path.name}: {field} must be a list of non-empty strings")
+        if not profile.get("markers") and not profile.get("markers_any"):
+            raise ValueError(f"{path.name}: expected non-empty markers or markers_any")
+        # forbidden_markers are matched against the log only, not the hook source
+        # (the logged line may be built from a format string).
+        for marker in profile.get("markers", []) + profile.get("markers_any", []):
             if marker not in source:
                 raise ValueError(f"{path.name}: marker not found in hook source: {marker}")
         previous_frame = -1

@@ -1,0 +1,14 @@
+{
+  "name": "punch_swing",
+  "description": "Right fist punches straight forward (-Z, facing stage forward) at about 5 m/s; some melee or gesture classifier line must fire.",
+  "markers": ["MELEE STRIKE DISPATCHED"],
+  "markers_any": ["Physical Gesture:", "Tactical Melee:", "Physical Combat:"],
+  "keys": [
+    {"frame": 0, "lx": -0.25, "ly": 1.2, "lz": -0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.2, "ry": 1.45, "rz": -0.25, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 20, "lx": -0.25, "ly": 1.2, "lz": -0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.2, "ry": 1.45, "rz": -0.25, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 26, "lx": -0.25, "ly": 1.2, "lz": -0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.2, "ry": 1.45, "rz": -0.6, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 46, "lx": -0.25, "ly": 1.2, "lz": -0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.2, "ry": 1.45, "rz": -0.6, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 66, "lx": -0.25, "ly": 1.2, "lz": -0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.2, "ry": 1.45, "rz": -0.25, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0},
+    {"frame": 80, "lx": -0.25, "ly": 1.2, "lz": -0.2, "lgrip": 0.9, "ltrig": 0.0, "lbtn": 0, "rx": 0.2, "ry": 1.45, "rz": -0.25, "rgrip": 0.9, "rtrig": 0.0, "rbtn": 0, "hyaw": 0, "hpitch": 0}
+  ]
+}
