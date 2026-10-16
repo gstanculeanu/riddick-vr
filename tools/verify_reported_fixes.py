@@ -245,6 +245,26 @@ def main():
             "GH #68: the mock host must record each dumped frame's camera "
             "transform (eye pose/projection) and the harness must parse it")
 
+    # GH #72 requirement 3: the dark-frame `dy=±4` is an alignment-estimator
+    # artefact, not a stereo defect (ADR-0454). The harness must gate the
+    # vertical-disparity verdict on the frame's contrast and on the optimum not
+    # being pinned to the search edge (an unquantifiable offset), and surface the
+    # verdict in the report -- so the graded window raises no false defect while a
+    # textured frame with a real, interior offset still fails.
+    _xrsim_tests = (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8")
+    require("MIN_DY_CONTRAST" in xrsim_tool and
+            "DY_SEARCH_BOUND" in xrsim_tool and
+            "dy_at_boundary" in xrsim_tool and
+            "vertical_disparity_stats" in xrsim_tool and
+            '"vertical_disparity"' in xrsim_tool and
+            "estimator artefact" in xrsim_tool and
+            "test_boundary_dy_is_inconclusive_not_failed" in _xrsim_tests and
+            "test_high_contrast_interior_dy_still_fails" in _xrsim_tests and
+            "test_low_contrast_vertical_shift_is_inconclusive" in _xrsim_tests,
+            "GH #72: the vertical-disparity verdict must be contrast- and "
+            "search-boundary-gated (artefact on dark/flat frames, ADR-0454) and "
+            "reported")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

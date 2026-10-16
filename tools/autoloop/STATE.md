@@ -2,6 +2,86 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 48 — 2026-10-16 21:17 (scheduled loop)
+- **Unit:** GH **#72 requirement 3** — resolve the `dy=±4` vertical-disparity
+  question (an explicit #72 acceptance criterion) and make the harness report it
+  honestly. Tools/tests/docs only; **no hook change, no build, no deploy**.
+- **Why this unit:** wake 47's Next named #72 req 1 as the top remaining item but
+  "a hook change (blocked on the same deploy)", and the sim install's hook is
+  stale (17:56) so no hook change can be live-validated this loop. #72's *other*
+  unmet criterion ("the `dy=±4` question is resolved with a stated verdict") is
+  fully decidable host/tools-side and live-validatable with the fresh
+  `dist\riddickvr-host.exe`, so it is the top item this wake can *finish*.
+- **Decisive finding — verdict: ARTEFACT, not a stereo defect** (four controlled
+  measurements; live, one `--dump-branch any` run so both branches share the blit
+  path, plus a graded gameplay-only run):
+  1. Bright frames are a rock-steady `dy=0` from **all five** disjoint crops (dy
+     span 0), invariant to downscale.
+  2. Dark frames: `best_dy` = **+6/+3/+2/+1** at downscale **1/2/4/8** (frame
+     3600) and crops **6/7/10/12/8** (span 6); frame 10200's crops flip `dx`
+     sign. A geometric offset cannot do either.
+  3. The optimum **pins to the search edge** on all 15 dark frames; widening the
+     search does not find an interior minimum (a `±12` search still gives `-12`).
+  4. It is **not** only darkness: the graded run's bright frame 2400 (std 53) had
+     **both** `dy=-4` and `dx=-48` on their bounds, a 24 px crop spread, and
+     residual MSE ~6900 vs ~25 for a good frame — the registration failed to
+     lock, so a brightness threshold alone would have mis-failed it.
+  Mechanism: the renderer applies only a horizontal half-IPD shift (GH #12); a
+  real vertical offset has no mechanism and would be brightness-independent.
+- **Change (tools/tests/docs; no C++/asset/deploy):**
+  - `tools/xrsim.py`: `stereo_metrics` refactored around a pure `_best_align(...)`
+    and now returns `contrast` (reference-crop stddev) + `dy_at_boundary`;
+    `DY_SEARCH_BOUND` 4 → **8** (a *real* offset stays interior/measurable while a
+    degenerate landscape still runs to the edge); `MIN_DY_CONTRAST = 25.0`
+    (measured separation: dark 15-17 vs textured 47-100). `assert_stereo` keeps
+    `no_vertical_disparity` a FAIL only when the offset is **quantifiable**
+    (contrast ≥ 25 **and** interior); otherwise it is reported **inconclusive**
+    (skip) with the reason. New `vertical_disparity_stats()` + a
+    `vertical_disparity` report key (`ok`/`inconclusive`/`failed`) on both report
+    paths.
+  - `tools/test_xrsim.py` (+9 → **53**): contrast+boundary reporting, a textured
+    interior offset still fails, a bright edge-pinned offset is inconclusive, a
+    low-contrast offset is inconclusive, a flat dark pair is inconclusive at the
+    edge, the summary counts, and three synthetic-verdict cases.
+  - `tools/verify_reported_fixes.py` (new #72 req 3 invariant),
+    `docs/vr-scenarios.md` caveat,
+    `docs/adr/0454-vertical-disparity-artifact-contrast-gate.md` (new),
+    `tests/xrsim/report.json` (regenerated `--evaluate-only --downscale 4`; also
+    picks up wake 47's `eye_frames`/`capture_metadata_present`, which had not
+    been regenerated then).
+- **Evidence:**
+  - **Live** (allowed exception, `RIDDICKVR_SIM=1`, fresh `dist\riddickvr-host.exe`,
+    scratch deleted):
+    - `--reach-gameplay --duration 40 --interval 1200 --downscale 4` (graded
+      gameplay-only, end-to-end with the final code): `vertical_disparity`
+      **`{ok: 2, inconclusive: 8, failed: 0}`** — **no vertical-stereo defect**;
+      `gameplay_full_bleed_reached` PASS (fill 1.00), `gameplay_window_has_content`
+      PASS (0 blank), `scene_advanced` PASS 10/10 distinct, `capture_metadata_present`
+      PASS 10 transforms. Only FAIL = `frame_budget` (pre-existing mock cadence,
+      ADR-0448).
+    - `--dump-branch any` run re-analysed (bright + dark in one capture):
+      **`{ok: 6, inconclusive: 14, failed: 0}`** — the 6 bright frames measure
+      `dy=0`, all 14 dark frames inconclusive (before this change the same capture
+      failed on all 15 dark frames).
+    - A gameplay-only capture (42 frames) that mis-failed the dark frames **and**
+      the bright frame 2400 now gives **`{ok: 11, inconclusive: 30, failed: 0}`**.
+  - Offline: `test_xrsim.py` **53/53 PASS**; `xrsim.py --selftest` PASS; all 9
+    `tools/test_*.py` + `validate_addresses` + `verify_hook_init` +
+    `verify_reported_fixes` + `scenario_tests.py --check` PASS. No C++/asset
+    changed → no `build-all.ps1`/CTest (documented).
+- **Blocker / honest limit:** this resolves the *measurement* (the estimator
+  cannot quantify `dy` on these frames, and the renderer has no vertical
+  mechanism) — **not** a headset confirmation of the game's own dark frames.
+  `MIN_DY_CONTRAST` is empirical; an offset ≥ 8 px is reported inconclusive ("out
+  of range"), not failed. **#72 req 1 (the BarScan branch signal) is still the top
+  open item and is a hook change that needs one interactive deploy** (the sim hook
+  is stale at 17:56).
+- **Next:** #72 req 1 via one interactive deploy (`ViewmodelObserve=1` + the
+  branch fix together), else **#68 requirement 2's remaining half — p50/p95
+  frame-time percentiles + a p95-based budget assertion** (the last red check on a
+  live run; spec-listed and host-side, no deploy).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 47 — 2026-10-16 20:45 (scheduled loop)
 - **Unit:** GH **#68 requirement 1 (second half)** — make every XRSIM capture
   *self-describing in 3D*: the mock host now records the **head/eye pose +

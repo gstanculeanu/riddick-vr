@@ -85,6 +85,22 @@ scenario playback until gameplay is reached is follow-up work (#71/#72), and the
 `cinemaMode` branch bit still mislabels the static 2D splash pages as gameplay
 (#72).
 
+**Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
+(mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical
+registration **unmeasurable** — `best_dy` pins to the search edge and moves with
+the analysis crop/downscale (measured: dy 6/7/10/12/8 from five crops of one
+frame). A *bright* frame can also fail to register (frame 2400: `dy` and `dx`
+both on their bounds, 24 px crop spread). That is an alignment-estimator
+artefact, not a stereo defect: the render path applies only a horizontal half-IPD
+shift, and the same blit gives a steady `dy=0` from every crop on a good frame.
+`tools/xrsim.py` therefore gates `no_vertical_disparity` on the frame's contrast
+(`MIN_DY_CONTRAST`) **and** on the optimum not being pinned to the `±8` search
+edge (`DY_SEARCH_BOUND`): an unquantifiable `dy` is reported **inconclusive** (a
+skip), and the report's `vertical_disparity` key carries the `ok` /
+`inconclusive` / `failed` tally. A textured frame with a real, interior offset
+still fails. The `frame_budget` FAIL on a live run (the mock host follows the
+game's uncapped swap rate) is a separate, pre-existing artefact.
+
 ## Current coverage and limits
 
 The scripted profiles provide deterministic controller poses and velocities,

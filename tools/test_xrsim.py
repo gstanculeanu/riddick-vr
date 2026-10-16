@@ -48,6 +48,15 @@ def _black(shape=(96, 128, 3)):
     return np.zeros(shape)
 
 
+def _flat(level=12, shape=(96, 128, 3)):
+    return np.full(shape, float(level))
+
+
+def _dim(seed=11, shape=(96, 128, 3)):
+    """A dark, very low-contrast pattern (std well below MIN_DY_CONTRAST)."""
+    return np.random.default_rng(seed).random(shape) * 10.0 + 5.0
+
+
 def _shift_h(array, dx):
     return np.roll(array, dx, axis=1)
 
@@ -115,6 +124,129 @@ def test_downscale_still_registers(td):
     assert m["best_dx"] == 2, m  # 8 px -> 2 at /4
     ok, _ = xrsim.assert_stereo(m)
     assert ok, m
+
+
+def test_stereo_metrics_reports_contrast_and_boundary(td):
+    base = _content()
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", _shift_h(base, 5))
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["contrast"] >= xrsim.MIN_DY_CONTRAST, m
+    assert m["dy_at_boundary"] is False, m
+
+
+def test_high_contrast_interior_dy_still_fails(td):
+    # A bright, textured frame with a *quantifiable* (interior) vertical offset
+    # is a real defect -- the confidence gates must not excuse it.
+    base = _content()
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", _shift_v(_shift_h(base, 4), 3))
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["contrast"] >= xrsim.MIN_DY_CONTRAST, m
+    assert m["dy_at_boundary"] is False, m
+    ok, checks = xrsim.assert_stereo(m)
+    assert not ok, checks
+    dy = [c for c in checks if c["check"] == "no_vertical_disparity"]
+    assert dy and not dy[0].get("skip") and not dy[0]["ok"], checks
+
+
+def test_boundary_dy_is_inconclusive_not_failed(td):
+    # GH #72 requirement 3 / ADR-0454: an optimum pinned to the search edge means
+    # the offset cannot be quantified, so it is inconclusive even on a bright
+    # frame -- this is the live frame-2400 case (dx and dy both on their bounds).
+    base = _content(shape=(256, 256, 3))
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", _shift_v(_shift_h(base, 4), 8))
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["contrast"] >= xrsim.MIN_DY_CONTRAST, m
+    assert m["dy_at_boundary"] is True, m
+    ok, checks = xrsim.assert_stereo(m)
+    dy = [c for c in checks if c["check"] == "no_vertical_disparity"]
+    assert dy and dy[0].get("skip") and dy[0]["ok"], checks
+    assert "search edge" in dy[0]["detail"], dy
+    assert ok, checks
+
+
+def test_low_contrast_vertical_shift_is_inconclusive(td):
+    # GH #72 requirement 3: the same 3 px vertical shift on a low-contrast frame
+    # cannot be measured, so it must be reported inconclusive (a skip), never a
+    # defect.
+    base = _dim()
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", _shift_v(_shift_h(base, 5), 3))
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["contrast"] < xrsim.MIN_DY_CONTRAST, m
+    ok, checks = xrsim.assert_stereo(m)
+    dy = [c for c in checks if c["check"] == "no_vertical_disparity"]
+    assert dy and dy[0].get("skip") and dy[0]["ok"], checks
+    assert ok, checks
+
+
+def test_flat_dark_pair_is_inconclusive_at_boundary(td):
+    # The live artefact signature: a flat/dark frame's vertical optimum runs to
+    # the search edge. It must be inconclusive, not a defect.
+    _save(Path(td) / "test_frame_0001.bmp", _flat())
+    _save(Path(td) / "right_0001.bmp", _flat())
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=8)
+    assert m["dy_at_boundary"] is True, m
+    assert m["contrast"] < xrsim.MIN_DY_CONTRAST, m
+    ok, checks = xrsim.assert_stereo(m, require_disparity=False)
+    dy = [c for c in checks if c["check"] == "no_vertical_disparity"]
+    assert dy and dy[0].get("skip") and dy[0]["ok"], checks
+    assert "search boundary" in dy[0]["detail"], dy
+    assert ok, checks
+
+
+def test_vertical_disparity_summary_counts(td):
+    checks = [
+        {"check": "no_vertical_disparity", "ok": True},
+        {"check": "no_vertical_disparity", "ok": True, "skip": True},
+        {"check": "no_vertical_disparity", "ok": False},
+        {"check": "both_eyes_non_black", "ok": True},
+    ]
+    stats = xrsim.vertical_disparity_stats(checks)
+    assert stats == {"ok": 1, "inconclusive": 1, "failed": 1}, stats
+
+
+def _metrics(**kw):
+    """A synthetic ``stereo_metrics`` dict for the vertical-disparity verdict."""
+    base = {"non_black_l": True, "non_black_r": True,
+            "shape_l": [96, 128], "shape_r": [96, 128],
+            "best_dx": 5, "best_dy": 3, "residual": 2.0, "identical": False,
+            "contrast": 60.0, "dy_at_boundary": False}
+    base.update(kw)
+    return base
+
+
+def test_boundary_dy_on_a_textured_frame_is_inconclusive(td):
+    # GH #72 req 3 / ADR-0454: an optimum on the search edge cannot be quantified,
+    # so it is inconclusive even when the frame is textured.
+    ok, checks = xrsim.assert_stereo(
+        _metrics(best_dy=8, dy_at_boundary=True))
+    dy = [c for c in checks if c["check"] == "no_vertical_disparity"]
+    assert dy and dy[0].get("skip") and dy[0]["ok"], checks
+    assert "search edge" in dy[0]["detail"], dy
+    assert ok, checks
+
+
+def test_interior_dy_on_a_textured_frame_fails(td):
+    ok, checks = xrsim.assert_stereo(_metrics())
+    assert not ok, checks
+    dy = [c for c in checks if c["check"] == "no_vertical_disparity"]
+    assert dy and not dy[0].get("skip") and not dy[0]["ok"], checks
+
+
+def test_interior_dy_on_a_low_contrast_frame_is_inconclusive(td):
+    ok, checks = xrsim.assert_stereo(_metrics(contrast=10.0))
+    dy = [c for c in checks if c["check"] == "no_vertical_disparity"]
+    assert dy and dy[0].get("skip") and dy[0]["ok"], checks
+    assert "low-contrast" in dy[0]["detail"], dy
+    assert ok, checks
 
 
 # ------------------------------------------------------------------ comfort
@@ -708,6 +840,15 @@ def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
              test_vertical_disparity_is_rejected, test_downscale_still_registers,
+             test_stereo_metrics_reports_contrast_and_boundary,
+             test_high_contrast_interior_dy_still_fails,
+             test_boundary_dy_is_inconclusive_not_failed,
+             test_low_contrast_vertical_shift_is_inconclusive,
+             test_flat_dark_pair_is_inconclusive_at_boundary,
+             test_vertical_disparity_summary_counts,
+             test_boundary_dy_on_a_textured_frame_is_inconclusive,
+             test_interior_dy_on_a_textured_frame_fails,
+             test_interior_dy_on_a_low_contrast_frame_is_inconclusive,
              test_comfort_flags_empty_frame, test_comfort_passes_on_content,
              test_comfort_flags_green_glitch, test_parse_budget_accepts_and_rejects,
              test_evaluate_passes_on_good_frame, test_evaluate_fails_on_black_frames,

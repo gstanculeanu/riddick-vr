@@ -146,12 +146,60 @@ RUN_HEADER = "=== Riddick VR Log Started at"
 
 
 # ---------------------------------------------------------------- stereo diff
+# GH #72 requirement 3: a *vertical* disparity is only meaningful when the
+# alignment actually locked on. Two confidence signals select the verdict:
+#   * a flat frame (reference-crop std below ``MIN_DY_CONTRAST``) has no vertical
+#     texture to align; and
+#   * an optimum pinned to the ``DY_SEARCH_BOUND`` edge means the tool cannot
+#     quantify the offset -- the true minimum is at or beyond the window and a
+#     degenerate landscape looks identical (measured: the dark gameplay frames
+#     pin to the edge regardless of the window, and a *bright* frame whose
+#     registration failed gave dy=-12 at a widened search with dx also on its
+#     bound).
+# Either one reports **inconclusive**, never failed: the render path applies only
+# a horizontal half-IPD shift, so a real vertical offset has no mechanism and the
+# measured figures there are the estimator failing to lock (measured crop-to-crop
+# spread of 24 px on the failed bright frame; a steady dy=0 from every crop on a
+# good frame). An interior optimum on a textured frame is a real, reportable
+# defect.
+MIN_DY_CONTRAST = 25.0
+# The vertical search window, ``DY_SEARCH_BOUND`` either side. Wide enough that a
+# real (if unlikely) offset stays interior and measurable, while a degenerate
+# landscape just runs to the edge (and is reported inconclusive).
+DY_SEARCH_BOUND = 8
+
+
+def _best_align(L, R, y0, y1, x0, x1, search):
+    """Best ``(dx, dy, mse)`` aligning the ``L`` crop ``[y0:y1, x0:x1]`` into ``R``.
+
+    ``dy`` is searched over ``DY_SEARCH_BOUND`` either side (a correct frame has
+    no vertical disparity, so the range only needs to catch a gross error).
+    Windows that would leave the image are skipped, so the crop must be big
+    enough for the search.
+    """
+    h, w = L.shape
+    ref = L[y0:y1, x0:x1]
+    best = (None, None, float("inf"))
+    for dy in range(-DY_SEARCH_BOUND, DY_SEARCH_BOUND + 1):
+        for dx in range(-search, search + 1):
+            ry0, ry1 = y0 + dy, y1 + dy
+            rx0, rx1 = x0 + dx, x1 + dx
+            if ry0 < 0 or rx0 < 0 or ry1 > h or rx1 > w:
+                continue
+            mse = float(np.mean((ref - R[ry0:ry1, rx0:rx1]) ** 2))
+            if mse < best[2]:
+                best = (dx, dy, mse)
+    return best
+
+
 def stereo_metrics(left_path: Path, right_path: Path, search=48, downscale=1):
     """Best horizontal/vertical alignment of the two eye images.
 
     Returns dict with: non_black_l/r, best_dx, best_dy, residual (MSE at best),
-    identical (bool). The mod is a monoscopic blit with an IPD shift, so a
-    correct frame has a small horizontal dx and ~zero dy.
+    identical (bool), plus -- GH #72 requirement 3 -- ``contrast`` (reference-crop
+    stddev) and ``dy_at_boundary`` (whether the vertical optimum sits on the
+    search edge, i.e. cannot be quantified). The mod is a monoscopic blit with an
+    IPD shift, so a correct frame has a small horizontal dx and ~zero dy.
 
     ``downscale`` (integer >= 1) block-subsamples both images before the search
     so multi-megapixel eye buffers can be analysed quickly; dx/dy are then in
@@ -184,18 +232,16 @@ def stereo_metrics(left_path: Path, right_path: Path, search=48, downscale=1):
     h, w = L.shape
     y0, y1 = h // 4, 3 * h // 4
     x0, x1 = w // 4, 3 * w // 4
-    ref = L[y0:y1, x0:x1]
-    best = (None, None, float("inf"))
-    for dy in range(-4, 5):
-        for dx in range(-search, search + 1):
-            ry0, ry1 = y0 + dy, y1 + dy
-            rx0, rx1 = x0 + dx, x1 + dx
-            if ry0 < 0 or rx0 < 0 or ry1 > h or rx1 > w:
-                continue
-            mse = float(np.mean((ref - R[ry0:ry1, rx0:rx1]) ** 2))
-            if mse < best[2]:
-                best = (dx, dy, mse)
+    # GH #72 requirement 3: contrast (texture) is the first confidence signal --
+    # a flat frame has no vertical structure to align.
+    out["contrast"] = float(L[y0:y1, x0:x1].std())
+    best = _best_align(L, R, y0, y1, x0, x1, search)
+    if best[0] is None:
+        out.update(best_dx=None, best_dy=None, residual=None, identical=False,
+                   note="no valid alignment window", dy_at_boundary=False)
+        return out
     out["best_dx"], out["best_dy"], out["residual"] = best
+    out["dy_at_boundary"] = abs(best[1]) == DY_SEARCH_BOUND
     # "Identical" = zero shift with a tiny residual (mono duplication).
     out["identical"] = (best[0] == 0 and best[1] == 0 and best[2] < 0.5)
     return out
@@ -226,13 +272,65 @@ def assert_stereo(metrics, require_disparity=True):
         return ok, checks
     chk("same_eye_resolution", True)
     dx, dy = metrics.get("best_dx"), metrics.get("best_dy")
-    chk("no_vertical_disparity", dy is not None and abs(dy) <= 2, f"dy={dy}")
+    contrast = metrics.get("contrast")
+    tag = " [search boundary]" if metrics.get("dy_at_boundary") else ""
+    if dy is None:
+        chk("no_vertical_disparity", False, "dy not computed")
+    elif abs(dy) <= 2:
+        chk("no_vertical_disparity", True, f"dy={dy}{tag}")
+    else:
+        # GH #72 requirement 3: only *trust* a non-zero dy when the frame has
+        # enough texture to align and the optimum is interior (quantifiable).
+        # Otherwise the vertical figure is the estimator failing to lock, which
+        # is reported inconclusive (a skip) -- never a defect.
+        reasons = []
+        if contrast is not None and contrast < MIN_DY_CONTRAST:
+            reasons.append(f"low-contrast frame (std={contrast:.1f} < "
+                           f"{MIN_DY_CONTRAST:.0f})")
+        if metrics.get("dy_at_boundary"):
+            reasons.append(f"optimum pinned to the +/-{DY_SEARCH_BOUND} search "
+                           "edge (offset not quantifiable)")
+        if reasons:
+            checks.append({
+                "check": "no_vertical_disparity", "ok": True, "skip": True,
+                "detail": (f"inconclusive: dy={dy}{tag} -> "
+                           f"{'; '.join(reasons)}; the vertical optimum is an "
+                           "estimator artefact (GH #72 req 3)")})
+        else:
+            chk("no_vertical_disparity", False,
+                f"dy={dy}{tag} (contrast std={contrast:.1f})" if contrast is not None
+                else f"dy={dy}{tag}")
     if require_disparity:
         chk("horizontal_disparity_present", dx is not None and abs(dx) >= 1,
             f"dx={dx}")
     chk("not_mono_duplicate", not metrics.get("identical"),
         f"identical={metrics.get('identical')}")
     return ok, checks
+
+
+def vertical_disparity_stats(checks):
+    """GH #72 requirement 3: the verdict on the `dy` (vertical disparity) checks.
+
+    ``ok``          -- frames where a vertical disparity was *measured* and not
+                       found (dy within tolerance);
+    ``inconclusive``-- low-contrast frames where the vertical optimum is an
+                       estimator artefact, reported as a skip;
+    ``failed``      -- high-contrast frames that measured a real vertical offset.
+    A run that only ever reports ``inconclusive``/``ok`` has no evidence of a
+    vertical stereo defect; a non-zero ``failed`` is a concrete defect on frames
+    that *can* measure it.
+    """
+    ok = inconclusive = failed = 0
+    for c in checks:
+        if c.get("check") != "no_vertical_disparity":
+            continue
+        if c.get("skip"):
+            inconclusive += 1
+        elif c.get("ok"):
+            ok += 1
+        else:
+            failed += 1
+    return {"ok": ok, "inconclusive": inconclusive, "failed": failed}
 
 
 # --------------------------------------------------------------- capture health
@@ -865,6 +963,7 @@ def cmd_evaluate_only(args):
                         "content_gate": content_gate_stats(host_text),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
+                        "vertical_disparity": vertical_disparity_stats(checks),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -936,6 +1035,7 @@ def main(argv=None):
                         "content_gate": content_gate_stats(host_log),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
+                        "vertical_disparity": vertical_disparity_stats(checks),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

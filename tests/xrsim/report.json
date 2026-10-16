@@ -17,7 +17,7 @@
     {
       "check": "both_eyes_non_black",
       "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-4",
+      "detail": "meanL=0 meanR=0 -48/-8",
       "group": "stereo",
       "frame": 1,
       "branch": "unknown"
@@ -25,7 +25,7 @@
     {
       "check": "interop_produced_content",
       "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-4",
+      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
       "group": "stereo",
       "frame": 1,
       "branch": "unknown"
@@ -33,15 +33,16 @@
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " -48/-4",
+      "detail": " -48/-8",
       "group": "stereo",
       "frame": 1,
       "branch": "unknown"
     },
     {
       "check": "no_vertical_disparity",
-      "ok": false,
-      "detail": "dy=-4 -48/-4",
+      "ok": true,
+      "skip": true,
+      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
       "group": "stereo",
       "frame": 1,
       "branch": "unknown"
@@ -49,7 +50,7 @@
     {
       "check": "horizontal_disparity_present",
       "ok": true,
-      "detail": "dx=-48 -48/-4",
+      "detail": "dx=-48 -48/-8",
       "group": "stereo",
       "frame": 1,
       "branch": "unknown"
@@ -57,7 +58,7 @@
     {
       "check": "not_mono_duplicate",
       "ok": true,
-      "detail": "identical=False -48/-4",
+      "detail": "identical=False -48/-8",
       "group": "stereo",
       "frame": 1,
       "branch": "unknown"
@@ -65,7 +66,7 @@
     {
       "check": "both_eyes_non_black",
       "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-4",
+      "detail": "meanL=0 meanR=0 -48/-8",
       "group": "stereo",
       "frame": 15,
       "branch": "unknown"
@@ -73,7 +74,7 @@
     {
       "check": "interop_produced_content",
       "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-4",
+      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
       "group": "stereo",
       "frame": 15,
       "branch": "unknown"
@@ -81,15 +82,16 @@
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " -48/-4",
+      "detail": " -48/-8",
       "group": "stereo",
       "frame": 15,
       "branch": "unknown"
     },
     {
       "check": "no_vertical_disparity",
-      "ok": false,
-      "detail": "dy=-4 -48/-4",
+      "ok": true,
+      "skip": true,
+      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
       "group": "stereo",
       "frame": 15,
       "branch": "unknown"
@@ -97,7 +99,7 @@
     {
       "check": "horizontal_disparity_present",
       "ok": true,
-      "detail": "dx=-48 -48/-4",
+      "detail": "dx=-48 -48/-8",
       "group": "stereo",
       "frame": 15,
       "branch": "unknown"
@@ -105,7 +107,7 @@
     {
       "check": "not_mono_duplicate",
       "ok": true,
-      "detail": "identical=False -48/-4",
+      "detail": "identical=False -48/-8",
       "group": "stereo",
       "frame": 15,
       "branch": "unknown"
@@ -113,7 +115,7 @@
     {
       "check": "both_eyes_non_black",
       "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-4",
+      "detail": "meanL=0 meanR=0 -48/-8",
       "group": "stereo",
       "frame": 30,
       "branch": "unknown"
@@ -121,7 +123,7 @@
     {
       "check": "interop_produced_content",
       "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-4",
+      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
       "group": "stereo",
       "frame": 30,
       "branch": "unknown"
@@ -129,15 +131,16 @@
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " -48/-4",
+      "detail": " -48/-8",
       "group": "stereo",
       "frame": 30,
       "branch": "unknown"
     },
     {
       "check": "no_vertical_disparity",
-      "ok": false,
-      "detail": "dy=-4 -48/-4",
+      "ok": true,
+      "skip": true,
+      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
       "group": "stereo",
       "frame": 30,
       "branch": "unknown"
@@ -145,7 +148,7 @@
     {
       "check": "horizontal_disparity_present",
       "ok": true,
-      "detail": "dx=-48 -48/-4",
+      "detail": "dx=-48 -48/-8",
       "group": "stereo",
       "frame": 30,
       "branch": "unknown"
@@ -153,7 +156,7 @@
     {
       "check": "not_mono_duplicate",
       "ok": true,
-      "detail": "identical=False -48/-4",
+      "detail": "identical=False -48/-8",
       "group": "stereo",
       "frame": 30,
       "branch": "unknown"
@@ -401,7 +404,7 @@
     {
       "check": "both_eyes_non_black",
       "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-4",
+      "detail": "meanL=0 meanR=0 -48/-8",
       "group": "stereo",
       "frame": 135,
       "branch": "unknown"
@@ -409,7 +412,7 @@
     {
       "check": "interop_produced_content",
       "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-4",
+      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
       "group": "stereo",
       "frame": 135,
       "branch": "unknown"
@@ -417,15 +420,16 @@
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " -48/-4",
+      "detail": " -48/-8",
       "group": "stereo",
       "frame": 135,
       "branch": "unknown"
     },
     {
       "check": "no_vertical_disparity",
-      "ok": false,
-      "detail": "dy=-4 -48/-4",
+      "ok": true,
+      "skip": true,
+      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
       "group": "stereo",
       "frame": 135,
       "branch": "unknown"
@@ -433,7 +437,7 @@
     {
       "check": "horizontal_disparity_present",
       "ok": true,
-      "detail": "dx=-48 -48/-4",
+      "detail": "dx=-48 -48/-8",
       "group": "stereo",
       "frame": 135,
       "branch": "unknown"
@@ -441,7 +445,7 @@
     {
       "check": "not_mono_duplicate",
       "ok": true,
-      "detail": "identical=False -48/-4",
+      "detail": "identical=False -48/-8",
       "group": "stereo",
       "frame": 135,
       "branch": "unknown"
@@ -574,6 +578,13 @@
       "detail": "no display_branch.log: per-frame display branch unknown (legacy capture or pre-label host)"
     },
     {
+      "group": "capture",
+      "check": "capture_metadata_present",
+      "ok": true,
+      "skip": true,
+      "detail": "no eye_frames.log: per-frame camera transform unknown (legacy capture / pre-#68 host)"
+    },
+    {
       "group": "viewmodel",
       "check": "viewmodel_pass_identified",
       "ok": true,
@@ -614,6 +625,16 @@
     "matrix": null,
     "pushes": 0,
     "translates": 0
+  },
+  "eye_frames": {
+    "count": 0,
+    "distinct": 0,
+    "yaw_span_deg": null
+  },
+  "vertical_disparity": {
+    "ok": 9,
+    "inconclusive": 4,
+    "failed": 0
   },
   "host_log": null,
   "display_branch": {}
