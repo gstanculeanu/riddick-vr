@@ -282,6 +282,13 @@ bool IpcBridgeClient::WriteState(const RiddickVRSharedState& state) {
             m_pSharedState->rightHapticPulse = state.rightHapticPulse;
         m_pSharedState->eyeshineActive = state.eyeshineActive;
         m_pSharedState->flashlightActive = state.flashlightActive;
+        // GH #68 requirement 5: the locomotion comfort level the hook computed
+        // (Track C #9, `camera_hook.cpp`) must reach the host, otherwise the
+        // comfort vignette is unobservable and a regression that disabled it
+        // cannot be caught without a headset. Previously dropped here (the only
+        // hook->host field of the struct not copied), so the harness always read
+        // 0.0 across a whole locomotion run -- a real, reproduced publish defect.
+        m_pSharedState->comfortVignette = state.comfortVignette;
         // shouldRecenter is hook->host edge signal (GH #37 follow-up uses sequence;
         // publish OR so a hook request is never wiped before the host sees it).
         if (state.shouldRecenter)

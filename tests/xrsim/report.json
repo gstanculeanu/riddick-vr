@@ -592,6 +592,13 @@
       "detail": "no ViewmodelProbe lines (ViewmodelObserve=0 or pre-#67 host)"
     },
     {
+      "check": "comfort_vignette_applied",
+      "ok": true,
+      "skip": true,
+      "detail": "no ComfortVignette line (pre-#68 host, or evaluate-only without a persisted host log)",
+      "group": "comfort"
+    },
+    {
       "check": "no_green_chroma_glitch",
       "ok": true,
       "detail": "0 green px (frame test_frame_0180.bmp)",
@@ -636,6 +643,7 @@
     "inconclusive": 4,
     "failed": 0
   },
+  "comfort_vignette": null,
   "host_log": null,
   "display_branch": {}
 }

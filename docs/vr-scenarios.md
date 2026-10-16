@@ -105,6 +105,15 @@ rate, so a one-off level-load hitch (~760 ms) dominates `max_ms`/`mean_ms`
 without being a sustained 90 Hz regression (ADR-0455). `max_ms` and the drop
 count are still *reported* so a real stall stays visible.
 
+**Comfort (GH #68 requirement 5, ADR-0456):** the mock host reads the
+hook-published locomotion comfort level (`comfortVignette`) back every frame and
+prints a `[Mock Host] ComfortVignette ...` summary carrying the max level reached
+while it published move/turn input. `tools/xrsim.py` asserts
+`comfort_vignette_applied` on it, so the vignette can be proven live without a
+headset; the check is **skipped** (never failed) when the line or the locomotion
+input is absent. Snap-turn/recenter and gross HUD clipping assertions are still
+open in requirement 5 (they need hook-side signals and a deploy).
+
 ## Current coverage and limits
 
 The scripted profiles provide deterministic controller poses and velocities,

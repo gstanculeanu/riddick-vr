@@ -289,6 +289,36 @@ def main():
             "search-boundary-gated (artefact on dark/flat frames, ADR-0454) and "
             "reported")
 
+    # GH #68 requirement 5 (comfort rules): the locomotion comfort vignette must
+    # be assertable without a headset, so a config/parse regression that disabled
+    # it cannot hide. The mock host reads the hook-published `comfortVignette`
+    # back every frame and summarises it against the locomotion input it published
+    # (pure helper src/host/comfort_vignette.h, unit-tested); XRSIM asserts the
+    # level actually rose while the run moved/turned, skipped -- never failed --
+    # when the line or the locomotion input is absent (ADR-0456).
+    comfort_hdr = (ROOT / "src/host/comfort_vignette.h").read_text(encoding="utf-8")
+    ipc_bridge = (ROOT / "src/bridge/ipc_bridge.cpp").read_text(encoding="utf-8")
+    require("ComfortVignetteStats" in comfort_hdr and
+            "AccumulateComfort" in comfort_hdr and
+            "FormatComfortVignetteLine" in comfort_hdr and
+            "comfort_vignette.h" in host and
+            "AccumulateComfort(s_comfort, clientState.comfortVignette" in host and
+            "FormatComfortVignetteLine(s_comfort)" in host and
+            # The defect this assertion found: WriteState must actually publish
+            # the comfort level (it copies hook->host fields by hand).
+            "m_pSharedState->comfortVignette = state.comfortVignette;" in ipc_bridge and
+            "tests/comfort_vignette_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "comfort_vignette_summary" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "COMFORT_VIGNETTE_RE" in xrsim_tool and
+            "def parse_comfort" in xrsim_tool and
+            "def comfort_vignette_check" in xrsim_tool and
+            "comfort_vignette_applied" in xrsim_tool and
+            '"comfort_vignette"' in xrsim_tool and
+            "test_comfort_vignette_check_asserts_applied_during_locomotion" in _xrsim_tests and
+            "test_comfort_vignette_check_skips_without_line_or_locomotion" in _xrsim_tests,
+            "GH #68: the locomotion comfort vignette must be published to the host "
+            "and asserted applied during scripted movement")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

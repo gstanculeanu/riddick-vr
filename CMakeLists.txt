@@ -193,4 +193,15 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/host
     )
     add_test(NAME frame_time_percentiles COMMAND riddick_vr_frame_time_tests)
+
+    # GH #68 (requirement 5, comfort rules): the mock host must assert the
+    # locomotion comfort vignette was actually applied while the scripted run was
+    # moving/turning (it reads the hook-published `comfortVignette` back and
+    # summarises it with the locomotion input). Pure helper + wire line in
+    # src/host/comfort_vignette.h, consumed by XRSIM's `comfort_vignette_applied`.
+    add_executable(riddick_vr_comfort_vignette_tests tests/comfort_vignette_tests.cpp)
+    target_include_directories(riddick_vr_comfort_vignette_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
+    )
+    add_test(NAME comfort_vignette_summary COMMAND riddick_vr_comfort_vignette_tests)
 endif()

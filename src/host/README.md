@@ -42,3 +42,13 @@ The Host component is an independent 64-bit (x64) application responsible for al
   and `tools/xrsim.py` **asserts the budget on p50/p95** while still reporting
   `max_ms` and the drop count -- so a one-off level-load hitch is visible but
   does not read as a sustained 90 Hz regression (ADR-0455).
+- In mock mode, the host also reads the hook-published locomotion **comfort
+  level** (`comfortVignette`, Track C #9) back every frame and prints a running
+  summary every 30 frames (`[Mock Host] ComfortVignette samples=.. max=.. mean=..
+  above=.. locomotion=.. max_locomotion=.. threshold=..`; GH #68 requirement 5).
+  The accumulate/format logic is the pure helper
+  `src/host/comfort_vignette.h` (unit-tested by
+  `tests/comfort_vignette_tests.cpp`), and `tools/xrsim.py` asserts
+  `comfort_vignette_applied` -- the vignette must rise while the run publishes
+  move/turn input -- so a regression that disables the comfort feature is caught
+  without a headset (ADR-0456).

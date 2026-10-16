@@ -277,6 +277,79 @@ def test_comfort_flags_green_glitch(td):
     assert any(c["check"] == "no_green_chroma_glitch" and not c["ok"] for c in checks)
 
 
+# ------------------------------------- comfort vignette (GH #68 req 5)
+def _comfort_line(samples=600, mx=1.0, mean=0.9, above=580, locomotion=540,
+                  max_loco=1.0, threshold=0.05):
+    return (f"[Mock Host] ComfortVignette samples={samples} max={mx:.3f} "
+            f"mean={mean:.3f} above={above} locomotion={locomotion} "
+            f"max_locomotion={max_loco:.3f} threshold={threshold:.3f}")
+
+
+def test_parse_comfort_vignette_line(td):
+    assert xrsim.parse_comfort("") is None
+    assert xrsim.parse_comfort("FrameBudget samples=30") is None
+    # The last line of a run wins (the summary is printed periodically).
+    text = _comfort_line(max_loco=0.0, above=0) + "\n" + _comfort_line(max_loco=0.97)
+    c = xrsim.parse_comfort(text)
+    assert c["samples"] == 600 and c["locomotion"] == 540, c
+    assert c["max_locomotion"] == 0.97 and c["threshold"] == 0.05, c
+
+
+def test_comfort_vignette_check_asserts_applied_during_locomotion(td):
+    # Applied while moving -> pass.
+    ok, rec = xrsim.comfort_vignette_check(xrsim.parse_comfort(_comfort_line()))
+    assert ok and rec["ok"] and not rec.get("skip"), rec
+    assert "while moving" in rec["detail"], rec
+    # Locomotion happened but the vignette never rose -> fail (a real regression).
+    ok, rec = xrsim.comfort_vignette_check(
+        xrsim.parse_comfort(_comfort_line(max_loco=0.0, above=0)))
+    assert not ok and not rec.get("skip"), rec
+
+
+def test_comfort_vignette_check_skips_without_line_or_locomotion(td):
+    # No line (pre-#68 host / evaluate-only) -> skip, never fail.
+    ok, rec = xrsim.comfort_vignette_check(None)
+    assert ok and rec.get("skip"), rec
+    # No locomotion input published -> the vignette is not expected -> skip.
+    ok, rec = xrsim.comfort_vignette_check(
+        xrsim.parse_comfort(_comfort_line(locomotion=0, max_loco=0.0)))
+    assert ok and rec.get("skip"), rec
+
+
+def test_comfort_vignette_check_in_evaluate(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    budget = ("FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 "
+              "budget_ms=11.11 p50_ms=5.0 p95_ms=7.0")
+    passed, checks = xrsim.evaluate(_args(), art, budget + "\n" + _comfort_line(), "")
+    rec = [c for c in checks if c["check"] == "comfort_vignette_applied"][0]
+    assert rec["group"] == "comfort" and rec["ok"] and not rec.get("skip"), rec
+    assert passed, checks
+
+
+def test_comfort_vignette_report_key(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    xrsim.persist_host_log(
+        art, "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 "
+             "budget_ms=11.11 p50_ms=5.0 p95_ms=7.0\n" + _comfort_line())
+    rep = Path(td) / "report.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                         "--report-file", str(rep)])
+    assert rc == 0
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    c = payload["comfort_vignette"]
+    assert c and c["locomotion"] == 540 and c["max_locomotion"] == 1.0, c
+    rec = [x for x in payload["checks"]
+           if x["check"] == "comfort_vignette_applied"][0]
+    assert rec["ok"] and not rec.get("skip"), rec
+
+
 # ------------------------------------------------------------------- budget
 def test_parse_budget_asserts_p50_p95_not_max(td):
     # GH #68 req 2: the budget is asserted on p50/p95, so a one-off level-load
@@ -871,6 +944,11 @@ def main() -> int:
              test_interior_dy_on_a_low_contrast_frame_is_inconclusive,
              test_comfort_flags_empty_frame, test_comfort_passes_on_content,
              test_comfort_flags_green_glitch, test_parse_budget_asserts_p50_p95_not_max,
+             test_parse_comfort_vignette_line,
+             test_comfort_vignette_check_asserts_applied_during_locomotion,
+             test_comfort_vignette_check_skips_without_line_or_locomotion,
+             test_comfort_vignette_check_in_evaluate,
+             test_comfort_vignette_report_key,
              test_parse_budget_reports_missing_line_and_stale_host,
              test_evaluate_passes_on_good_frame, test_evaluate_fails_on_black_frames,
              test_evaluate_only_writes_report_and_exit_code,

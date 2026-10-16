@@ -53,6 +53,13 @@ host rendered it with (``eye_frames.log`` in the dump dir, GH #68 requirement 1)
 so a capture is self-describing in 3D. The report's ``eye_frames`` key summarises
 it and the ``capture_metadata_present`` check confirms it when present (skipped
 for legacy captures).
+
+The mock host also summarises the hook-published locomotion comfort level
+(``comfortVignette``, Track C #9) together with the move/turn input it published,
+so the ``comfort_vignette_applied`` check (GH #68 requirement 5) proves the
+vignette actually applies while the scenario moves/turns -- no headset needed. The
+report carries the summary as ``comfort_vignette``; it is skipped, never failed,
+on a pre-#68 host or an ``--evaluate-only`` run with no persisted host log.
 """
 
 from __future__ import annotations
@@ -126,6 +133,17 @@ EYE_FRAME_RE = re.compile(
 # byte-identical repeat of the last dumped frame = `frozen`). Parsed so the
 # report can show the gate doing its job.
 DUMP_SKIP_RE = re.compile(r"DumpGate skip frame=(\d+) reason=(blank|frozen)")
+
+# GH #68 requirement 5 (comfort rules): the mock host prints a running summary of
+# the hook-published locomotion comfort level (`comfortVignette`, Track C #9) and
+# the locomotion input it published, so a run can assert the vignette is actually
+# *applied* while the scripted scenario is moving/turning -- instead of needing a
+# headset to notice a config/parse regression that disabled it. Parsed here; a
+# line is absent on a pre-#68 host / an --evaluate-only run with no persisted host
+# log, so the check is *skipped*, never failed, in that case.
+COMFORT_VIGNETTE_RE = re.compile(
+    r"ComfortVignette samples=(\d+) max=([\d.]+) mean=([\d.]+) above=(\d+) "
+    r"locomotion=(\d+) max_locomotion=([\d.]+) threshold=([\d.]+)")
 
 # GH #67 step 2: observation-only probe of the engine's first-person viewmodel
 # pass. The hook (ViewmodelObserve=1) logs, at the sampled frames, how many draws
@@ -636,6 +654,49 @@ def comfort_checks(left_path: Path):
     return all(c["ok"] for c in checks), checks
 
 
+def parse_comfort(host_log):
+    """GH #68 requirement 5: the run's locomotion comfort-vignette summary.
+
+    Returns ``None`` when the host log carries no ``ComfortVignette`` line (a
+    pre-#68 host, or an --evaluate-only re-analysis with no persisted host log),
+    so callers *skip* -- never fail -- in that case. Otherwise the last line's
+    ``{samples, max, mean, above, locomotion, max_locomotion, threshold}``.
+    """
+    rows = COMFORT_VIGNETTE_RE.findall(host_log or "")
+    if not rows:
+        return None
+    samples, mx, mean, above, locomotion, max_loco, threshold = rows[-1]
+    return {"samples": int(samples), "max": float(mx), "mean": float(mean),
+            "above": int(above), "locomotion": int(locomotion),
+            "max_locomotion": float(max_loco), "threshold": float(threshold)}
+
+
+def comfort_vignette_check(comfort):
+    """GH #68 requirement 5: did the locomotion comfort vignette actually apply?
+
+    ``comfort`` is ``parse_comfort``'s dict (or ``None``). The vignette is only
+    *expected* on frames where the run published move/turn input, so a run with no
+    locomotion frame is reported as a skip (not a failure). With locomotion
+    present, the published level must rise above the summary's own threshold,
+    which proves the hook computed and published it (and the renderer's `>= 0.01`
+    gate therefore opened) rather than the feature being silently disabled.
+    """
+    if comfort is None:
+        return True, {"check": "comfort_vignette_applied", "ok": True, "skip": True,
+                      "detail": "no ComfortVignette line (pre-#68 host, or "
+                                "evaluate-only without a persisted host log)"}
+    if comfort["locomotion"] == 0:
+        return True, {"check": "comfort_vignette_applied", "ok": True, "skip": True,
+                      "detail": "no locomotion input published; the vignette is "
+                                "not expected"}
+    ok = comfort["max_locomotion"] >= comfort["threshold"]
+    return ok, {"check": "comfort_vignette_applied", "ok": ok,
+                "detail": (f"max={comfort['max_locomotion']:.3f} while moving "
+                           f"(threshold {comfort['threshold']:.3f}); "
+                           f"{comfort['above']}/{comfort['samples']} frame(s) "
+                           f"above, {comfort['locomotion']} locomotion frame(s)")}
+
+
 # ------------------------------------------------------------------ frame budget
 def parse_budget(host_log: str, budget_ms: float):
     """GH #68 requirement 2: assert the *frame-pacing* budget (ADR-0455).
@@ -894,6 +955,12 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
                        "ok": True, "skip": True,
                        "detail": "no ViewmodelProbe lines (ViewmodelObserve=0 or pre-#67 host)"})
     # 4. comfort
+    # GH #68 requirement 5 (comfort rules): the locomotion comfort vignette must
+    # actually apply while the scripted run is moving/turning. The mock host
+    # summarises the hook-published level + the locomotion input it published; a
+    # run with no locomotion frame (or a pre-#68 host) is skipped, not failed.
+    _, comfort_rec = comfort_vignette_check(parse_comfort(host_log))
+    checks.append({**comfort_rec, "group": "comfort"})
     if lefts:
         _, sub = comfort_checks(lefts[-1])
         for c in sub:
@@ -983,6 +1050,7 @@ def cmd_evaluate_only(args):
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
+                        "comfort_vignette": parse_comfort(host_text),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -1057,6 +1125,7 @@ def main(argv=None):
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
+                        "comfort_vignette": parse_comfort(host_log),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

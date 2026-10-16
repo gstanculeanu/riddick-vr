@@ -2,6 +2,86 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 50 — 2026-10-16 22:05 (scheduled loop)
+- **Unit:** GH **#68 requirement 5 (comfort rules), first slice** — assert the
+  locomotion comfort vignette is actually *applied*. Building the assertion
+  immediately **found and fixed a real publish defect**: the hook computes
+  `comfortVignette` (Track C #9) but `IpcBridgeClient::WriteState` never copied it
+  to shared memory, so it was structurally unobservable host-side. Host C++ +
+  tools/tests/docs + a **one-line hook fix** (`src/bridge/ipc_bridge.cpp`); no
+  game/asset change, **no deploy**.
+- **Why this unit:** wake 49's Next was "#72 req 1 via one interactive deploy,
+  else the next host-side #68 gap". #72 req 1 / #67 step 3 / #64 / #63 / #62 / #65
+  are all hook-side and need a deploy this loop must not do (the sim install's
+  hook is stale at 17:56). #68 requirement 5 ("comfort vignette applied during
+  scripted movement/turning") was the least-implemented requirement and is
+  host/tools-side, so it is the top item that can be *finished* this wake.
+- **Root cause (measured, not inferred):** the mock host reads `clientState` back
+  every frame, but the hook publishes hook→host fields **by hand** in
+  `IpcBridgeClient::WriteState` (`src/bridge/ipc_bridge.cpp`) — an explicit subset
+  that omitted `comfortVignette`, the only hook→host field of
+  `RiddickVRSharedState` it did not copy (`IpcBridgeHost::ReadState` copies the
+  whole struct, so the host read the never-written offset = 0.0). Live run:
+  `[Mock Host] ComfortVignette samples=12990 max=0.000 mean=0.000 above=0
+  locomotion=12929 max_locomotion=0.000 threshold=0.050` — 12 929 of 12 990
+  frames published locomotion input (the default mock walks + turns) yet the level
+  stayed 0.0 the whole run. The vignette *is* applied in-headset
+  (`StereoRenderer` reads the hook's *local* `m_sharedState`, which
+  `CameraHook::Update` sets); only the host-side publish was broken.
+- **Change (host C++ + tools/tests/docs + one hook line; no deploy):**
+  - **Fix:** `IpcBridgeClient::WriteState` now copies
+    `m_pSharedState->comfortVignette = state.comfortVignette;`.
+  - `src/host/comfort_vignette.h` (new, pure/dependency-free):
+    `ComfortVignetteStats` + `AccumulateComfort` (clamp, max/mean/`above`, and the
+    separate locomotion-frame tally + `maxWhileLocomotion`) +
+    `FormatComfortVignetteLine`; `kComfortVignetteMin=0.05`,
+    `kComfortLocomotionMag=0.2`.
+  - `src/host/openxr_manager.cpp`: the mock loop reads `clientState.comfortVignette`
+    back every frame, classifies the frame's *published* thumbstick input, and
+    prints `[Mock Host] ComfortVignette samples=.. max=.. mean=.. above=..
+    locomotion=.. max_locomotion=.. threshold=..` every 30 frames.
+  - `tools/xrsim.py`: `COMFORT_VIGNETTE_RE`, `parse_comfort`,
+    `comfort_vignette_check` → a graded `comfort` check `comfort_vignette_applied`
+    (FAILs when the level never rose while locomotion was published; **skipped**
+    when the line is absent — pre-#68 host / evaluate-only — or no locomotion was
+    published) + a `comfort_vignette` report key.
+  - `tests/comfort_vignette_tests.cpp` (new CTest `comfort_vignette_summary`,
+    x86+x64) pins the accumulation + the exact wire line;
+    `tools/test_xrsim.py` **+5 → 59** (parse, applied/failed, skip paths, evaluate
+    wiring, report key); `tools/verify_reported_fixes.py` (new #68 req-5 invariant,
+    incl. the publish line); `src/host/README.md`, `docs/vr-scenarios.md`,
+    `docs/adr/0456-xrsim-comfort-vignette-assertion.md` (new).
+- **Evidence:**
+  - **Live** (allowed exception, `RIDDICKVR_SIM=1`, fresh `dist\riddickvr-host.exe`,
+    in-game hook stale as expected): `--reach-gameplay --duration 45 --interval 300`
+    reached live gameplay (43 gameplay frames, `gameplay_window_has_content` PASS,
+    `gameplay_full_bleed` reached) and the **defect reproduced** — the host log has
+    433 `ComfortVignette` lines, all `max=0.000` while `locomotion` climbed to
+    12929. `--evaluate-only --downscale 4` → the report's single FAIL is
+    `comfort_vignette_applied` (`max=0.000 while moving (threshold 0.050); 0/12990
+    frame(s) above, 12929 locomotion frame(s)`), `comfort_vignette` key present,
+    everything else PASS/expected-skip. (This also *replaced* a stale, messy
+    committed baseline — 26 legacy `both_eyes_non_black` FAILs — with a clean
+    single-FAIL one.)
+  - Offline: `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` **rebuilt with
+    the publish fix** + x64 host; **no `-Deploy`**); CTest **15/15 PASS on x86 AND
+    x64** (new `comfort_vignette_summary`); all 9 `tools/test_*.py` PASS;
+    `xrsim.py --selftest` PASS; `validate_addresses` PASS; `verify_hook_init` PASS;
+    `scenario_tests.py --check` PASS; `verify_reported_fixes.py` PASS.
+- **Blocker / honest limit:** the **fix is hook-side and cannot be live-validated
+  by this loop** — the game-dir hook is the 17:56 build and deploying is forbidden,
+  so `tests/xrsim/report.json` stays `passed: false` with exactly one known FAIL
+  (`comfort_vignette_applied`) until one interactive deploy installs the rebuilt
+  `dist\opengl32.dll`. This is the same boundary GH #67 step 3 / #72 req 1 hit. The
+  check asserts the *published level* (what the renderer gates on); measuring the
+  actual peripheral dimming in the captured eye image is follow-up. #72 req 1 (the
+  BarScan branch signal) is still the top open hook item.
+- **Next:** one interactive deploy (`dist\opengl32.dll` + `riddickvr-host.exe`) turns
+  `comfort_vignette_applied` green and can carry `ViewmodelObserve=1` (#67 step 1/2/3)
+  + the #72-req-1 branch fix in the same sitting; otherwise the next host-side #68
+  gap (snap-turn/recenter or HUD-clipping assertions — both need hook signals).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 49 — 2026-10-16 21:43 (scheduled loop)
 - **Unit:** GH **#68 requirement 2 (second half)** — make the frame-time budget a
   *frame-pacing* assertion: report **p50/p95** (plus max + drops) and assert the

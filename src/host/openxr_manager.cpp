@@ -1,4 +1,5 @@
 #include "openxr_manager.h"
+#include "comfort_vignette.h"
 #include "dump_gate.h"
 #include "eye_frame.h"
 #include "frame_time_stats.h"
@@ -1806,6 +1807,31 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
 
                 totalFrames++;
                 framesCounted++;
+
+                // GH #68 requirement 5 (comfort rules): the hook publishes the
+                // locomotion comfort level it computed from thumbstick
+                // move/turn activity (Track C #9); the mock host reads it back
+                // and summarises it together with the locomotion input it
+                // published, so XRSIM can assert the vignette is actually
+                // applied while the scripted run is moving/turning (a
+                // config/parse regression would otherwise need a headset to
+                // notice). Pure accumulate/format helper in
+                // src/host/comfort_vignette.h (unit-tested).
+                if (stateRead) {
+                    static RiddickVR::ComfortVignetteStats s_comfort;
+                    const float lx = std::fabs(state.leftController.thumbstickX);
+                    const float ly = std::fabs(state.leftController.thumbstickY);
+                    const float rx = std::fabs(state.rightController.thumbstickX);
+                    const bool locomotion =
+                        (lx + ly) >= RiddickVR::kComfortLocomotionMag ||
+                        rx >= RiddickVR::kComfortLocomotionMag;
+                    RiddickVR::AccumulateComfort(s_comfort, clientState.comfortVignette,
+                                                 locomotion);
+                    if ((totalFrames % 30) == 0) {
+                        std::cout << RiddickVR::FormatComfortVignetteLine(s_comfort)
+                                  << std::endl;
+                    }
+                }
 
                 // GH #68: frame-time budget sampling (host frame cadence). Emits a
                 // parseable summary the simulator harness reads; budget = 90 Hz.
