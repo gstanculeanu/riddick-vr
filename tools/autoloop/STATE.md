@@ -2,6 +2,79 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 40 — 2026-10-16 18:40 (scheduled loop)
+- **Unit:** GH **#69** (top vehicle #68's residual requirement 4) — make the
+  scenario **interaction markers reproducible** under the mock. Two independent
+  defects found and fixed; all offline-tested and one live-validated run. One
+  unit (harness + scenario), no C++/asset change, no deploy.
+- Finding 1 (harness defect, decisive, measured): `tools/xrsim.py` used a
+  **byte offset** as the run boundary — `log_mark = LOG_FILE.stat().st_size`
+  *before* launch, then `LOG_FILE.read_bytes()[log_mark:]`. But
+  `Logger::Initialize` (`src/hook/logging.cpp:24`) opens `riddick_vr.log` with
+  `std::ios::out | std::ios::trunc`, so **every launch rewrites the file from
+  offset 0**. A pre-run byte mark is not a run boundary: when the previous run's
+  log was longer than the new one the slice is empty and markers logged early in
+  the new run vanish. Measured on this wake's run: the wake-39 log is **4108 B**,
+  the new (truncated) log is **3404 B** with `COMBAT MODE entered` at byte
+  **2292** and `RIOT BATON ARC JAB` at byte **2673** → the old `[4108:]` slice is
+  **empty**. That is exactly why wakes 38/39 recorded "markers do not fire".
+- Finding 2 (scenario defect, decisive, from the wake-39 log): the old
+  `melee.json` held **both** triggers (0.90) through the punch, so block stayed
+  engaged (`Combat State: AIM / BLOCK engaged (Left Trigger)`) and the forward
+  thrust hit the **parry** branch (`isForwardParry` @4400) *before* the
+  trajectory jab — `RIOT BATON ARC JAB` was unreachable, and the log proves it
+  (`Physical Gesture: PARRY / COUNTER-STRIKE THRUST`). The scenario also let
+  `ApplyScenarioFrame` overwrite the mock's built-in forward walk (keyframe
+  `stickLY` defaults to 0).
+- Change (tools/tests/docs/scenario; **no game/asset change**):
+  - `tools/xrsim.py`: `RUN_HEADER` (`"=== Riddick VR Log Started at"`),
+    `extract_run_section(text)` (text after the **last** run header; whole text
+    when absent), `read_fresh_hook_log(path, log_mark=0)` (header first; byte-mark
+    fallback only for a header-less producer), `marker_summary(checks)`; `run_sim`
+    and `--evaluate-only` both use it; report gains `markers` + `hook_log_scope`.
+  - `tools/scenarios/melee.json` (re-scripted so it drives what it asserts):
+    walk forward (`stickLY 0.85`), hold both triggers → combat stance, **release
+    the block** (`ltrig 0.10`, `rtrig` 0.90 for `isBatonArcJab`), then a fast
+    forward right-hand jab (`rz −0.26 → −0.42` over 3 frames ≈ 4.8 m/s); grips
+    0.50 so the baton *discharge* branches cannot co-opt the log.
+  - `tools/test_xrsim.py` (+4 → **25**): last-run section chosen; a larger
+    pre-run byte mark is shown to **drop** the markers while
+    `read_fresh_hook_log` keeps them; header-less fallback; `--evaluate-only`
+    with `--hook-log`/`--scenario` reports the marker map and still fails an
+    un-fired marker.
+  - `tools/verify_reported_fixes.py` (extended #69 invariant: the truncating
+    writer + header-based extraction), `docs/vr-scenarios.md` caveat,
+    `docs/adr/0446-xrsim-current-run-hook-log.md` (new),
+    `tests/xrsim/report.json` (regenerated baseline; +2 keys only).
+- Evidence:
+  - **Live** `python tools/xrsim.py --scenario tools/scenarios/melee.json
+    --timeout 150` (allowed exception; `RIDDICKVR_SIM=1`; scratch artifacts):
+    `marker:COMBAT MODE entered` **PASS**, `marker:RIOT BATON ARC JAB` **PASS**
+    (both from `hook log run section (3404 chars)`, scope `current-run
+    section`); `gameplay_captures_present` **PASS — 8 gameplay / 5 cinema / 0
+    unknown of 13**; the 8 gameplay frames `dx=-14, dy=0, identical=False`. The
+    hook log shows the intended chain: BLOCK engaged → `COMBAT MODE entered` →
+    3D gameplay → `EXPLORATION MODE restored` → `Physical Gesture: RIOT BATON ARC
+    JAB detected (Vz: 4.80 m/s)`.
+  - Offline: `python tools/test_xrsim.py` **25/25 PASS**; `xrsim.py --selftest`
+    PASS; `scenario_tests.py --check` PASS; all 9 `tools/test_*.py` +
+    `validate_addresses` + `verify_hook_init` + `verify_reported_fixes` PASS; no
+    C++/asset changed → no `build-all.ps1`/CTest (documented).
+- Blocker: none. Residual #69 gaps (unchanged, **not** this change): requirement
+  1 (run the dump window gameplay-dominated) is still open — the transition is
+  still cinema 1–60 / gameplay 75–180; the concrete mechanism is host-side (the
+  mock host now reads `cinemaMode` per frame, so it can gate dumps on gameplay,
+  which would also drop the all-zero warmup frames 1/15/30). Frame 15 `dy=-4`,
+  frames 1/15/30 all-zero, and the mock `FrameBudget` fail (mean=15.92
+  max=755.38 @11.11 ms, a mock cadence artefact) are pre-existing.
+  `semi_play.py`/`self_test_pipeline.py`/`scenario_tests.py --validate` still
+  slice by byte mark (documented follow-up).
+- **Next:** #69 req 1 — gate mock dumps on the now-published `cinemaMode` (host
+  C++ + `build-all.ps1` + reboot the vehicle) so the dump window is
+  gameplay-only; then **#67 step 2** (identify the first-person viewmodel pass)
+  on top of the reproducible capture.
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 39 — 2026-10-16 18:21 (scheduled loop)
 - **Unit:** GH **#68** (the XRSIM iteration vehicle, top priority) — do wake 38's
   stated "Next": give every capture a **per-frame display-branch label** (cinema

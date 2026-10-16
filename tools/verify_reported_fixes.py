@@ -163,6 +163,18 @@ def main():
             "GH #69: XRSIM must label each capture with its display branch and "
             "attribute identical eyes per frame")
 
+    # GH #69 requirement 4: the hook truncates riddick_vr.log on every launch
+    # (logging.cpp: std::ios::out|std::ios::trunc), so a pre-run byte offset is
+    # not a run boundary -- the harness must recover the *current run's* section
+    # by its header or markers logged early in the new run are silently dropped.
+    require("std::ios::out | std::ios::trunc" in
+            (ROOT / "src/hook/logging.cpp").read_text(encoding="utf-8") and
+            "RUN_HEADER" in xrsim_tool and "extract_run_section" in xrsim_tool and
+            "read_fresh_hook_log" in xrsim_tool and
+            "read_fresh_hook_log(LOG_FILE, log_mark)" in xrsim_tool,
+            "GH #69: XRSIM must read the current-run hook-log section (the hook "
+            "truncates its log per launch), not slice by a stale byte offset")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

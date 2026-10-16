@@ -10,7 +10,9 @@ headset), captures BOTH eyes, and asserts:
   * display branch       (per-frame cinema-vs-gameplay label: identical eyes are
                           correct on a cinema screen and only a defect when the
                           frame is 3D gameplay -- GH #69),
-  * interaction state    (scenario markers present in the fresh hook log),
+  * interaction state    (scenario markers present in the fresh hook log; the
+                          log is truncated per launch, so the *current run's*
+                          section is recovered by its header, not a byte offset),
   * comfort rules        (non-black, no green chroma glitch, full-bleed/HUD).
 
 Sim runs set RIDDICKVR_SIM=1 so the hook never injects desktop input (#68).
@@ -59,6 +61,14 @@ FRAME_BUDGET_RE = re.compile(
 DISPLAY_LABEL_RE = re.compile(
     r"frame=(\d+)\s+cinema=([01])\s+left=(\w+)\s+right=(\w+)")
 DISPLAY_LABEL_FILE = "display_branch.log"
+
+# GH #69 requirement 4: `Logger::Initialize` (src/hook/logging.cpp) opens
+# riddick_vr.log with `std::ios::out | std::ios::trunc`, so every game launch
+# rewrites the file from offset 0. A byte offset sampled *before* launch (the old
+# `log_mark` slice) therefore drops the head of the new run -- including markers
+# logged before the previous run's byte length. Split on the last run header so
+# marker checks always see the run that was just captured.
+RUN_HEADER = "=== Riddick VR Log Started at"
 
 
 # ---------------------------------------------------------------- stereo diff
@@ -166,6 +176,47 @@ def read_display_branch_labels(artifacts: Path):
 def frame_signature(path: Path):
     """Cheap 16x16 luma signature used to tell live frames from a static scene."""
     return Image.open(path).convert("L").resize((16, 16)).tobytes()
+
+
+def extract_run_section(text: str) -> str:
+    """Return the section of a hook log written by the *current* run.
+
+    The hook truncates ``riddick_vr.log`` on every launch (see ``RUN_HEADER``),
+    so a byte offset is not a run boundary. Everything after the last
+    ``=== Riddick VR Log Started at ... ===`` header is this run; when no header
+    is present (an appending producer) the whole text is returned.
+    """
+    idx = text.rfind(RUN_HEADER)
+    return text[idx:] if idx >= 0 else text
+
+
+def read_fresh_hook_log(path: Path, log_mark: int = 0) -> str:
+    """Read the hook log's *current-run* text (GH #69 requirement 4).
+
+    Prefers the last run header (truncation-proof). Falls back to the legacy
+    byte mark only for a header-less/appending producer.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return ""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    text = raw.decode(errors="ignore")
+    if RUN_HEADER in text:
+        return extract_run_section(text)
+    return raw[log_mark:].decode(errors="ignore")
+
+
+def marker_summary(checks):
+    """Map each scenario marker to its pass/fail verdict (for the report)."""
+    out = {}
+    for c in checks:
+        name = c.get("check", "")
+        if name.startswith("marker:"):
+            out[name[len("marker:"):]] = bool(c.get("ok"))
+    return out
 
 
 def capture_health_checks(lefts):
@@ -358,7 +409,7 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
     for marker in req:
         hit = marker in fresh_log
         checks.append({"group": "interaction", "check": f"marker:{marker}", "ok": hit,
-                       "detail": "hook log"})
+                       "detail": f"hook log run section ({len(fresh_log)} chars)"})
     # 4. comfort
     if lefts:
         _, sub = comfort_checks(lefts[-1])
@@ -426,7 +477,7 @@ def cmd_evaluate_only(args):
         print(f"[xrsim] evaluate-only: no captures in {artifacts}; nothing to do.")
         return 0
     log_path = Path(args.hook_log) if args.hook_log else LOG_FILE
-    fresh = log_path.read_text(errors="ignore") if log_path.is_file() else ""
+    fresh = read_fresh_hook_log(log_path)
     if not fresh:
         print(f"[xrsim] evaluate-only: no hook log at {log_path}; marker checks will be empty.")
     # GH #69: if a previous live run persisted its host stdout, reuse it so the
@@ -441,6 +492,9 @@ def cmd_evaluate_only(args):
     write_report(report, passed, checks,
                  extra={"mode": "evaluate-only", "artifacts": str(artifacts),
                         "hook_log": str(log_path),
+                        "hook_log_scope": "current-run section" if RUN_HEADER in fresh
+                                          else "whole file",
+                        "markers": marker_summary(checks),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -476,13 +530,18 @@ def main(argv=None):
     host_log, log_mark = run_sim(args, artifacts)
     persist_host_log(artifacts, host_log)  # GH #69: survive the run
 
-    fresh = ""
-    if LOG_FILE.exists():
-        fresh = LOG_FILE.read_bytes()[log_mark:].decode(errors="ignore")
+    # GH #69 requirement 4: the hook truncates its log on launch, so recover the
+    # *current run's* section by its header rather than the pre-run byte mark
+    # (which would slice away markers logged early in the new run).
+    fresh = read_fresh_hook_log(LOG_FILE, log_mark)
     passed, checks = evaluate(args, artifacts, host_log, fresh)
     labels = read_display_branch_labels(artifacts)
     write_report(report, passed, checks,
                  extra={"mode": "run", "artifacts": str(artifacts),
+                        "hook_log": str(LOG_FILE),
+                        "hook_log_scope": "current-run section" if RUN_HEADER in fresh
+                                          else "whole file",
+                        "markers": marker_summary(checks),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

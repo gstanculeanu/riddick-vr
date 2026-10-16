@@ -589,6 +589,8 @@
   "mode": "evaluate-only",
   "artifacts": "tests\\xrsim\\artifacts",
   "hook_log": "F:\\The Chronicles of Riddick - Assault on Dark Athena\\System\\Win32_x86\\riddick_vr.log",
+  "hook_log_scope": "current-run section",
+  "markers": {},
   "host_log": null,
   "display_branch": {}
 }

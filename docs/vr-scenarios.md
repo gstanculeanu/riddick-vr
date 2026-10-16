@@ -64,6 +64,15 @@ exist and are newer than `--frame-since`. A passing marker check proves the hook
 the gesture; it does not replace visual inspection of the frame or in-headset
 comfort testing.
 
+**Caveat (GH #69, ADR-0446):** the hook opens `riddick_vr.log` with
+`std::ios::out | std::ios::trunc` on every launch, so `--since-byte $mark` is
+unreliable whenever the new run's log is shorter than `$mark` (the slice can be
+empty, silently dropping markers). The XRSIM harness now recovers the
+*current-run section* by its `=== Riddick VR Log Started at ... ===` header
+(`tools/xrsim.py::read_fresh_hook_log` / `extract_run_section`); teaching
+`scenario_tests.py --validate` and `semi_play.py` the same extraction is a
+tracked follow-up.
+
 ## Current coverage and limits
 
 The scripted profiles provide deterministic controller poses and velocities,

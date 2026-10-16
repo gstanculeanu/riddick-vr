@@ -260,6 +260,68 @@ def test_selftest_passes(td):
         assert xrsim.cmd_selftest() == 0
 
 
+# ------------------------------------------- run-scoped hook log (GH #69 req 4)
+def _run_log(marker: str, run_ts: str = "2026-10-16 18:22:23") -> str:
+    return (f"{xrsim.RUN_HEADER} {run_ts} ===\n"
+            "[INFO] Riddick VR Hook DLL Attached (PID: 1)\n"
+            f"[INFO] Combat Stance: {marker}\n"
+            "[INFO] OnSwapBuffers: Frame 1\n")
+
+
+def test_extract_run_section_prefers_last_run(td):
+    old = _run_log("STALE MARKER", "2026-10-16 17:00:00")
+    new = _run_log("COMBAT MODE entered (both triggers held)")
+    text = old + new
+    section = xrsim.extract_run_section(text)
+    assert "COMBAT MODE entered" in section, section
+    assert "STALE MARKER" not in section, section
+    # Header-less producer -> whole text (never silently emptied).
+    assert xrsim.extract_run_section("just a line") == "just a line"
+
+
+def test_read_fresh_hook_log_survives_truncation(td):
+    """The hook truncates its log each launch, so the pre-run byte mark can be
+    larger than the new file: the legacy slice would drop the current markers."""
+    log = Path(td) / "riddick_vr.log"
+    log.write_text(_run_log("COMBAT MODE entered (both triggers held)"),
+                   encoding="utf-8")
+    log_mark = 9000  # previous run's size, larger than the truncated new log
+    naive = log.read_bytes()[log_mark:].decode(errors="ignore")
+    assert naive == "", naive  # the defect: markers vanish
+    fresh = xrsim.read_fresh_hook_log(log, log_mark)
+    assert "COMBAT MODE entered" in fresh, fresh
+
+
+def test_read_fresh_hook_log_falls_back_without_header(td):
+    log = Path(td) / "appended.log"
+    log.write_text("HEAD" + "body MARKER tail", encoding="utf-8")
+    assert xrsim.read_fresh_hook_log(log, 4) == "body MARKER tail"
+    assert xrsim.read_fresh_hook_log(Path(td) / "missing.log") == ""
+
+
+def test_marker_check_sees_current_run(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    scen = Path(td) / "s.json"
+    scen.write_text(json.dumps(
+        {"markers": ["COMBAT MODE entered", "RIOT BATON ARC JAB"]}), encoding="utf-8")
+    log = Path(td) / "riddick_vr.log"
+    log.write_text(_run_log("STALE") + _run_log("COMBAT MODE entered (both triggers held)"),
+                   encoding="utf-8")
+    rep = Path(td) / "report.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                         "--report-file", str(rep), "--hook-log", str(log),
+                         "--scenario", str(scen)])
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    assert payload["markers"]["COMBAT MODE entered"] is True, payload["markers"]
+    assert payload["markers"]["RIOT BATON ARC JAB"] is False, payload["markers"]
+    assert payload["hook_log_scope"] == "current-run section", payload
+    assert rc == 1  # the un-fired marker must still fail the run
+
+
 # ------------------------------------------------- display branch (GH #69)
 def _write_labels(art: Path, mapping):
     lines = ["# frame=NNNN cinema=<0|1> left=<ok|err> right=<ok|err>"]
@@ -349,6 +411,10 @@ def main() -> int:
              test_static_capture_is_flagged,
              test_evaluate_only_empty_dir_is_noop,
              test_evaluate_counts_scenario_markers, test_selftest_passes,
+             test_extract_run_section_prefers_last_run,
+             test_read_fresh_hook_log_survives_truncation,
+             test_read_fresh_hook_log_falls_back_without_header,
+             test_marker_check_sees_current_run,
              test_display_branch_labels_parsed,
              test_cinema_identical_eyes_are_skipped_not_failed,
              test_gameplay_identical_eyes_still_fail,
