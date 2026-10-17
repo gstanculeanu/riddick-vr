@@ -2,6 +2,57 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 52 — 2026-10-17 18:17 (scheduled loop)
+- **Unit:** GH **#74** (the critical harness regression filed wake 51) — **Python
+  half reconciled.** Restored the autoloop's `tools/xrsim.py` from `f5fd7f7` as
+  the canonical #68/#69/#71/#72 harness and layered PR #70's conveniences back on
+  (the issue's *preferred* "union" path), so the repo's own
+  **`python tools/test_xrsim.py` is green again**.
+- **Why this unit:** #74 is the top open item and it was a *concrete, verifiable
+  red*, not just a design question: at HEAD `python tools/test_xrsim.py` **failed**
+  (`AssertionError ... "interop_produced_content" in names`) because the pr-70
+  merge replaced `tools/xrsim.py` but **not** its 834-line test — the test asserted
+  an API that no longer existed. `.github/workflows/vr-worker.yml:63` runs exactly
+  this, so `main` was red. A verbatim restore (`git checkout f5fd7f7 --
+  tools/xrsim.py`) was measured to turn it green, confirming the test/impl pair.
+- **Change (tools only; no C++/build/deploy):**
+  - `tools/xrsim.py`: autoloop harness restored + pr-70 union patches —
+    `--game-dir/--game-exe/--host-exe` (+ `RIDDICKVR_GAME_DIR/EXE/HOST_EXE` env),
+    `--scenario-immediate` forwarded, the gameplay-gated `gameplay_only=1`
+    FrameBudget suffix tolerated (p50/p95 remain the asserted fields), stale
+    `frame_*.json` sidecar cleanup, and lazy numpy/Pillow (`image_deps`) with
+    `--require-image-deps`; the docstring records the union and the missing host half.
+  - `tools/test_xrsim.py`: `_args` gains the union attrs + 4 tests (host-exe
+    override, `--scenario-immediate`, `gameplay_only` suffix + stale-host,
+    selftest arg) → **63/63**.
+  - `tests/xrsim/report.json`: reverted to the committed autoloop baseline (the
+    dirty working-tree copy was a HEAD-format run output).
+- **Evidence:** `python tools/test_xrsim.py` **PASS 63/63**; `python tools/xrsim.py
+  --selftest` **PASS** (incl. new `budget_requires_percentiles` /
+  `budget_accepts_gameplay_only_suffix`); all 9 `tools/test_*.py` PASS;
+  `validate_addresses` PASS; `verify_hook_init` PASS; `verify_reported_fixes`
+  PASS. No C++ changed → no `build-all.ps1`/CTest (documented).
+- **Blocker / honest limit (the other half of #74):** `src/host/openxr_manager.cpp`
+  is still the pr-70 version, so the host does **not** emit the p50/p95
+  FrameBudget, the `ComfortVignette` summary, `eye_frames.log` /
+  `display_branch.log`, or the DumpGate content gate (their helper headers +
+  CTests survive). A *live* XRSIM run's `frame_budget` is therefore an honest
+  `frame_budget_reported` FAIL ("stale host build") and the branch / capture-meta
+  / comfort checks skip until the host glue is re-merged.
+  `tools/verify_reported_fixes.py` also still lacks the #68/#71/#72 invariants.
+- **Second finding (pre-existing, not from this change):** `python
+  tools/scenario_tests.py --check` **FAILS** on `tools/scenarios/hands_view.json`
+  (added by `133a2d8` with `"markers": []`; the validator requires non-empty
+  markers, and its markers must appear literally in `src/hook/camera_hook.cpp` —
+  an idle inspection pose has none). Filed as GH **#75**.
+- **Next:** re-merge the **host half** of #74 — start from
+  `git show f5fd7f7:src/host/openxr_manager.cpp` and keep pr-70's
+  `gameplay_only=1` budget gating + cinema-streak/scenario-start + `133a2d8`'s
+  sim-mode window messages; then re-add the #68/#71/#72 invariants to
+  `tools/verify_reported_fixes.py`; then regenerate `tests/xrsim/report.json` live
+  (#73.2).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 51 — 2026-10-17 12:40 (scheduled loop; began 2026-10-16 22:08)
 - **Unit (two parts):** (a) GH **#73** — stop tracking the 26 legacy XRSIM
   eye-capture BMPs (safe, independent cleanup, **landed**); (b) found + filed GH
