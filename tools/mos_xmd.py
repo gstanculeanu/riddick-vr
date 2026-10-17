@@ -182,6 +182,15 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  the load-time hierarchy builder ``FUN_1001e040`` walks the tree.
                  Validated by ``--check`` on all 249 shipped skeletons.
 
+                 The name ``NODES`` is **not** exclusive to the skeleton: the
+                 shipped 2009 *Assault on Dark Athena* models also carry a 12-byte
+                 ``NODES`` chunk under a ``BOXTREE`` bounding-volume node, which
+                 precedes the skeleton in node-table order. ``skeleton()`` and
+                 ``skeleton_node()`` therefore select the ``SKELETON`` child (or
+                 the ``NODES`` with a ``NODEINDICES`` sibling / 34-byte tiling)
+                 rather than the first ``NODES``; a container with no qualifying
+                 chunk yields ``None`` (GH #84).
+
   KEYS         : a flat **string metadata map** (build provenance, texture and
                  render options) — **not** animation. The model reader
                  ``FUN_10083060`` calls ``CDataFile::GetNext(...,"KEYS")`` and
@@ -1112,10 +1121,66 @@ class Xmd:
                 return n
         return None
 
+    def node_parents(self) -> dict[int, int]:
+        """Map every node offset to its parent node offset.
+
+        The container stores only ``first_child``/``next_sibling`` links, so a
+        node's parent is derived by walking each node's child chain. The root
+        node (offset 0) has no entry."""
+        parents: dict[int, int] = {}
+        for n in self.nodes:
+            child = n.first_child
+            seen: set[int] = set()
+            while child and child in self.by_offset and child not in seen:
+                seen.add(child)
+                parents.setdefault(child, n.offset)
+                child = self.by_offset[child].next_sibling
+        return parents
+
+    def skeleton_node(self) -> Node | None:
+        """The container's *skeleton* ``NODES`` chunk, or ``None``.
+
+        :meth:`chunk` returns the first node named ``NODES`` in node-table order,
+        but the shipped 2009 *Assault on Dark Athena* models frequently place a
+        ``NODES`` chunk under a ``BOXTREE`` bounding-volume node (12-byte
+        records) ahead of the ``SKELETON`` array, so the first match is not the
+        skeleton (GH #84). A ``NODES`` is judged the skeleton, strongest signal
+        first, when its parent is ``SKELETON``, when its sibling is
+        ``NODEINDICES``, or when its payload tiles ``NODE_ENTRY_LEN`` (34) records
+        with the chunk header count agreeing. ``None`` means no ``NODES``
+        qualifies, i.e. the container has no skeleton (a static prop)."""
+        candidates = [n for n in self.nodes if n.name == "NODES"]
+        if not candidates:
+            return None
+        parents = self.node_parents()
+
+        def rank(n: Node) -> int:
+            parent = self.by_offset.get(parents.get(n.offset, 0))
+            if parent is not None and parent.name == "SKELETON":
+                return 3
+            sib = self.by_offset.get(n.next_sibling) if n.next_sibling else None
+            if sib is not None and sib.name == "NODEINDICES":
+                return 2
+            if n.data_size % NODE_ENTRY_LEN == 0 and (
+                    n.count == 0 or n.data_size == n.count * NODE_ENTRY_LEN):
+                return 1
+            return 0
+
+        best = max(candidates, key=rank)
+        return best if rank(best) > 0 else None
+
+    def _skeleton_indices_node(self, nodes_node: Node) -> Node | None:
+        """The ``NODEINDICES`` sibling of a skeleton ``NODES`` (else the first)."""
+        if nodes_node.next_sibling:
+            sib = self.by_offset.get(nodes_node.next_sibling)
+            if sib is not None and sib.name == "NODEINDICES":
+                return sib
+        return self.chunk("NODEINDICES")
+
     def geometry_summary(self):
         tri = self.chunk("TRIANGLES")
         boned = self.chunk("BONEDEFORM")
-        nodes = self.chunk("NODES")
+        nodes = self.skeleton_node()
         verts = self.chunk("VERTEXFRAMES")
         surf = self.chunk("SURFACES")
         summary = {
@@ -1293,7 +1358,7 @@ class Xmd:
         # TVERTEXFRAMES/TRIANGLES/BONEDEFORM cluster must agree - triangle
         # indices inside the vertex range, UV/vertex count agreement, skinning
         # vertex count agreement, and every referenced bone inside the skeleton.
-        nodes_chunk = self.chunk("NODES")
+        nodes_chunk = self.skeleton_node()
         bone_total = nodes_chunk.count if nodes_chunk else 0
         meshes = self.cluster_meshes()
         for c in meshes:
@@ -1574,12 +1639,14 @@ class Xmd:
     def skeleton(self) -> Skeleton | None:
         """Decode the ``SKELETON`` ``NODES``/``NODEINDICES`` sub-tree.
 
-        Returns ``None`` when the file has no ``NODES`` chunk (e.g. a static
-        prop). Mirrors MXR.dll ``FUN_100219d0`` (see :func:`decode_skeleton`)."""
-        nd = self.chunk("NODES")
+        Returns ``None`` when the file has no *skeleton* ``NODES`` chunk (a
+        static prop, or a ``BOXTREE`` ``NODES`` that is not a skeleton -- see
+        :meth:`skeleton_node`, GH #84). Mirrors MXR.dll ``FUN_100219d0`` (see
+        :func:`decode_skeleton`)."""
+        nd = self.skeleton_node()
         if nd is None:
             return None
-        ni = self.chunk("NODEINDICES")
+        ni = self._skeleton_indices_node(nd)
         return decode_skeleton(
             self.data, nd.data_offset, nd.data_size, nd.count,
             ni.data_offset if ni is not None else None,

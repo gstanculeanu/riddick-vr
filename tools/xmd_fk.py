@@ -459,10 +459,14 @@ def check(root):
     for path in _iter_models(root):
         try:
             x = Xmd(path)
+            # A per-file skeleton problem must be *reported*, not abort the
+            # whole corpus walk (GH #84): skeleton() returns None for a static
+            # prop / BOXTREE NODES, but still raises on a genuine 34-byte count
+            # mismatch that --check is meant to surface.
+            sk = x.skeleton()
         except (XmdError, GeometryError) as e:
             problems.append(f"{path}: {e}")
             continue
-        sk = x.skeleton()
         if sk is None:
             continue
         totals["models"] += 1

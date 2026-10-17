@@ -143,6 +143,39 @@ def test_check_clean_and_empty(tmp_dir):
     assert problems == [] and totals["models"] == 0, (problems, totals)
 
 
+def test_check_skips_boxtree_prop(tmp_dir):
+    # GH #84: a static prop whose only NODES is a 12-byte BOXTREE chunk is
+    # skipped (no skeleton) instead of aborting the whole corpus walk.
+    d = os.path.join(tmp_dir, "boxtree-corpus")
+    os.makedirs(d, exist_ok=True)
+    skel = tm._write_tmp(te._single_cluster(), d)
+    prop = tm._write_tmp(tm._boxtree_prop_container(), d)
+    try:
+        problems, totals = xmd_pose.check(d)
+        assert problems == [], problems
+        assert totals["models"] == 1 and totals["clusters"] == 1, totals
+    finally:
+        os.remove(skel)
+        os.remove(prop)
+
+
+def test_check_reports_skeleton_size_mismatch(tmp_dir):
+    # GH #84: a genuine 34-byte count mismatch is still *reported* per file --
+    # not swallowed, and not allowed to abort the corpus walk.
+    d = os.path.join(tmp_dir, "bad-skel-corpus")
+    os.makedirs(d, exist_ok=True)
+    blob = tm._skeleton_container(
+        tm._nodes_payload(tm._basic_skeleton_records()[:1]), 3,
+        tm._node_indices([1, 2]))
+    path = tm._write_tmp(blob, d)
+    try:
+        problems, totals = xmd_pose.check(d)
+        assert any("NODES size" in p for p in problems), problems
+        assert totals["models"] == 0, totals
+    finally:
+        os.remove(path)
+
+
 def test_main_cli(tmp_dir):
     path = tm._write_tmp(te._single_cluster())
     try:
@@ -173,7 +206,8 @@ def test_main_requires_input(tmp_dir):
 def main() -> int:
     tests = (test_bone_centroids_and_pose, test_bind_table_tree,
              test_cluster_relation_same_and_shifted, test_analyze_relations,
-             test_check_clean_and_empty, test_main_cli,
+             test_check_clean_and_empty, test_check_skips_boxtree_prop,
+             test_check_reports_skeleton_size_mismatch, test_main_cli,
              test_main_requires_input)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

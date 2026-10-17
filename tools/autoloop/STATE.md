@@ -2,6 +2,82 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 73 — 2026-10-18 01:48 (scheduled loop)
+- **Unit:** GH **#84** — `Xmd.skeleton()` now selects the **skeleton** `NODES`
+  (child of `SKELETON`, or the `NODES` with a `NODEINDICES` sibling / 34-byte
+  tiling) instead of the *first* `NODES`, and returns `None` for a static prop
+  instead of raising; the two corpus checks also wrap `skeleton()` so one bad file
+  can no longer abort the walk. `tools/mos_xmd.py` + `xmd_pose.py` + `xmd_fk.py` +
+  tests + `docs/adr/0474-xmd-skeleton-nodes-selection.md`; **no C++ change, no
+  build, no deploy, no live/input run**.
+- **Why this unit:** it is the explicit "Next" of wake 72 and the last *locally*
+  known red on the model tooling; every `xmd_*` tool and the native-hand bake path
+  (GH #55/#58/#61) goes through `skeleton()`.
+- **Root cause (measured, read-only):** `chunk("NODES")` returns the first `NODES`
+  in node-table order, but the shipped 2009 models place a 12-byte `NODES` under a
+  **`BOXTREE`** bounding-volume node *ahead of* the `SKELETON` array, so
+  `decode_skeleton` raised `NODES size 228 != 19 * 34` and (because
+  `xmd_pose.check`/`xmd_fk.check` called `skeleton()` outside their `try/except`)
+  aborted the whole corpus walk at `CoordSys.xmd`.
+- **Decisive guard (measured both installs):** across the 2004 install
+  (`C:\Program Files (x86)\Starbreeze Studios\Riddick EFBB\Content\Models`, 631
+  files: 873 `NODES`, **all** `SKELETON`-parented + `NODEINDICES` sibling + 34 B)
+  and the 2009 install (`F:\The Chronicles of Riddick - Assault on Dark Athena\
+  Content\Models`, 1285 files: 1504 skeleton `NODES` + 1411 `BOXTREE` `NODES`,
+  all 12 B) there are **0** `NODES` that lack *both* a `SKELETON` parent and a
+  `NODEINDICES` sibling yet tile 34 B — so the tiling fallback can never out-rank a
+  real skeleton, and `chunk("NODES")` and the new selection pick the same node on
+  every 2004 model.
+- **Install-identity correction to GH #84 / ADR-0473:** the "1285 files / 731 bare
+  `NODES` / `CoordSys.xmd`" survey is the **2009** install on `F:` (the XRSIM
+  shadow's source root), **not** the 2004 `C:` install the tools default to. The
+  2004 corpus check was therefore **never** red: `xmd_pose --check` = 268 models /
+  3454 clusters / **0** problems, `xmd_fk --check` = 0 problems (re-measured this
+  wake, read-only).
+- **Change:** `Xmd.node_parents()` (offset→parent from the child links),
+  `Xmd.skeleton_node()` (ranked selection: `SKELETON` parent 3 > `NODEINDICES`
+  sibling 2 > 34-byte tiling 1 > none), `Xmd._skeleton_indices_node()`;
+  `skeleton()`, `geometry_summary()["skeleton_node_count"]` and `validate()`'s
+  `bone_total` all use it. A genuine 34-byte count mismatch still raises
+  (rank-2 selection → `decode_skeleton`), now *reported* per file by the corpus
+  checks instead of aborting them. Tests: `test_boxtree_nodes_is_not_a_skeleton`,
+  `test_skeleton_selects_skel_nodes_over_boxtree` (a `BOXTREE` `NODES` ahead of a
+  real `SKELETON` pair; asserts `chunk("NODES")` still returns the 12-byte trap
+  while `skeleton_node()` skips it), `test_check_skips_boxtree_prop` (pose + fk),
+  `test_check_reports_skeleton_size_mismatch` (pose).
+- **Evidence (offline):** `test_mos_xmd.py` / `test_xmd_pose.py` / `test_xmd_fk.py`
+  PASS; full **`tools/test_*.py` = 11/11 PASS**; `xrsim --selftest`,
+  `verify_reported_fixes` (#40..#81), `verify_hook_init`, `validate_addresses`
+  (result PASS), `verify_test_artifacts`, `scenario_tests.py --check` PASS. **No
+  C++ changed → no `build-all`/CTest** (documented).
+- **Evidence (read-only corpus, install untouched):** 2004 `C:` → walk green
+  (**0** problems); 2009 `F:` → the walk now **completes** (was an immediate
+  `GeometryError` abort) and reports **4566** problems.
+- **New decisive finding → filed GH #85 (out of this wake's scope):** all 4566 are
+  one kind — `VERTEXFRAMES version 0x… not decodable (only 0x202-0x204)` — across
+  479 files. Measured on every `VERTEXFRAMES` node: 2004 = 4662 nodes, all
+  `u32@+0 = 0x1` (leading frame count) + `u32@+4 = 0x204`; 2009 = 8805 nodes,
+  **8645** with `u32@+0 = 0x205` (a *frame version*, no leading count) + float
+  bounds. Reproduced **independently of `skeleton()`**:
+  `x.vertex_frames(xmd_export.vertex_frame_nodes(x)[0])` on
+  `Characters\Abbot_rcap\abbot_rcap.xmd` raises `VERTEXFRAMES version 0x409cb926`.
+  The 2009 models also use a different hierarchy (`CLUSTERDATA` → `CLUSTERS` →
+  `VERTEXBUFFERS` → `VERTEXBUFFER` → …, plus `SOLIDS`) vs 2004 `CLUSTERS` →
+  `CLUSTER`. So `--check` on the 2009 target install stays red, but now for a
+  *decidable, named* reason rather than an abort.
+- **Blocker / honest limit:** this fixes the `NODES` selection and makes the corpus
+  walk decidable; it does **not** decode the 2009 assets (GH #85 needs REA of the
+  2009 loader for the `0x205` layout), and the tools still default
+  `DEFAULT_GAME_DIR` to the 2004 install, which does not match the README's stated
+  2009 target. No live/sim run this wake (nothing player-visible changed).
+- **Next:** (1) GH #85 — REA the 2009 loader (`MCCDyn`/`MXR` equivalent) for the
+  `0x205` `VERTEXFRAMES` layout + the `CLUSTERDATA`/`VERTEXBUFFERS` hierarchy, then
+  re-grade `--check` on `F:`; (2) decide whether `DEFAULT_GAME_DIR` should point at
+  the 2009 target; (3) the deploy-gated ladder is otherwise unchanged and
+  live-capable via `--shadow-install` (#72 req 1 latch A/B, #67 step 3, #68 req 5,
+  #79 hook half, #76 step 1); (4) GH #83 (single-instance scheduler guard) still
+  open.
+
 ## Wake 72 — 2026-10-18 01:34 (scheduled loop)
 - **Unit:** GH **#82** — the two red `test_xmd_*` are fixed by giving the
   synthetic `.xmd` models an **isolated temp directory**, and the real root cause

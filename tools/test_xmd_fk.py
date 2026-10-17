@@ -372,6 +372,22 @@ def test_pose_from_sequence():
     assert "QUATERNIONS" in joined, notes
 
 
+def test_check_skips_boxtree_prop(tmp_dir):
+    # GH #84: a static prop whose only NODES is a 12-byte BOXTREE chunk is
+    # skipped (no skeleton) instead of aborting the whole corpus walk.
+    d = os.path.join(tmp_dir, "boxtree-corpus")
+    os.makedirs(d, exist_ok=True)
+    skel = tm._write_tmp(te._single_cluster(), d)
+    prop = tm._write_tmp(tm._boxtree_prop_container(), d)
+    try:
+        problems, totals = xmd_fk.check(d)
+        assert problems == [], problems
+        assert totals["models"] == 1, totals
+    finally:
+        os.remove(skel)
+        os.remove(prop)
+
+
 def test_cli(tmp_dir):
     path = tm._write_tmp(te._single_cluster())
     obj = os.path.join(tmp_dir, "posed.obj")
@@ -418,7 +434,8 @@ def main() -> int:
     tests = (test_quat_and_mat3, test_local_from_bind, test_world_composition,
              test_bind_is_identity_end_to_end, test_bind_check_is_tautological,
              test_pose_rotates_about_bind,
-             test_skin_weighted_sum, test_pose_from_sequence, test_cli,
+             test_skin_weighted_sum, test_pose_from_sequence,
+             test_check_skips_boxtree_prop, test_cli,
              test_cli_requires_input, test_cli_anim_errors)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

@@ -857,6 +857,77 @@ def test_skeleton_detects_parent_table_mismatch(tmp_dir):
         os.remove(path)
 
 
+# --------------------------------------------------------------------------- #
+# GH #84: "NODES" is not exclusive to the skeleton. The 2009 Assault on Dark
+# Athena models put a 12-byte NODES under BOXTREE ahead of the SKELETON array,
+# so `chunk("NODES")` used to pick the wrong one.
+# --------------------------------------------------------------------------- #
+def _boxtree_nodes_payload(records=19) -> bytes:
+    """A BOXTREE bounding-volume ``NODES``: 12 bytes per record, not 34."""
+    return b"\x00" * (records * 12)
+
+
+def _boxtree_prop_container() -> bytes:
+    """EXTENDEDMODEL -> BOXTREE -> NODES (12-byte records); no SKELETON."""
+    stride = mos_xmd.NODE_RECORD_LEN
+    payload = _boxtree_nodes_payload()
+    nodes = [
+        ("EXTENDEDMODEL", 0, stride * 2, 0, 0, 0),   # @0x30, child BOXTREE
+        ("BOXTREE", 0, stride * 3, 0, 0, 0),          # @0x60, child NODES
+        ("NODES", 0, 0, len(payload), 19, 0),         # @0x90 (BOXTREE child)
+    ]
+    return build_container(nodes, [payload])
+
+
+def _boxtree_plus_skeleton_container() -> bytes:
+    """A BOXTREE NODES *ahead of* a real SKELETON NODES/NODEINDICES pair."""
+    stride = mos_xmd.NODE_RECORD_LEN
+    bt = _boxtree_nodes_payload()
+    sk = _nodes_payload(_basic_skeleton_records())
+    idx = _node_indices([1, 2])
+    nodes = [
+        ("EXTENDEDMODEL", 0, stride * 2, 0, 0, 0),   # @0x30, child BOXTREE
+        ("BOXTREE", 0, stride * 3, 0, 0, 0),          # @0x60, child NODES
+        ("NODES", stride * 4, 0, len(bt), 19, 0),     # @0x90 BOXTREE NODES
+        ("SKELETON", 0, stride * 5, 0, 0, 0),         # @0xC0, child NODES
+        ("NODES", stride * 6, 0, len(sk), 4, 0),      # @0xF0 skeleton NODES
+        ("NODEINDICES", 0, 0, len(idx), len(idx) // 2, 0),  # @0x120
+    ]
+    return build_container(nodes, [bt, sk, idx])
+
+
+def test_boxtree_nodes_is_not_a_skeleton(tmp_dir):
+    path = _write_tmp(_boxtree_prop_container())
+    try:
+        x = mos_xmd.Xmd(path)
+        # The 12-byte BOXTREE NODES must not be decoded as a skeleton.
+        assert x.skeleton() is None
+        assert x.skeleton_node() is None
+        assert x.validate() == [], x.validate()
+        g = x.geometry_summary()
+        assert g["skeleton_node_count"] == 0 and g["has_skinning"] is False, g
+    finally:
+        os.remove(path)
+
+
+def test_skeleton_selects_skel_nodes_over_boxtree(tmp_dir):
+    path = _write_tmp(_boxtree_plus_skeleton_container())
+    try:
+        x = mos_xmd.Xmd(path)
+        # The trap: `chunk` returns the first NODES (the 12-byte BOXTREE one)...
+        assert x.chunk("NODES").data_size == len(_boxtree_nodes_payload())
+        # ...but skeleton selection skips it for the SKELETON child.
+        nd = x.skeleton_node()
+        assert nd.data_size == 4 * mos_xmd.NODE_ENTRY_LEN, nd.data_size
+        sk = x.skeleton()
+        assert len(sk.nodes) == 4 and sk.node_indices == (1, 2), sk.as_dict()
+        assert x.validate() == [], x.validate()
+        g = x.geometry_summary()
+        assert g["skeleton_node_count"] == 4 and g["skeleton_indices"] == 2, g
+    finally:
+        os.remove(path)
+
+
 def _misc_payload(version=0x102, flags=0, surface_index=0, reserved=0,
                   box_min=(0.0, 0.0, 0.0), box_max=(100.0, 200.0, 300.0),
                   trailer=0.0, tail=None) -> bytes:
@@ -1303,6 +1374,8 @@ def main() -> int:
              test_skeleton_child_table,
              test_skeleton_detects_child_range_overrun,
              test_skeleton_detects_parent_table_mismatch,
+             test_boxtree_nodes_is_not_a_skeleton,
+             test_skeleton_selects_skel_nodes_over_boxtree,
              test_cluster_info_roundtrip,
              test_cluster_info_flags_match_uv,
              test_cluster_info_detects_flags_uv_mismatch,
