@@ -1007,8 +1007,16 @@ bool VRHandRenderer::DrawNativeHand(HandSide side, const HandCueTint& cue) {
     }
 
     const char* name = (side == HandSide::Left) ? "Riddick_LeftArm" : "Riddick_RightArm";
+    // GH #68 diagnostics: one-time per-hand line so a simulator run tells us
+    // whether the native mesh actually drew or fell back to procedural.
+    static bool s_nativeLogged[2] = { false, false };
+    const int logIdx = (side == HandSide::Left) ? 0 : 1;
     const NativeHandMesh* mesh = FindNativeHandMesh(name);
     if (!mesh || !mesh->vertices || !mesh->indices || mesh->index_count == 0 || mesh->vertex_count == 0) {
+        if (!s_nativeLogged[logIdx]) {
+            VR_LOG_INFO("NativeHand: %s SKIP (mesh missing/empty)", (side == HandSide::Left) ? "LEFT" : "RIGHT");
+            s_nativeLogged[logIdx] = true;
+        }
         return false;
     }
 
@@ -1035,6 +1043,10 @@ bool VRHandRenderer::DrawNativeHand(HandSide side, const HandCueTint& cue) {
                                                 metersPerUnit);
     }
     if (!placement.valid) {
+        if (!s_nativeLogged[logIdx]) {
+            VR_LOG_INFO("NativeHand: %s SKIP (placement invalid)", (side == HandSide::Left) ? "LEFT" : "RIGHT");
+            s_nativeLogged[logIdx] = true;
+        }
         return false;
     }
     // GH #64: on-headset orientation correction (degrees, applied hand-local).
@@ -1119,6 +1131,12 @@ bool VRHandRenderer::DrawNativeHand(HandSide side, const HandCueTint& cue) {
         // Keep the interaction-glow boxes and the other hand's primitives
         // untextured (state is fully restored by glPopAttrib regardless).
         s_gl.glDisable(GL_TEXTURE_2D);
+    }
+    if (!s_nativeLogged[logIdx]) {
+        VR_LOG_INFO("NativeHand: %s DRAWN verts=%u tris=%u posed=%d textured=%d",
+                    (side == HandSide::Left) ? "LEFT" : "RIGHT",
+                    mesh->vertex_count, mesh->index_count / 3, posed ? 1 : 0, textured ? 1 : 0);
+        s_nativeLogged[logIdx] = true;
     }
     return true;
 }
