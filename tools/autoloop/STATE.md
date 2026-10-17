@@ -2,6 +2,70 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 58 — 2026-10-17 20:10 (scheduled loop)
+- **Unit:** filed **GH #76** (native stereo is a shifted monoscopic capture — epic
+  #57 **definition-of-done item 1**, previously untracked: the epic table listed it
+  as *"new"* and no issue existed) and landed its first, fully offline slice: the
+  XRSIM harness now **measures the structure of the stereo disparity** instead of
+  only asserting that one exists. Tooling + docs + report only; **no C++/asset
+  change, no build, no deploy**.
+- **Why this unit:** every player-visible ladder item (#67 step 3, #64, #61, #65,
+  #62, #63) is code-complete and blocked on one hook deploy this loop must not
+  perform, and #46/#52/#53/#54 are landed; #68 (iteration vehicle) is the top
+  open item and the prompt says to *extend it to cover whatever you are fixing*.
+  Auditing the epic's gap list found the single biggest VR gap untracked.
+- **Decisive finding (read-only + live, not inferred):** the gameplay stereo is
+  **one global horizontal shift of a monoscopic capture**. `stereo_renderer.cpp`
+  `:811-812` captures the backbuffer once and blits it into both eye FBOs; `:932-960`
+  says verbatim *"monoscopic capture has no IPD parallax (both eyes blit the same
+  backbuffer). Apply a small half-IPD horizontal shift per eye"* — the only per-eye
+  difference is `+/- (halfIpdPx + comfortPx)` on the blit source rect. Measured:
+  a 4×4 interior tile re-alignment finds the **same** shift in **every** textured
+  tile (spread **0 px**) on every bright gameplay frame — prior committed captures
+  all `-92` / all `-56` full-res px; a fresh live `--reach-gameplay` re-run the same
+  (`shift-only`). A genuine per-eye view would have depth-varying per-tile shifts.
+- **Change:**
+  - `tools/xrsim.py`: `tile_disparities()` (per-tile local re-alignment; the grid
+    is **inset** by the search radius — an earlier version placed tiles flush to
+    the edges, where only one shift direction is in bounds and the constraint faked
+    a spread); `classify_stereo_kind()` (`parallax` >= 6 px spread / `shift-only`
+    <= 2 / `mono` / `unknown`, reusing the ADR-0454 contrast-confidence rule so a
+    dark frame is refused, never mis-called); `stereo_kind_stats()` (run verdict
+    over the **measurable** gameplay frames; cinema is deliberately flat, GH #69);
+    the verdict is the new `stereo_kind` report key; new `--require-parallax` flag
+    (and scenario `"require_parallax": true`) adds the graded check
+    `stereo_parallax_present`. **Default off** — the shift is the documented
+    interim, so a default run's verdict is byte-for-byte unchanged.
+  - `tools/test_xrsim.py`: +8 tests (shift-only, parallax, mono, flat→unknown, the
+    aggregation/dedupe/unknown rules, the opt-in gate end-to-end, the scenario
+    field, the report key); 2 new `--selftest` image cases.
+  - `tools/verify_reported_fixes.py`: a GH #76 invariant; summary now `#75-76`.
+  - `docs/adr/0461-stereo-is-a-shifted-monoscopic-capture.md` (new) + a
+    `docs/vr-scenarios.md` note.
+  - `tests/xrsim/report.json`: regenerated from a live `--reach-gameplay
+    --duration 60 --interval 60 --downscale 4` run (mode=run, **60 checks**, 10
+    gameplay frames) — it now carries `stereo_kind: {kind: shift-only,
+    measurable_frames: 4, spread_px_max: 0}`.
+- **Evidence:** live run reached gameplay (10 frames, 0 blank) and the only FAIL is
+  the known sim-install `frame_budget` (p50 ~104 ms at the sim's ~10 FPS); all
+  stereo gates PASS yet `stereo_kind = shift-only` — i.e. the old gates could not
+  see the gap, which is the point. `--require-parallax` on those captures **fails**
+  naming the shift; it passes on a synthetic per-column disparity ramp. All 10
+  `tools/test_*.py` + `xrsim.py --selftest` + `verify_test_artifacts` +
+  `verify_hook_init` + `validate_addresses` + `verify_reported_fixes` +
+  `scenario_tests.py --check` (8 test cases / 12 scripted / 1 observation-only)
+  PASS. No C++ changed → no `build-all` run.
+- **Blocker / honest limit:** the *renderer* is not fixed here — GH #76 needs
+  per-eye view/projection (or a depth-based reprojection), which is a hook change
+  validated by one deploy (and a headset for the visual). Also honest: on this
+  scripted run only 4 of 10 gameplay frames are bright enough to measure the
+  disparity structure (the rest are dark → `unknown`), so the run verdict is taken
+  over the measurable frames and the count is reported.
+- **Next:** GH #76 step 1 (per-eye camera offset / two 3D renders) is the highest
+  value now that it is tracked+measured, but it needs the deploy. Otherwise the
+  remaining offline candidates are thin; the ladder is still deploy-gated
+  (#67 step 3, #72 req 1 A/B, #68 req 5 snap-turn/HUD).
+
 ## Wake 57 — 2026-10-17 19:49 (scheduled loop)
 - **Unit:** GH **#73 requirement 3** — add a guard so the large XRSIM eye-capture
   BMPs cannot be silently re-added to git, and record the decision in an ADR.
