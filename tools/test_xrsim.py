@@ -392,6 +392,9 @@ def _args(**kw):
         report_file=kw.get("report_file"), hook_log=kw.get("hook_log"),
         dump_branch=kw.get("dump_branch", "gameplay"),
         reach_gameplay=kw.get("reach_gameplay", False), duration=kw.get("duration"),
+        game_dir=kw.get("game_dir"), game_exe=kw.get("game_exe"),
+        host_exe=kw.get("host_exe"),
+        scenario_immediate=kw.get("scenario_immediate", False),
         evaluate_only=True, selftest=False)
 
 
@@ -645,6 +648,43 @@ def test_build_host_cmd_defaults_to_gameplay_only(td):
 def test_build_host_cmd_any_branch_keeps_legacy_cadence(td):
     cmd = xrsim.build_host_cmd(_args(dump_branch="any"), Path(td) / "art")
     assert "--dump-gameplay-only" not in cmd, cmd
+
+
+# ------------------------------------------- #74 union (branch features kept)
+def test_build_host_cmd_honours_host_exe_override(td):
+    """GH #74 union: the branch's --host-exe override is preserved alongside the
+    autoloop harness (a second #68 implementation had to be reconciled)."""
+    cmd = xrsim.build_host_cmd(_args(host_exe=r"C:\tmp\host.exe"), Path(td) / "art")
+    assert cmd[0] == r"C:\tmp\host.exe", cmd
+
+
+def test_build_host_cmd_forwards_scenario_immediate(td):
+    """GH #74 union: the branch's --scenario-immediate is preserved."""
+    assert "--scenario-immediate" not in xrsim.build_host_cmd(_args(), Path(td) / "art")
+    cmd = xrsim.build_host_cmd(_args(scenario_immediate=True), Path(td) / "art")
+    assert "--scenario-immediate" in cmd, cmd
+
+
+def test_parse_budget_tolerates_gameplay_only_suffix(td):
+    """GH #74 union: the branch's gameplay-gated FrameBudget line still parses,
+    and p50/p95 remain the asserted fields (GH #68 req 2)."""
+    ok, rec = xrsim.parse_budget(
+        "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 "
+        "budget_ms=11.11 p50_ms=5.0 p95_ms=7.0 gameplay_only=1", 11.11)
+    assert ok and rec["p50_ms"] == 5.0 and rec["p95_ms"] == 7.0, rec
+    # A gameplay_only line *without* percentiles is still a stale-host FAIL.
+    ok2, rec2 = xrsim.parse_budget(
+        "FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 "
+        "budget_ms=11.11 gameplay_only=1", 11.11)
+    assert not ok2 and rec2["check"] == "frame_budget_reported", rec2
+
+
+def test_cmd_selftest_requires_image_deps_only_when_asked(td):
+    """The pure-logic selftest runs without numpy/Pillow; --require-image-deps
+    turns a skipped image case into a failure (branch's numpy-free selftest)."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.cmd_selftest() == 0
+        assert xrsim.cmd_selftest(require_image_deps=False) == 0
 
 
 # ------------------------------------------- reach gameplay (GH #71 req 1)
@@ -967,6 +1007,10 @@ def main() -> int:
              test_build_host_cmd_defaults_to_gameplay_only,
              test_build_host_cmd_any_branch_keeps_legacy_cadence,
              test_build_host_cmd_reach_gameplay_is_unlimited,
+             test_build_host_cmd_honours_host_exe_override,
+             test_build_host_cmd_forwards_scenario_immediate,
+             test_parse_budget_tolerates_gameplay_only_suffix,
+             test_cmd_selftest_requires_image_deps_only_when_asked,
              test_active_rect_fill_reads_barsan,
              test_gameplay_capture_stats_excludes_blank_and_cinema,
              test_reach_gameplay_check_uses_full_bleed_signal,
