@@ -2,6 +2,83 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 62 — 2026-10-17 21:29 (scheduled loop)
+- **Unit:** GH **#79 host half** (wake 61's stated Next) — the XRSIM capture now
+  reads each shared eye texture **once**, as a back-to-back pair, and runs both
+  the content gate and the BMP write over that one private copy; the sampler and
+  the BMP layout are pure helpers pinned by a new CTest. Host C++ + tests + tools
+  + docs; **no hook change, no asset change, no deploy**.
+- **Why this unit:** #79 is the newest open item and its *host* half is the one
+  the issue explicitly offers as loop-safe (`Alternatively/additionally
+  host-side`), unlike the deploy-gated `WaitForFrameConsumed`. It removes the
+  mechanism that made the gate probe and the saved BMP disagree (frame 540) and
+  that read the two eyes at different times (frame 810's global vertical offset,
+  frame 1770's intra-image tear).
+- **Change:**
+  - `src/host/eye_sample.h` (new, pure): `SampleEyeImage` = the full-image mean
+    luma + the 16x16 FNV-1a frozen-page signature, extracted from the removed
+    `SampleEyeContent` and now run over the staged copy; honours a padded
+    `RowPitch`.
+  - `src/host/bmp_writer.h` (new, pure): `BmpFileHeader` (54 bytes,
+    `static_assert`), `MakeBmpHeader` (top-down), `ConvertRgbaRowToBgra`.
+  - `src/host/openxr_manager.{h,cpp}`: `StagedEyeImages` + `StageEyePair` —
+    create both private staging textures, `CopyResource` left then right
+    *adjacent*, then map both; `WriteBmpFromMapped` writes from the mapped
+    private rows. `SaveTextureToBMP` (its own per-eye staging) is deleted. The
+    dump block stages once (`haveStaged`), samples + saves from it, and reports
+    `Capture skipped frame=N (eye staging failed)` if the pair cannot be staged
+    instead of falling back to a second read. The `ArtifactCapture capture_ms`
+    line (#78) now covers the staging-failure case too.
+  - `tests/eye_capture_tests.cpp` (new CTest `eye_capture_helpers`, x86 + x64):
+    header layout/orientation, the R/B row swizzle, padded-`RowPitch` mean luma,
+    alpha-invariance, signature determinism + change, and that the saved row's
+    texels are the sampled row's texels.
+  - `tools/verify_reported_fixes.py`: the GH #72 req-2 invariant updated to
+    `StageEyePair`/`SampleEyeImage`, plus a GH #79 invariant (staging, the two
+    adjacent copies, no `SampleEyeContent(`/`SaveTextureToBMP(`, the CTest
+    wired); summary now `#75-79`.
+  - `docs/adr/0465-eye-capture-single-staged-pair.md` (new) + ADR-0449 amended +
+    `src/host/README.md` + `docs/vr-scenarios.md`.
+- **Evidence (offline):** `build-all.ps1 -Config Release` OK (**no `-Deploy`**);
+  CTest **21/21 PASS on x64 AND x86** (new `eye_capture_helpers`); all 11
+  `tools/test_*.py` PASS; `xrsim.py --selftest` PASS; `verify_test_artifacts` +
+  `verify_hook_init` + `validate_addresses` + `verify_reported_fixes` +
+  `scenario_tests.py --check` PASS.
+- **Evidence (live, allowed exception `RIDDICKVR_SIM=1`, fresh
+  `dist\riddickvr-host.exe`; in-game hook stale at 12:47 as expected):** the new
+  path was exercised end-to-end with `--dump-branch any --frames 1500
+  --interval 60 --downscale 4` — **26 captures written from the staged pair**
+  (0 `eye staging failed`), `capture_metadata_present` PASS (26 transforms, eye
+  views=sim, dev 0.009°), and a decoded BMP is valid (`BM`, 26 837 046 =
+  54 + 2496*2688*4, off 54, w 2496, h -2688, bpp 32). `capture_ms` for the new
+  path: **n=26 min 83.6 mean 92.7 max 132.1 ms**, vs wake 61's old path
+  **n=83 min 104.6 mean 112.0 max 153.9 ms** (same 26.8 MB/eye write; content
+  does not change the capture cost, the intervals differ 60 vs 30).
+- **Blocker / honest limit (the loud one):** I could **not** re-measure the
+  gameplay-only window the issue asks for, because **this session's sim no longer
+  reaches live gameplay at all**: 4 `--reach-gameplay` runs (90/120/180/240 s,
+  up to **75 750** host frames) produced **0 gameplay frames** — the hook's only
+  `DisplayMode` line is `CINEMA screen … (3Dfresh=0 menuCursor=1)`, i.e. the game
+  is sitting at a **cursor menu** that never advances. `--dump-gameplay-only`
+  therefore gates out every frame, so `frame_budget`/`frames_captured`/
+  `gameplay_full_bleed_reached` FAIL and the 3 GH #79 checks cannot be graded.
+  This is **not** caused by this change: the capture path only runs once the
+  published branch is gameplay, and it never was (the change is downstream of the
+  gate). New diagnosis on **GH #71**: in sim mode *no input can reach the game* —
+  `camera_hook.cpp`'s `SendKey` returns at `SimModeNoInput()` **before** its
+  `PostMessage`, and `gesture_tap.cpp`'s posting path needs `s_gestureHwnd`,
+  which **`SetGestureGameHwnd` is never called to set** (only declared/defined).
+  So the harness's only route to gameplay is the game auto-advancing its splash →
+  intro, which this session's menu does not. Related, still open: the hook never
+  calls `WaitForFrameConsumed` (#79 hook half, deploy-gated).
+- **Next:** the host half of #79 is landed; the hook `WaitForFrameConsumed` half
+  plus the sim input posting (`SetGestureGameHwnd`, and letting `camera_hook`'s
+  sim `SendKey` post) are both hook changes that need the one interactive deploy.
+  Offline, the next highest-value item is #76 step 1 (per-eye view/projection),
+  also deploy-gated. If an offline slice is wanted instead: extend the harness to
+  make the reach failure loud/attributed (it already is) or pick up #61's
+  `.xtc` diffuse decode.
+
 ## Wake 61 - 2026-10-17 21:35 (scheduled loop)
 - **Unit:** filed **GH #78** and fixed it - the XRSIM frame budget (GH #68
   req 2) was measuring the *harness's own artifact capture* as a 90 Hz render
