@@ -566,8 +566,26 @@ def main():
             "mock/sim, and XRSIM must grade/skip the eye-view scene-faithfulness "
             "check rather than treat the placeholder baseline as a real eye view")
 
+    # GH #78: the XRSIM frame budget must measure the game/hook's rendered-frame
+    # cadence, not the harness's own artifact capture. The mock host writes two
+    # 26.8 MB BMPs + sidecars every --dump-interval frames *inside the loop whose
+    # delta is sampled*, so a ~100 ms capture read as a 90 Hz regression
+    # (p50 3.5 ms / p95 104.8 ms) and left the committed report permanently red.
+    # The host subtracts the measured capture (pure helper, unit-tested) and
+    # logs the excluded cost so the exclusion is visible (ADR-0464).
+    require("FrameTimeExcludingHostWork" in frame_time and
+            "FrameTimeExcludingHostWork(dtMs, lastHostWorkMs)" in openxr_cpp and
+            "ArtifactCapture frame=" in openxr_cpp and
+            "lastHostWorkMs = std::chrono::duration<double, std::milli>" in openxr_cpp and
+            "FrameTimeExcludingHostWork" in
+            (ROOT / "tests/frame_time_tests.cpp").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0464-frame-budget-excludes-host-capture.md").exists(),
+            "GH #78: the XRSIM frame budget must exclude the harness's own "
+            "artifact capture from the sampled frame delta and report the "
+            "excluded capture cost")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-77)")
+          "#62, #64-68, #69, #71-73, #75-78)")
     return 0
 
 

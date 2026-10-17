@@ -14,6 +14,10 @@
 // while `max_ms` and the drop count are still *reported* so a real stall stays
 // visible without being misread as a sustained regression.
 //
+// The samples are the game/hook's rendered-frame cadence: the host subtracts
+// its own artifact-capture time from the loop delta (GH #78), so the harness
+// does not grade itself (see FrameTimeExcludingHostWork below).
+//
 // This is a pure, dependency-free helper so `tests/frame_time_tests.cpp` can pin
 // the percentile definition and the exact wire format the Python parser
 // (tools/xrsim.py) relies on, without a GPU or the game.
@@ -84,6 +88,25 @@ inline FrameTimeStats SummarizeFrameTimes(const std::vector<double>& frameTimesM
         if (t > s.budgetMs) ++s.overBudget;
     }
     return s;
+}
+
+// GH #78: the mock host's artifact capture is *harness work*, not a rendered
+// frame. Every `--dump-interval` frames it writes two full-resolution BMPs
+// (2496x2688 = 26.8 MB each) plus the branch/eye/JSON sidecars -- on the same
+// thread and inside the same loop iteration whose delta is sampled as a frame
+// time. At the simulated eye size that is tens to >100 ms, so the measured
+// `p95` tracked the capture cadence (16.9/104.8 ms) while `p50` stayed ~3.5 ms:
+// the harness was grading itself. The budget must judge the game/hook's
+// rendered-frame cadence, so the measured capture duration is subtracted.
+//
+// A delta that is entirely host work has no rendered frame in it; returning 0
+// tells the caller to skip the sample rather than record a fake fast frame.
+// Real stalls (level loads, shader compiles) are not host work and still count.
+inline double FrameTimeExcludingHostWork(double loopDeltaMs, double hostWorkMs) {
+    if (!(loopDeltaMs > 0.0)) return 0.0;
+    if (!(hostWorkMs > 0.0)) return loopDeltaMs;
+    const double netMs = loopDeltaMs - hostWorkMs;
+    return netMs > 0.0 ? netMs : 0.0;
 }
 
 // Format the machine-readable `FrameBudget` line (the whole line, prefix

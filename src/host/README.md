@@ -52,7 +52,12 @@ The Host component is an independent 64-bit (x64) application responsible for al
   `src/host/frame_time_stats.h` (unit-tested by `tests/frame_time_tests.cpp`),
   and `tools/xrsim.py` **asserts the budget on p50/p95** while still reporting
   `max_ms` and the drop count -- so a one-off level-load hitch is visible but
-  does not read as a sustained 90 Hz regression (ADR-0455).
+  does not read as a sustained 90 Hz regression (ADR-0455). The sample is the
+  **game/hook's rendered-frame cadence**: the host subtracts its own artifact
+  capture (two 26.8 MB BMPs + sidecars, printed per dump as
+  `[Mock Host] ArtifactCapture frame=.. capture_ms=..`) from the loop delta via
+  `FrameTimeExcludingHostWork`, so the harness cannot grade itself (GH #78,
+  ADR-0464).
 - In mock mode, the host also reads the hook-published locomotion **comfort
   level** (`comfortVignette`, Track C #9) back every frame and prints a running
   summary every 30 frames (`[Mock Host] ComfortVignette samples=.. max=.. mean=..

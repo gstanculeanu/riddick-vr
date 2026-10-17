@@ -1619,6 +1619,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
         // gameplay-only gate skips the early cinema frames.
         uint32_t dumps = 0;
         auto lastClientSeen = std::chrono::steady_clock::now();
+        // GH #78: duration of the artifact capture that ran in the previous
+        // loop iteration (BMPs + sidecars). It is harness work, not a rendered
+        // frame, so the frame-time sample subtracts it (ADR-0464).
+        double lastHostWorkMs = 0.0;
 
         while (m_running) {
             auto now = std::chrono::steady_clock::now();
@@ -1833,6 +1837,12 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 // sustained 90 Hz regression; ADR-0448/0454). The percentile
                 // maths + wire format live in the pure helper
                 // src/host/frame_time_stats.h (unit-tested).
+                //
+                // GH #78: the loop delta also contains the harness's own
+                // artifact capture from the previous iteration (two 26.8 MB
+                // BMPs + sidecars every --dump-interval frames). Subtract it so
+                // the budget grades the game/hook's rendered-frame cadence, not
+                // the capture (ADR-0464).
                 {
                     static auto s_prevFrameTs = std::chrono::steady_clock::now();
                     static std::vector<double> s_frameTimesMs;
@@ -1842,16 +1852,18 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     const auto nowTs = std::chrono::steady_clock::now();
                     const double dtMs = std::chrono::duration<double, std::milli>(nowTs - s_prevFrameTs).count();
                     s_prevFrameTs = nowTs;
+                    const double frameMs = FrameTimeExcludingHostWork(dtMs, lastHostWorkMs);
+                    lastHostWorkMs = 0.0;
                     // GH #68: only gameplay frames count; cinema/menu pacing is not the mod's budget.
-                    if (!lastFrameCinema && dtMs > 0.0 && dtMs < 1000.0) { // ignore idle gaps
-                        s_sumFrameMs += dtMs;
-                        if (dtMs > s_maxFrameMs) s_maxFrameMs = dtMs;
-                        if (dtMs > s_budgetMs) s_overBudget++;
+                    if (!lastFrameCinema && frameMs > 0.0 && dtMs < 1000.0) { // ignore idle gaps
+                        s_sumFrameMs += frameMs;
+                        if (frameMs > s_maxFrameMs) s_maxFrameMs = frameMs;
+                        if (frameMs > s_budgetMs) s_overBudget++;
                         s_frameSamples++;
                         // Percentile window (bounded so an open-ended run cannot
                         // grow without limit; a real run is ~1e4-1e5 samples).
                         if (s_frameTimesMs.size() < kMaxFrameTimeSamples) {
-                            s_frameTimesMs.push_back(dtMs);
+                            s_frameTimesMs.push_back(frameMs);
                         }
                         if ((s_frameSamples % 30) == 0) {
                             FrameTimeStats stats =
@@ -1879,6 +1891,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 // dump is live 3D gameplay rather than the menu/cinema (and
                 // all-zero interop warm-up) frames whose identical eye pairs
                 // are correct but not a stereo validation.
+                // GH #78: time the whole artifact-capture decision (content
+                // sampling + BMPs + sidecars) so the frame-time budget can
+                // subtract harness work from the next loop delta.
+                const auto captureWorkStart = std::chrono::steady_clock::now();
                 const bool dumpDue = (totalFrames == 1 || totalFrames % m_dumpInterval == 0);
                 // GH #72 requirement 2: classify the candidate frame's content
                 // (blank interop warm-up vs frozen static page vs live) before
@@ -2031,6 +2047,13 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                         m_lastDumpSignature = contentSignature;
                         m_hasLastDumpSignature = true;
                     }
+                    // GH #78: make the excluded cost visible instead of hiding
+                    // it -- this is what the frame budget subtracts next loop.
+                    const double captureMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - captureWorkStart).count();
+                    std::cout << "[Mock Host] ArtifactCapture frame=" << totalFrames
+                              << " capture_ms=" << std::fixed << std::setprecision(1)
+                              << captureMs << std::endl;
                 } else if (dumpDue && m_dumpGameplayOnly && stateRead && !cinemaMode &&
                            content != RiddickVR::FrameContent::Live) {
                     // GH #72 requirement 2: the branch says gameplay but the
@@ -2041,6 +2064,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                               << (content == RiddickVR::FrameContent::Blank ? "blank" : "frozen")
                               << std::endl;
                 }
+                // GH #78: this iteration's capture work is subtracted from the
+                // next frame-time sample (including the cheap non-dump path).
+                lastHostWorkMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - captureWorkStart).count();
 
                 ipcHost.SignalFrameConsumed();
 

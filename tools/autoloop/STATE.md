@@ -2,6 +2,72 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 61 - 2026-10-17 21:35 (scheduled loop)
+- **Unit:** filed **GH #78** and fixed it - the XRSIM frame budget (GH #68
+  req 2) was measuring the *harness's own artifact capture* as a 90 Hz render
+  regression, leaving the committed baseline permanently red for a reason that
+  is not a game/hook cost. Host + harness evidence + docs; **no asset change, no
+  deploy**.
+- **Why this unit:** #68 is the top open item and the report's only FAIL was
+  `frame_budget`; wake 60 recorded it as "the known sim frame_budget" and moved
+  on. Auditing the sampling found the harness grading itself.
+- **Decisive finding (measured, not inferred):** the mock host writes two
+  **26.8 MB** BMPs (2496x2688 x 32 bpp) plus `display_branch.log`,
+  `eye_frames.log` and `frame_####.json` every `--dump-interval` frames, on the
+  same thread and inside the loop iteration whose delta is sampled. Fresh
+  `tests/xrsim/artifacts/host.log`: `p50_ms=3.50` (game/hook cadence) while
+  `p95_ms` oscillated with the dump cadence (`35.33, 5.71, 21.03, ... 16.89,
+  ... 104.83`) and `over_budget` incremented 1-2 per 30-frame window. The new
+  `ArtifactCapture` log measured the capture at **112.0 ms mean**
+  (104.6-153.9 ms, 83 dumps) - every excluded sample was real harness work.
+- **Change:**
+  - `src/host/frame_time_stats.h`: `FrameTimeExcludingHostWork(loopDeltaMs,
+    hostWorkMs)` = `max(0, delta - work)`, with the sample documented as the
+    rendered-frame cadence; a delta that is entirely host work returns 0 so the
+    caller skips it instead of recording a fake fast frame.
+  - `src/host/openxr_manager.cpp`: times the whole capture-decision block
+    (content sample + BMPs + sidecars) and carries `lastHostWorkMs` into the
+    next budget sample; the raw `dtMs < 1000` idle-gap guard is unchanged, so
+    real stalls (level load, shader compile) stay in `max_ms`/`over_budget`.
+    Every dump now logs `[Mock Host] ArtifactCapture frame=N capture_ms=X` so
+    the exclusion is visible.
+  - `tests/frame_time_tests.cpp`: subtraction, no-work pass-through, clamp to 0,
+    plus a fixture that reproduces the old failure (3.5 ms cadence with 104 ms
+    captures on >5% of frames fails p95) and passes after the measured capture
+    is removed - while the sustained-regression fixture still fails.
+  - `docs/adr/0464-frame-budget-excludes-host-capture.md` (new),
+    `src/host/README.md`, GH #78 invariant in `tools/verify_reported_fixes.py`
+    (summary now `#75-78`).
+- **Evidence:** build-all Release (**no `-Deploy`**) OK; CTest **20/20 on x64
+  AND x86**; all 10 `tools/test_*.py` + `xrsim.py --selftest` +
+  `verify_test_artifacts` + `verify_hook_init` + `validate_addresses` +
+  `verify_reported_fixes` + `scenario_tests.py --check` PASS. **Live**
+  (`--reach-gameplay --duration 90 --interval 30 --downscale 4`): 83 gameplay
+  frames, `frame_budget` **PASS** `n=2700 p50=1.90 p95=4.96 max=86.22` (before
+  the fix the same run's tail read `p50=3.51 p95=104.83`); `eye views=sim`,
+  `eye_views_scene_faithful` PASS (0.009 deg / 0.065 m); comfort vignette PASS.
+  `tests/xrsim/report.json` regenerated and **committed** (mode=run, 83
+  gameplay frames).
+- **The regenerated report exposed a second, bigger defect (filed GH #79):**
+  3 checks fail on 2 of 83 frames - `frame 540` has a **black right eye**
+  (`meanL=40.53 meanR=0`) even though `EyePairIsBlank` had just sampled it as
+  non-blank, and `frames 810/1770` fail `no_vertical_disparity` (`dy=-3/+7`).
+  A quadrant probe shows a **global** vertical offset on 810 (top -5/-6,
+  bottom -3, center -4 at downscale 4) and an **intra-image tear** on 1770
+  (top dy=0, bottom/center dy=8) - not content parallax. Root cause found in
+  the code: the host calls `SignalFrameConsumed()` but the hook **never calls
+  `WaitForFrameConsumed()`**, so the hook overwrites the shared eye textures
+  while the host reads them. This also corrupts #76's `stereo_kind` (5 frames
+  labelled `parallax`, impossible for the mono blit).
+- **Blocker / honest limit:** the fix for #79's hook half is deploy-gated (the
+  sim still runs the 12:47 build). The committed report is therefore honestly
+  red on those 3 capture-integrity checks; the old 10-frame baseline masked
+  them. #78's own check is green and the exclusion is measured/logged.
+- **Next:** #79 (hook waits on the consumed event before the next eye blit;
+  host staging-copy fallback), then #76 step 1 (per-eye view/projection). The
+  loop-wide deploy gate is unchanged (#67 step 3 / #72 req 1 A/B / #68 req 5 /
+  #79 hook half).
+
 ## Wake 60 — 2026-10-17 21:05 (scheduled loop)
 - **Unit:** GH **#77 capstone** (wake 59's stated Next) — the mock/sim host now
   **reconstructs** the per-eye views a runtime *would* return for each dumped

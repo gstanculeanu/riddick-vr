@@ -14,6 +14,7 @@
 #include <vector>
 
 using RiddickVR::FormatFrameBudgetLine;
+using RiddickVR::FrameTimeExcludingHostWork;
 using RiddickVR::FrameTimeStats;
 using RiddickVR::kDefaultFrameBudgetMs;
 using RiddickVR::PercentileMs;
@@ -70,6 +71,40 @@ int main() {
     FrameTimeStats s2 = SummarizeFrameTimes(slow, kDefaultFrameBudgetMs);
     Check(s2.p95Ms > kDefaultFrameBudgetMs, "a sustained slow run must blow p95");
     Check(s2.overBudget == 200, "every slow frame is a drop");
+
+    // GH #78: harness artifact capture is not a rendered frame. A 105 ms loop
+    // delta of which 100 ms was the host's BMP/sidecar write is a ~5 ms frame;
+    // a delta that is entirely host work is not a frame at all (0 -> skipped);
+    // a normal delta is unchanged.
+    Check(Near(FrameTimeExcludingHostWork(105.0, 100.0), 5.0),
+          "host capture time must be subtracted from the frame delta");
+    Check(Near(FrameTimeExcludingHostWork(3.5, 0.0), 3.5),
+          "a frame without host work must be unchanged");
+    Check(Near(FrameTimeExcludingHostWork(3.5, 10.0), 0.0),
+          "a delta entirely consumed by host work must clamp to 0");
+    Check(Near(FrameTimeExcludingHostWork(0.0, 5.0), 0.0),
+          "a non-positive delta must yield no sample");
+
+    // The same contaminated series that used to fail frame_budget -- a 3.5 ms
+    // game cadence with a ~104 ms capture on 6.7% of frames (p95 ~104 ms) -- is
+    // clean once the measured capture is removed. A genuinely slow run (the
+    // `slow` fixture above) is still a regression, because its time is not
+    // host work.
+    std::vector<double> contaminated(300, 3.5);
+    for (int i = 0; i < 300; i += 15) contaminated[i] = 104.0;
+    FrameTimeStats dirty = SummarizeFrameTimes(contaminated, kDefaultFrameBudgetMs);
+    Check(dirty.p95Ms > kDefaultFrameBudgetMs,
+          "the fixture must reproduce the harness-induced p95 failure");
+    std::vector<double> cleaned;
+    for (double t : contaminated) {
+        const double net = FrameTimeExcludingHostWork(t, t >= 104.0 ? 100.5 : 0.0);
+        if (net > 0.0) cleaned.push_back(net);
+    }
+    FrameTimeStats clean = SummarizeFrameTimes(cleaned, kDefaultFrameBudgetMs);
+    Check(clean.p95Ms <= kDefaultFrameBudgetMs,
+          "excluding host capture must restore a 90 Hz p95");
+    Check(clean.samples == contaminated.size(),
+          "a partially-host frame must still be sampled");
 
     // Empty input is reported (0 samples), not a crash.
     FrameTimeStats empty = SummarizeFrameTimes(std::vector<double>{}, 0.0);
