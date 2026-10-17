@@ -2,6 +2,68 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 68 — 2026-10-18 00:30 (scheduled loop)
+- **Unit:** GH **#79 host-half capstone** — the XRSIM capture now **records its
+  own gate sample + the hook-publish race window**, and the harness **asserts the
+  saved BMP matches the gate sample**. This is the machine-checked form of #79's
+  own XRSIM acceptance ("the gate sample and the saved BMP must agree"), and it is
+  **deploy-free** (host + harness only; no hook change, no game/asset change).
+- **Why this unit:** wake 62 landed the host half (one staged pair, ADR-0465) but
+  — by its own words — only *inspected* it; nothing would catch a regression to
+  two reads, and nothing measured how often the hook's unsynchronised blit lands
+  inside the staging window. Every player-visible item and the #71/#72 hook fixes
+  remain deploy-gated, so the highest offline value is turning #79's host half
+  into a checked invariant.
+- **Change (host):** `src/host/openxr_manager.cpp` — before/after `StageEyePair`
+  the mock host reads the hook's `RiddickVRSharedState.clientFrameCount` (its
+  per-publish counter, `IpcBridgeClient::WriteState`, `src/bridge/ipc_bridge.cpp:270`),
+  and emits one parseable line per capture attempt:
+  `[Mock Host] GateSample frame=N content=live|blank|frozen sampled=0|1 written=0|1
+  luma_l=X luma_r=Y frames=<before>..<after> straddled=0|1`; the per-frame
+  `frame_####.json` sidecar mirrors it under `"gate"`. The straddle is the measured
+  GH #79 race window; it is **reported, never used to reject** (a straddle does not
+  prove the pair tore, and a strict rule would reject most frames at the sim's
+  swap rate).
+- **Change (harness):** `tools/xrsim.py` — `parse_gate_samples`, `saved_left_lumas`
+  (recomputes each saved BMP's mean luma as plain `(R+G+B)/3`, the *same*
+  definition the host's `SampleEyeImage` uses — a Rec.601 `convert("L")` weights
+  the channels differently and reads a different number on a tinted frame),
+  `capture_gate_check` + `capture_gate_stats`; new `capture_gate_matches_saved`
+  check (report key `capture_gate`): fails if a written frame's saved luma
+  disagrees with the gate sample beyond 1.0, or if a non-`Live` verdict was
+  written; **skips** (never fails) with no `GateSample` line (pre-#79 host /
+  `--evaluate-only`). `tools/test_xrsim.py` +6 cases.
+- **Evidence (offline):** `tools/build-all.ps1 -Config Release`, **no `-Deploy`**
+  OK (x86 proxy + x64 host; game install untouched); **CTest 22/22 x64, 24/24
+  x86**; all 10 `tools/test_*.py` PASS (incl. the 6 new); `xrsim --selftest` PASS;
+  `verify_reported_fixes` PASS (#79 invariant extended with the record + the
+  assertion + ADR-0469); `verify_hook_init`, `validate_addresses`,
+  `verify_test_artifacts`, `scenario_tests.py --check` PASS.
+- **Evidence (live, `RIDDICKVR_SIM=1`, fresh host + stale 12:47 hook):**
+  `python tools/xrsim.py --reach-gameplay --duration 60 --interval 30 --downscale 4`
+  → `capture_gate_matches_saved` **PASS**: **9/9 written frames checked, 0
+  mismatches, 0 non-live writes**, and **13/136 capture attempts straddled a hook
+  frame** — the first direct measurement of the GH #79 race (~10%). Committed
+  `report.json` restored (the run's only FAIL is the known `gameplay_full_bleed_reached`,
+  see below; the new check is green).
+- **New measured finding (filed as evidence, not new scope):** a fresh
+  `--reach-gameplay` run produced **60 "gameplay"-labelled frames with max BarScan
+  active-rect fill = 0.40** (the letterboxed startup page) — i.e. the committed
+  wake-61 baseline (fill 1.00) is **not currently reproducible**: this session's
+  sim never reaches live gameplay (the hook's #72-req-1 cold-start latch that would
+  demote that page to cinema is code-complete at `src/hook/display_branch.h`
+  (8f4d824, 19:36) but the sim runs the stale 12:47 hook, and the latch is
+  default-OFF pending one live A/B). So `gameplay_captures_present` still PASSes on
+  a page that never reached full-bleed while `gameplay_full_bleed_reached` FAILs.
+- **Blocker / honest limit:** this proves the host's gate and its saved bytes agree
+  and quantifies the race; it does **not** remove the race. A torn pair can still be
+  written; only the deploy-gated hook half (`WaitForFrameConsumed` before the next
+  eye blit) makes the capture atomic. The loop-wide deploy gate is unchanged.
+- **Next:** unchanged deploy-gated ladder — #71 req 1 (one interactive deploy +
+  `xrsim --reach-gameplay --sim-confirm keyboard`), #72 req 1 (enable the
+  cold-start latch after one live A/B), #67 step 3 (`ViewmodelObserve=1`), #68 req 5
+  (snap-turn/HUD), #79 hook half, #76 step 1 (per-eye view/projection).
+
 ## Wake 67 — 2026-10-17 23:50 (scheduled loop)
 - **Unit:** GH **#80 requirement 1** — the simulator-only input bridge's
   *interceptor* is now **executed offline** (until now only its pure core was

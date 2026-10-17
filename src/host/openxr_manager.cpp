@@ -1868,12 +1868,33 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 RiddickVR::FrameContent content = RiddickVR::FrameContent::Live;
                 uint64_t contentSignature = 0;
                 bool contentSampled = false;
+                // GH #79 host-half capstone: the gate's own per-eye sample, so the
+                // harness can check the *saved* BMP against the copy the gate
+                // authorised (they are two views of one staged copy, ADR-0465).
+                float gateLumaL = 0.0f;
+                float gateLumaR = 0.0f;
+                // GH #79: the hook's per-frame publish counter, read either side
+                // of the staging copies. If it moves, the hook published (and may
+                // have re-blitted the shared eyes) while the pair was copied --
+                // the measured race window. Reported, never used to reject.
+                bool haveFramesBefore = false, haveFramesAfter = false;
+                uint32_t hookFramesBefore = 0, hookFramesAfter = 0;
                 StagedEyeImages staged;
                 bool haveStaged = false;
                 if (dumpDue && !m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
                     (!m_dumpGameplayOnly || (stateRead && !cinemaMode))) {
+                    {
+                        RiddickVRSharedState pre{};
+                        haveFramesBefore = ipcHost.ReadState(pre);
+                        if (haveFramesBefore) hookFramesBefore = pre.clientFrameCount;
+                    }
                     haveStaged = StageEyePair(m_d3d11Device, m_d3d11Context,
                                               m_sharedLeftTex, m_sharedRightTex, staged);
+                    {
+                        RiddickVRSharedState post{};
+                        haveFramesAfter = ipcHost.ReadState(post);
+                        if (haveFramesAfter) hookFramesAfter = post.clientFrameCount;
+                    }
                     // GH #72 requirement 2: classify the candidate frame's
                     // content (blank interop warm-up vs frozen static page vs
                     // live) before the branch gate decides, sampling from the
@@ -1894,6 +1915,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                             staged.mapR.RowPitch, staged.descR.Width, staged.descR.Height);
                         contentSampled = true;
                         contentSignature = left.signature;
+                        gateLumaL = left.meanLuma;
+                        gateLumaR = right.meanLuma;
                         if (EyePairIsBlank(left.meanLuma, true, right.meanLuma, true,
                                            kBlankMeanLuma)) {
                             content = RiddickVR::FrameContent::Blank;
@@ -1908,7 +1931,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 const bool dumpCandidate =
                     !m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
                     ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content);
-                if (dumpCandidate && haveStaged) {
+                const bool frameWritten = dumpCandidate && haveStaged;
+                if (frameWritten) {
                     char leftPath[MAX_PATH];
                     char rightPath[MAX_PATH];
                     sprintf_s(leftPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
@@ -2017,6 +2041,18 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                         writeMat("rightEyeView", sample.viewR, false);
                         writeMat("leftEyeProjection", state.leftEyeProjection.m, false);
                         writeMat("rightEyeProjection", state.rightEyeProjection.m, false);
+                        fprintf(meta,
+                                "  \"gate\": {\"content\": \"%s\", \"sampled\": %s, "
+                                "\"lumaL\": %.2f, \"lumaR\": %.2f, \"signature\": %llu, "
+                                "\"hookFrames\": [%u, %u], \"straddled\": %s},\n",
+                                content == RiddickVR::FrameContent::Live ? "live" :
+                                content == RiddickVR::FrameContent::Blank ? "blank" : "frozen",
+                                contentSampled ? "true" : "false",
+                                static_cast<double>(gateLumaL), static_cast<double>(gateLumaR),
+                                static_cast<unsigned long long>(contentSignature),
+                                hookFramesBefore, hookFramesAfter,
+                                (haveFramesBefore && haveFramesAfter &&
+                                 hookFramesBefore != hookFramesAfter) ? "true" : "false");
                         fprintf(meta, "  \"eyeViews\": \"%s\"\n",
                                 EyeViewSourceToken(sample.viewSource));
                         fprintf(meta, "}\n");
@@ -2043,6 +2079,28 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     std::cout << "[Mock Host] DumpGate skip frame=" << totalFrames
                               << " reason="
                               << (content == RiddickVR::FrameContent::Blank ? "blank" : "frozen")
+                              << std::endl;
+                }
+                // GH #79 host-half capstone: one parseable record per capture
+                // attempt -- the content-gate verdict + the sample it took, whether
+                // a frame was written, and whether the hook published (and may
+                // have re-blitted the shared eyes) during the staging copies. The
+                // harness asserts the saved BMP matches the gate sample and reports
+                // the straddle rate; that is GH #79's XRSIM acceptance, provable
+                // without the deploy-gated hook half.
+                if (dumpDue && !m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex) {
+                    const bool straddled = haveFramesBefore && haveFramesAfter &&
+                                           hookFramesBefore != hookFramesAfter;
+                    std::cout << "[Mock Host] GateSample frame=" << totalFrames
+                              << " content="
+                              << (content == RiddickVR::FrameContent::Live ? "live" :
+                                  content == RiddickVR::FrameContent::Blank ? "blank" : "frozen")
+                              << " sampled=" << (contentSampled ? 1 : 0)
+                              << " written=" << (frameWritten ? 1 : 0)
+                              << " luma_l=" << std::fixed << std::setprecision(2) << gateLumaL
+                              << " luma_r=" << gateLumaR
+                              << " frames=" << hookFramesBefore << ".." << hookFramesAfter
+                              << " straddled=" << (straddled ? 1 : 0)
                               << std::endl;
                 }
                 // GH #78: make the excluded cost visible instead of hiding it --

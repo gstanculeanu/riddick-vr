@@ -657,6 +657,28 @@ def main():
             "and sample/save from that private copy, not re-read the shared "
             "textures (the hook half is deploy-gated)")
 
+    # GH #79 host-half capstone (ADR-0469): the host must *record* the gate's own
+    # sample and the hook-publish counter either side of the staging copies, and
+    # the harness must assert the saved BMP matches the gate sample. This is the
+    # machine-checked form of GH #79's XRSIM acceptance ("the gate sample and the
+    # saved BMP must agree") -- deploy-free, so a regression to two reads is
+    # caught without the hook half.
+    require("GateSample frame=" in openxr_cpp and
+            "clientFrameCount" in openxr_cpp and
+            "straddled=" in openxr_cpp and
+            "hookFramesBefore" in openxr_cpp and
+            "def parse_gate_samples" in xrsim_tool and
+            "def capture_gate_check" in xrsim_tool and
+            "def saved_left_lumas" in xrsim_tool and
+            "capture_gate_matches_saved" in xrsim_tool and
+            '"capture_gate"' in xrsim_tool and
+            "test_capture_gate_matches_saved_passes_when_agreeing" in _xrsim_tests and
+            "test_capture_gate_fails_on_saved_mismatch" in _xrsim_tests and
+            (ROOT / "docs/adr/0469-capture-gate-integrity-record.md").exists(),
+            "GH #79: the host must record the capture gate's sample + the "
+            "hook-publish straddle, and XRSIM must assert the saved BMP matches "
+            "the gate sample (the deploy-free half of #79's acceptance)")
+
     # GH #80: the simulator-only input bridge. Both input-free routes to a live
     # scene are measured dead (posted window messages -- ADR-0466; the engine's
     # command line -- its wake-64 addendum), so the sim confirm must be

@@ -218,6 +218,19 @@ frame-consumed event, so a blit that lands between the two adjacent copies can
 still tear a pair; the hook half is deploy-gated. A pair that cannot be staged is
 reported as `Capture skipped frame=N (eye staging failed)`.
 
+**Capture-gate integrity (GH #79 host-half capstone, ADR-0469):** the host now
+records, for every capture attempt, a `[Mock Host] GateSample` line (the gate's
+per-eye luma sample, whether a frame was written, and the hook's
+`clientFrameCount` either side of the staging copies) and mirrors it in the
+`frame_####.json` sidecar under `"gate"`. `tools/xrsim.py` asserts
+`capture_gate_matches_saved`: each saved BMP's mean luma (plain `(R+G+B)/3`, the
+same definition the host samples) must match the gate sample within 1.0 luma, and
+only a `Live` verdict may be written — the machine-checked form of GH #79's
+acceptance, deploy-free. The `capture_gate` report key carries the straddle rate
+(how often the hook published during a staging, i.e. the residual race window),
+which is **reported, never failed**. A pre-#79 host / `--evaluate-only` run
+without the lines **skips** the check.
+
 **Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
 `tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and
 stay untracked — `.gitignore` excludes the directory and only the small,

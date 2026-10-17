@@ -915,6 +915,83 @@ def test_window_content_check_is_gameplay_only(td):
     assert not [c for c in checks if c["check"] == "gameplay_window_has_content"], checks
 
 
+# ------------------------------- capture gate integrity (GH #79 host half)
+def _gate_line(frame, content="live", sampled=1, written=1, luma_l=0.0, luma_r=0.0,
+               before=10, after=10, straddled=0):
+    return (f"[Mock Host] GateSample frame={frame} content={content} "
+            f"sampled={sampled} written={written} luma_l={luma_l:.2f} "
+            f"luma_r={luma_r:.2f} frames={before}..{after} straddled={straddled}")
+
+
+def test_parse_gate_samples_records_each_attempt(td):
+    log = (_gate_line(30, luma_l=80.0, luma_r=79.5) + "\n" +
+           _gate_line(60, content="frozen", written=0, luma_l=12.0,
+                      before=40, after=41, straddled=1) + "\n")
+    g = xrsim.parse_gate_samples(log)
+    assert set(g) == {30, 60}, g
+    assert g[30]["content"] == "live" and g[30]["written"] is True
+    assert g[30]["luma_l"] == 80.0 and g[30]["sampled"] is True
+    assert g[60]["content"] == "frozen" and g[60]["written"] is False
+    assert g[60]["frames"] == (40, 41) and g[60]["straddled"] is True
+    assert xrsim.parse_gate_samples("") == {}
+
+
+def _gate_art(td, seed=3):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content(seed=seed)
+    _save(art / "test_frame_0030.bmp", base)
+    _save(art / "right_0030.bmp", _shift_h(base, 3))
+    _write_labels(art, {30: False})
+    return art, xrsim.saved_left_lumas(art, frames={30})[30]
+
+
+def test_capture_gate_matches_saved_passes_when_agreeing(td):
+    art, saved = _gate_art(td)
+    log = _gate_line(30, luma_l=saved, luma_r=saved - 0.4) + "\n"
+    _, checks = xrsim.evaluate(_args(), art, log, "")
+    rec = [c for c in checks if c["check"] == "capture_gate_matches_saved"][0]
+    assert rec["ok"] is True and not rec.get("skip"), rec
+    assert rec["checked"] == 1 and rec["mismatches"] == 0
+
+
+def test_capture_gate_fails_on_saved_mismatch(td):
+    art, saved = _gate_art(td, seed=5)
+    log = _gate_line(30, luma_l=saved + 25.0) + "\n"
+    _, checks = xrsim.evaluate(_args(), art, log, "")
+    rec = [c for c in checks if c["check"] == "capture_gate_matches_saved"][0]
+    assert rec["ok"] is False and rec["mismatches"] == 1, rec
+
+
+def test_capture_gate_flags_non_live_write(td):
+    art, saved = _gate_art(td, seed=9)
+    # A frozen verdict that was nonetheless written is a gate regression.
+    log = _gate_line(30, content="frozen", luma_l=saved) + "\n"
+    _, checks = xrsim.evaluate(_args(), art, log, "")
+    rec = [c for c in checks if c["check"] == "capture_gate_matches_saved"][0]
+    assert rec["ok"] is False and rec["non_live"] == 1, rec
+
+
+def test_capture_gate_reports_straddle_and_skips_without_lines(td):
+    art, saved = _gate_art(td, seed=11)
+    log = _gate_line(30, luma_l=saved, before=5, after=9, straddled=1) + "\n"
+    _, checks = xrsim.evaluate(_args(), art, log, "")
+    rec = [c for c in checks if c["check"] == "capture_gate_matches_saved"][0]
+    assert rec["ok"] is True and rec["straddled"] == 1, rec
+    # A pre-#79 host (no GateSample line) skips, never fails.
+    _, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "capture_gate_matches_saved"][0]
+    assert rec["ok"] is True and rec.get("skip"), rec
+
+
+def test_capture_gate_stats_and_report_key(td):
+    g = xrsim.parse_gate_samples(
+        _gate_line(30, luma_l=80.0) + "\n" +
+        _gate_line(60, content="blank", written=0, before=1, after=2, straddled=1))
+    s = xrsim.capture_gate_stats(g)
+    assert s == {"attempts": 2, "written": 1, "sampled": 2, "straddled": 1,
+                 "blank": 1, "frozen": 0}, s
+
+
 # ------------------------------------------- reach gameplay (GH #71 req 1)
 def test_reach_gameplay_report_records_live_gameplay_stats(td):
     art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
@@ -1450,6 +1527,12 @@ def main() -> int:
              test_content_gate_stats_parses_skip_lines,
              test_blank_gameplay_frame_fails_window_content_check,
              test_window_content_check_is_gameplay_only,
+             test_parse_gate_samples_records_each_attempt,
+             test_capture_gate_matches_saved_passes_when_agreeing,
+             test_capture_gate_fails_on_saved_mismatch,
+             test_capture_gate_flags_non_live_write,
+             test_capture_gate_reports_straddle_and_skips_without_lines,
+             test_capture_gate_stats_and_report_key,
              test_reach_gameplay_report_records_live_gameplay_stats,
              test_viewmodel_probe_stats_parse,
              test_viewmodel_probe_counts_matrix_composition,

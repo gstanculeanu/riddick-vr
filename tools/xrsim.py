@@ -113,6 +113,13 @@ graded window is live, advancing 3D gameplay. The report carries
 ``content_gate {blank_skipped, frozen_skipped}`` and, for gameplay-only runs, the
 ``gameplay_window_has_content`` check.
 
+GH #79 host-half capstone: the host also records, for every capture attempt, the
+gate's own per-eye luma sample and the hook's publish counter either side of the
+staging copies (``GateSample`` lines). The report carries ``capture_gate`` and the
+``capture_gate_matches_saved`` check asserts the saved BMP matches the gate sample
+(both are one staged copy, ADR-0465) and that only live frames were written; the
+straddle rate quantifies the hook-write race window (reported, not failed).
+
 Every dumped frame also carries the head/eye transform and projection the host
 rendered it with (``eye_frames.log`` in the dump dir, GH #68 requirement 1),
 so a capture is self-describing in 3D. The report's ``eye_frames`` key summarises
@@ -270,6 +277,22 @@ EYE_IPD_M_MIN, EYE_IPD_M_MAX = 0.03, 0.10
 # byte-identical repeat of the last dumped frame = `frozen`). Parsed so the
 # report can show the gate doing its job.
 DUMP_SKIP_RE = re.compile(r"DumpGate skip frame=(\d+) reason=(blank|frozen)")
+
+# GH #79 host-half capstone: the mock host records one `GateSample` line per
+# capture attempt -- the content-gate verdict + the per-eye luma sample it took,
+# whether a frame was written, and the hook's publish counter either side of the
+# staging copies (`frames=before..after`; a move means the hook published while
+# the pair was copied -- the race window behind the torn captures). The harness
+# asserts the *saved* BMP matches the gate sample (both are two views of one
+# staged copy, ADR-0465) and reports the straddle rate; that is GH #79's XRSIM
+# acceptance, provable without the deploy-gated hook half.
+GATE_SAMPLE_RE = re.compile(
+    r"GateSample frame=(\d+) content=(live|blank|frozen) sampled=([01]) "
+    r"written=([01]) luma_l=([\d.]+) luma_r=([\d.]+) "
+    r"frames=(\d+)\.\.(\d+) straddled=([01])")
+# The gate sample and the saved BMP are the same bytes; the only slack is the
+# host's 2-decimal luma printout and the harness's independent mean.
+CAPTURE_GATE_LUMA_TOL = 1.0
 
 # GH #68 requirement 5 (comfort rules): the mock host prints a running summary of
 # the hook-published locomotion comfort level (`comfortVignette`, Track C #9) and
@@ -1008,6 +1031,113 @@ def content_gate_stats(host_log):
     return {"blank_skipped": blank, "frozen_skipped": frozen}
 
 
+def parse_gate_samples(host_log):
+    """GH #79 host-half capstone: the mock host's per-attempt capture records.
+
+    Returns a dict keyed by frame number (``content``, ``sampled``, ``written``,
+    ``luma_l``, ``luma_r``, ``frames`` (before, after), ``straddled``). Empty for
+    a pre-#79 host or an ``--evaluate-only`` run with no persisted host log.
+    """
+    out = {}
+    for line in (host_log or "").splitlines():
+        m = GATE_SAMPLE_RE.search(line)
+        if not m:
+            continue
+        out[int(m.group(1))] = {
+            "content": m.group(2),
+            "sampled": m.group(3) == "1",
+            "written": m.group(4) == "1",
+            "luma_l": float(m.group(5)),
+            "luma_r": float(m.group(6)),
+            "frames": (int(m.group(7)), int(m.group(8))),
+            "straddled": m.group(9) == "1",
+        }
+    return out
+
+
+def saved_left_lumas(artifacts, frames=None):
+    """Mean luma (0..255) of each saved LEFT-eye BMP, keyed by frame number.
+
+    Recomputed from the file on disk, so it is independent of the gate's own
+    sample -- the two agreeing proves the saved pixels are the copy the gate
+    authorised (GH #79 host-half capstone). The mean is plain ``(R+G+B)/3`` over
+    every pixel, matching the host's ``SampleEyeImage`` exactly (a Rec.601
+    ``convert("L")`` would weight the channels differently and read a different
+    number on a tinted frame). ``frames`` optionally restricts the decode.
+    """
+    np, Image = image_deps()
+    out = {}
+    for lp in sorted(Path(artifacts).glob("test_frame_*.bmp")):
+        n = int(lp.stem.split("_")[2])
+        if frames is not None and n not in frames:
+            continue
+        try:
+            arr = np.asarray(Image.open(lp).convert("RGB"), dtype=np.float32)
+        except Exception:
+            continue
+        out[n] = float(arr.mean())  # equal-channel weights == (R+G+B)/3
+    return out
+
+
+def capture_gate_check(gate_samples, saved_lumas, tol=CAPTURE_GATE_LUMA_TOL):
+    """GH #79 host-half capstone: the saved BMP must match the gate's sample.
+
+    Both come from one private staged copy (ADR-0465), so a frame whose recomputed
+    luma disagrees with the gate sample means the gate and the write saw different
+    bytes (the two-read regression #79 fixed). Only a *Live* verdict may be
+    written. The hook-publish straddle rate is reported (the race window), not
+    failed -- a straddle does not prove the pair tore.
+
+    Returns ``(ok, record)``; skipped (never failed) when the host emitted no
+    ``GateSample`` line (pre-#79 host) or wrote no frame.
+    """
+    if not gate_samples:
+        return True, {"check": "capture_gate_matches_saved", "ok": True, "skip": True,
+                      "detail": "no GateSample lines (pre-#79 host or evaluate-only)"}
+    written = {n: g for n, g in gate_samples.items() if g["written"]}
+    if not written:
+        return True, {"check": "capture_gate_matches_saved", "ok": True, "skip": True,
+                      "detail": f"no frame written of {len(gate_samples)} capture attempt(s)"}
+    mismatches, non_live, checked = [], [], 0
+    for n, g in sorted(written.items()):
+        if g["content"] != "live":
+            non_live.append(n)
+        saved = saved_lumas.get(n)
+        if not g["sampled"] or saved is None:
+            continue
+        checked += 1
+        if abs(g["luma_l"] - saved) > tol:
+            mismatches.append((n, g["luma_l"], saved))
+    straddled = sorted(n for n, g in gate_samples.items() if g["straddled"])
+    ok = not mismatches and not non_live
+    detail = (f"{checked}/{len(written)} written frame(s) checked (tol {tol}); "
+              f"{len(mismatches)} mismatch(es), {len(non_live)} non-live write(s); "
+              f"{len(straddled)}/{len(gate_samples)} attempt(s) straddled a hook frame "
+              "(GH #79 race)")
+    if mismatches:
+        n, gl, sv = mismatches[0]
+        detail += f"; e.g. frame {n}: gate {gl:.2f} vs saved {sv:.2f}"
+    if non_live:
+        detail += f"; non-live written: {non_live[:3]}"
+    return ok, {"check": "capture_gate_matches_saved", "ok": ok, "detail": detail,
+                "checked": checked, "mismatches": len(mismatches),
+                "non_live": len(non_live), "straddled": len(straddled),
+                "attempts": len(gate_samples)}
+
+
+def capture_gate_stats(gate_samples):
+    """Report summary for the GH #79 capture-gate records (counts only)."""
+    written = [g for g in gate_samples.values() if g["written"]]
+    return {
+        "attempts": len(gate_samples),
+        "written": len(written),
+        "sampled": sum(1 for g in gate_samples.values() if g["sampled"]),
+        "straddled": sum(1 for g in gate_samples.values() if g["straddled"]),
+        "blank": sum(1 for g in gate_samples.values() if g["content"] == "blank"),
+        "frozen": sum(1 for g in gate_samples.values() if g["content"] == "frozen"),
+    }
+
+
 def active_rect_fill(log_text):
     """Largest active-render-rect fill ratio the hook's BarScan recorded.
 
@@ -1567,6 +1697,16 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
                            "ok": True, "skip": True,
                            "detail": (f"no {DISPLAY_LABEL_FILE}: per-frame display "
                                       "branch unknown (legacy capture or pre-label host)")})
+    # GH #79 host-half capstone: the content gate and the saved BMP must agree.
+    # Both come from one staged copy (ADR-0465); this is the harness-side proof
+    # that the host half landed, provable without the deploy-gated hook half. A
+    # pre-#79 host emits no GateSample line -> the check skips.
+    gate_samples = parse_gate_samples(host_log)
+    if lefts:
+        written_frames = {n for n, g in gate_samples.items() if g["written"]}
+        saved = saved_left_lumas(artifacts, frames=written_frames) if written_frames else {}
+        ok_gate, gate_rec = capture_gate_check(gate_samples, saved)
+        checks.append({**gate_rec, "group": "capture"})
     # GH #76 (epic #57): the mod's gameplay stereo is a monoscopic capture
     # blitted with ONE global horizontal shift, so the per-tile disparity spread
     # is zero -- no parallax (measured: 12/12 tiles agree on every retained
@@ -1807,6 +1947,7 @@ def cmd_evaluate_only(args):
                         "markers": marker_summary(checks),
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "content_gate": content_gate_stats(host_text),
+                        "capture_gate": capture_gate_stats(parse_gate_samples(host_text)),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
@@ -1942,6 +2083,7 @@ def main(argv=None):
                         "markers": marker_summary(checks),
                         "live_gameplay": gameplay_capture_stats(artifacts, labels),
                         "content_gate": content_gate_stats(host_log),
+                        "capture_gate": capture_gate_stats(parse_gate_samples(host_log)),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
