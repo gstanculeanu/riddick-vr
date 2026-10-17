@@ -64,8 +64,10 @@ jobs:
           python tools/xrsim.py --selftest
       - name: Hook-init regression test (GH #42)
         run: python tools/verify_hook_init.py
-      - name: Scenario manifest validation (GH #48)
-        run: python tools/scenario_tests.py --check
+      - name: Scenario manifest validation (GH #48, GH #75)
+        run: |
+          python tools/test_scenario_tests.py
+          python tools/scenario_tests.py --check
       - name: VR issue regression invariants (#40, #43-47)
         run: python tools/verify_reported_fixes.py
       - name: Verify 368-symbol OpenGL forwarder table intact

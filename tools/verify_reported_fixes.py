@@ -445,8 +445,25 @@ def main():
             "GH #68: the locomotion comfort vignette must be published to the host "
             "and asserted applied during scripted movement")
 
+    # GH #75: `scenario_tests.py --check` must be green on main. An observation-only
+    # profile (`hands_view`, idle framed hands with no interactive gesture) has no
+    # hook marker to assert, so the validator honours an explicit "observe": true
+    # opt-out instead of demanding markers -- while a profile with neither is still
+    # rejected. Guarded by tools/test_scenario_tests.py and the CI check lane.
+    scenario_tool = (ROOT / "tools/scenario_tests.py").read_text(encoding="utf-8")
+    hands_view = (ROOT / "tools/scenarios/hands_view.json").read_text(encoding="utf-8")
+    scenario_test = (ROOT / "tools/test_scenario_tests.py").read_text(encoding="utf-8")
+    require('"observe": true' in hands_view and
+            "observe must be a boolean" in scenario_tool and
+            "or \"observe\": true for an observation-only profile" in scenario_tool and
+            "test_shipped_tree_check_is_green" in scenario_test and
+            "test_markerless_profile_without_opt_out_is_rejected" in scenario_test,
+            "GH #75: the scenario validator must let an observation-only profile "
+            "opt out of the marker requirement and the shipped manifest must pass "
+            "--check")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-72)")
+          "#62, #64-68, #69, #71-72, #75)")
     return 0
 
 

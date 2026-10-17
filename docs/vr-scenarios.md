@@ -44,6 +44,17 @@ still required before gesture log markers can be expected. The scenario
 validator does not treat synthetic controller input alone as proof that the
 game accepted an action.
 
+### Observation-only profiles (GH #75)
+
+Some profiles frame the scene for inspection instead of driving an interaction:
+`tools/scenarios/hands_view.json` holds both controllers idle in front of the
+face so the native hands can be viewed. Such a profile has no hook marker to
+assert, so it must opt out explicitly with `"observe": true`. `python
+tools/scenario_tests.py --check` accepts a markerless profile only when that flag
+is set; a profile with neither markers nor the opt-out is still rejected.
+`tools/test_scenario_tests.py` guards both the opt-out and the shipped
+`--check` gate.
+
 ## Manual scenarios and evidence
 
 For a manual scenario, follow its `steps` in the manifest while the game is

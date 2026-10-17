@@ -87,3 +87,10 @@ machinery beside them.
   re-added #67 invariants) PASS.
 - `scenario_tests.py --check` remains red only on `hands_view.json` (GH #75,
   pre-existing, unchanged).
+
+## Update — GH #75 (ADR-0458)
+
+`scenario_tests.py --check` is green again: observation-only profiles now opt
+out of the marker requirement explicitly (`"observe": true`, set on
+`hands_view.json`), guarded by `tools/test_scenario_tests.py`. The red noted
+above was tooling-only and had no bearing on the hook reconciliation.

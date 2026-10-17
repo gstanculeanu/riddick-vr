@@ -42,8 +42,17 @@ def load_manifest():
             value = profile.get(field, [])
             if not isinstance(value, list) or not all(isinstance(m, str) and m for m in value):
                 raise ValueError(f"{path.name}: {field} must be a list of non-empty strings")
-        if not profile.get("markers") and not profile.get("markers_any"):
-            raise ValueError(f"{path.name}: expected non-empty markers or markers_any")
+        # GH #75: an observation-only profile (e.g. hands_view) frames the hands
+        # with no interactive gesture, so it has no hook marker to assert. Such a
+        # profile must opt out *explicitly* ("observe": true); a profile that
+        # neither declares markers nor opts out is still rejected.
+        observe = profile.get("observe", False)
+        if not isinstance(observe, bool):
+            raise ValueError(f"{path.name}: observe must be a boolean")
+        if not observe and not profile.get("markers") and not profile.get("markers_any"):
+            raise ValueError(
+                f"{path.name}: expected non-empty markers or markers_any "
+                '(or "observe": true for an observation-only profile)')
         # forbidden_markers are matched against the log only, not the hook source
         # (the logged line may be built from a format string).
         for marker in profile.get("markers", []) + profile.get("markers_any", []):
@@ -94,8 +103,13 @@ def main():
         return 1
 
     if args.check:
-        profile_count = len(list(MOCK_SCENARIOS.glob("*.json")))
-        print(f"[scenarios] manifest valid ({len(scenarios)} test cases, {profile_count} scripted profiles)")
+        profiles = list(MOCK_SCENARIOS.glob("*.json"))
+        observe_count = sum(
+            1 for path in profiles
+            if json.loads(path.read_text(encoding="utf-8")).get("observe") is True
+        )
+        print(f"[scenarios] manifest valid ({len(scenarios)} test cases, "
+              f"{len(profiles)} scripted profiles, {observe_count} observation-only)")
         if not args.list and not args.run and not args.validate:
             return 0
 
