@@ -2,587 +2,286 @@
   "passed": false,
   "checks": [
     {
-      "group": "frame_budget",
       "check": "frame_budget",
-      "ok": true,
-      "skip": true,
-      "detail": "no host log (evaluate-only)"
+      "ok": false,
+      "p50_ms": 96.22,
+      "p95_ms": 106.48,
+      "mean_ms": 55.86,
+      "max_ms": 140.77,
+      "over_budget": 174,
+      "budget_ms": 11.11111111111111,
+      "detail": "n=330 p50=96.22 p95=106.48 mean=55.86 max=140.77 over=174 budget=11.11",
+      "group": "frame_budget"
     },
     {
       "check": "scene_advanced",
       "ok": true,
-      "detail": "3/13 distinct frames",
+      "detail": "6/6 distinct frames",
       "group": "capture"
     },
     {
       "check": "both_eyes_non_black",
-      "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-8",
+      "ok": true,
+      "detail": "meanL=86.07 meanR=85.23 -23/0",
       "group": "stereo",
-      "frame": 1,
-      "branch": "unknown"
-    },
-    {
-      "check": "interop_produced_content",
-      "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
-      "group": "stereo",
-      "frame": 1,
-      "branch": "unknown"
+      "frame": 720,
+      "branch": "gameplay"
     },
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " -48/-8",
+      "detail": " -23/0",
       "group": "stereo",
-      "frame": 1,
-      "branch": "unknown"
+      "frame": 720,
+      "branch": "gameplay"
     },
     {
       "check": "no_vertical_disparity",
       "ok": true,
-      "skip": true,
-      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
+      "detail": "dy=0 -23/0",
       "group": "stereo",
-      "frame": 1,
-      "branch": "unknown"
+      "frame": 720,
+      "branch": "gameplay"
     },
     {
       "check": "horizontal_disparity_present",
       "ok": true,
-      "detail": "dx=-48 -48/-8",
+      "detail": "dx=-23 -23/0",
       "group": "stereo",
-      "frame": 1,
-      "branch": "unknown"
+      "frame": 720,
+      "branch": "gameplay"
     },
     {
       "check": "not_mono_duplicate",
       "ok": true,
-      "detail": "identical=False -48/-8",
+      "detail": "identical=False -23/0",
       "group": "stereo",
-      "frame": 1,
-      "branch": "unknown"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-8",
-      "group": "stereo",
-      "frame": 15,
-      "branch": "unknown"
-    },
-    {
-      "check": "interop_produced_content",
-      "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
-      "group": "stereo",
-      "frame": 15,
-      "branch": "unknown"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -48/-8",
-      "group": "stereo",
-      "frame": 15,
-      "branch": "unknown"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "skip": true,
-      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
-      "group": "stereo",
-      "frame": 15,
-      "branch": "unknown"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": true,
-      "detail": "dx=-48 -48/-8",
-      "group": "stereo",
-      "frame": 15,
-      "branch": "unknown"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": true,
-      "detail": "identical=False -48/-8",
-      "group": "stereo",
-      "frame": 15,
-      "branch": "unknown"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-8",
-      "group": "stereo",
-      "frame": 30,
-      "branch": "unknown"
-    },
-    {
-      "check": "interop_produced_content",
-      "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
-      "group": "stereo",
-      "frame": 30,
-      "branch": "unknown"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -48/-8",
-      "group": "stereo",
-      "frame": 30,
-      "branch": "unknown"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "skip": true,
-      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
-      "group": "stereo",
-      "frame": 30,
-      "branch": "unknown"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": true,
-      "detail": "dx=-48 -48/-8",
-      "group": "stereo",
-      "frame": 30,
-      "branch": "unknown"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": true,
-      "detail": "identical=False -48/-8",
-      "group": "stereo",
-      "frame": 30,
-      "branch": "unknown"
+      "frame": 720,
+      "branch": "gameplay"
     },
     {
       "check": "both_eyes_non_black",
       "ok": true,
-      "detail": "meanL=8.033 meanR=8.033 0/0",
+      "detail": "meanL=99.34 meanR=98.73 -14/0",
       "group": "stereo",
-      "frame": 45,
-      "branch": "unknown"
+      "frame": 780,
+      "branch": "gameplay"
     },
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " 0/0",
+      "detail": " -14/0",
       "group": "stereo",
-      "frame": 45,
-      "branch": "unknown"
+      "frame": 780,
+      "branch": "gameplay"
     },
     {
       "check": "no_vertical_disparity",
       "ok": true,
-      "detail": "dy=0 0/0",
+      "detail": "dy=0 -14/0",
       "group": "stereo",
-      "frame": 45,
-      "branch": "unknown"
+      "frame": 780,
+      "branch": "gameplay"
     },
     {
       "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
+      "ok": true,
+      "detail": "dx=-14 -14/0",
       "group": "stereo",
-      "frame": 45,
-      "branch": "unknown"
+      "frame": 780,
+      "branch": "gameplay"
     },
     {
       "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
+      "ok": true,
+      "detail": "identical=False -14/0",
       "group": "stereo",
-      "frame": 45,
-      "branch": "unknown"
+      "frame": 780,
+      "branch": "gameplay"
     },
     {
       "check": "both_eyes_non_black",
       "ok": true,
-      "detail": "meanL=8.033 meanR=8.033 0/0",
+      "detail": "meanL=85.69 meanR=84.82 -23/0",
       "group": "stereo",
-      "frame": 60,
-      "branch": "unknown"
+      "frame": 840,
+      "branch": "gameplay"
     },
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " 0/0",
+      "detail": " -23/0",
       "group": "stereo",
-      "frame": 60,
-      "branch": "unknown"
+      "frame": 840,
+      "branch": "gameplay"
     },
     {
       "check": "no_vertical_disparity",
       "ok": true,
-      "detail": "dy=0 0/0",
+      "detail": "dy=0 -23/0",
       "group": "stereo",
-      "frame": 60,
-      "branch": "unknown"
+      "frame": 840,
+      "branch": "gameplay"
     },
     {
       "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
+      "ok": true,
+      "detail": "dx=-23 -23/0",
       "group": "stereo",
-      "frame": 60,
-      "branch": "unknown"
+      "frame": 840,
+      "branch": "gameplay"
     },
     {
       "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
+      "ok": true,
+      "detail": "identical=False -23/0",
       "group": "stereo",
-      "frame": 60,
-      "branch": "unknown"
+      "frame": 840,
+      "branch": "gameplay"
     },
     {
       "check": "both_eyes_non_black",
       "ok": true,
-      "detail": "meanL=8.033 meanR=8.033 0/0",
+      "detail": "meanL=99.53 meanR=98.92 -14/0",
       "group": "stereo",
-      "frame": 75,
-      "branch": "unknown"
+      "frame": 900,
+      "branch": "gameplay"
     },
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " 0/0",
+      "detail": " -14/0",
       "group": "stereo",
-      "frame": 75,
-      "branch": "unknown"
+      "frame": 900,
+      "branch": "gameplay"
     },
     {
       "check": "no_vertical_disparity",
       "ok": true,
-      "detail": "dy=0 0/0",
+      "detail": "dy=0 -14/0",
       "group": "stereo",
-      "frame": 75,
-      "branch": "unknown"
+      "frame": 900,
+      "branch": "gameplay"
     },
     {
       "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
+      "ok": true,
+      "detail": "dx=-14 -14/0",
       "group": "stereo",
-      "frame": 75,
-      "branch": "unknown"
+      "frame": 900,
+      "branch": "gameplay"
     },
     {
       "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
+      "ok": true,
+      "detail": "identical=False -14/0",
       "group": "stereo",
-      "frame": 75,
-      "branch": "unknown"
+      "frame": 900,
+      "branch": "gameplay"
     },
     {
       "check": "both_eyes_non_black",
       "ok": true,
-      "detail": "meanL=8.033 meanR=8.033 0/0",
+      "detail": "meanL=85.71 meanR=84.86 -23/0",
       "group": "stereo",
-      "frame": 90,
-      "branch": "unknown"
+      "frame": 960,
+      "branch": "gameplay"
     },
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " 0/0",
+      "detail": " -23/0",
       "group": "stereo",
-      "frame": 90,
-      "branch": "unknown"
+      "frame": 960,
+      "branch": "gameplay"
     },
     {
       "check": "no_vertical_disparity",
       "ok": true,
-      "detail": "dy=0 0/0",
+      "detail": "dy=0 -23/0",
       "group": "stereo",
-      "frame": 90,
-      "branch": "unknown"
+      "frame": 960,
+      "branch": "gameplay"
     },
     {
       "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
+      "ok": true,
+      "detail": "dx=-23 -23/0",
       "group": "stereo",
-      "frame": 90,
-      "branch": "unknown"
+      "frame": 960,
+      "branch": "gameplay"
     },
     {
       "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
+      "ok": true,
+      "detail": "identical=False -23/0",
       "group": "stereo",
-      "frame": 90,
-      "branch": "unknown"
+      "frame": 960,
+      "branch": "gameplay"
     },
     {
       "check": "both_eyes_non_black",
       "ok": true,
-      "detail": "meanL=8.033 meanR=8.033 0/0",
+      "detail": "meanL=99.47 meanR=98.85 -14/0",
       "group": "stereo",
-      "frame": 105,
-      "branch": "unknown"
+      "frame": 1020,
+      "branch": "gameplay"
     },
     {
       "check": "same_eye_resolution",
       "ok": true,
-      "detail": " 0/0",
+      "detail": " -14/0",
       "group": "stereo",
-      "frame": 105,
-      "branch": "unknown"
+      "frame": 1020,
+      "branch": "gameplay"
     },
     {
       "check": "no_vertical_disparity",
       "ok": true,
-      "detail": "dy=0 0/0",
+      "detail": "dy=0 -14/0",
       "group": "stereo",
-      "frame": 105,
-      "branch": "unknown"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
-      "group": "stereo",
-      "frame": 105,
-      "branch": "unknown"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
-      "group": "stereo",
-      "frame": 105,
-      "branch": "unknown"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=8.033 meanR=8.033 0/0",
-      "group": "stereo",
-      "frame": 120,
-      "branch": "unknown"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " 0/0",
-      "group": "stereo",
-      "frame": 120,
-      "branch": "unknown"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 0/0",
-      "group": "stereo",
-      "frame": 120,
-      "branch": "unknown"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
-      "group": "stereo",
-      "frame": 120,
-      "branch": "unknown"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
-      "group": "stereo",
-      "frame": 120,
-      "branch": "unknown"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": false,
-      "detail": "meanL=0 meanR=0 -48/-8",
-      "group": "stereo",
-      "frame": 135,
-      "branch": "unknown"
-    },
-    {
-      "check": "interop_produced_content",
-      "ok": false,
-      "detail": "eye buffers are empty: check the hook 'Hardware Interop' lines and StereoRenderer::LockSharedTextures/UnlockSharedTextures -48/-8",
-      "group": "stereo",
-      "frame": 135,
-      "branch": "unknown"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -48/-8",
-      "group": "stereo",
-      "frame": 135,
-      "branch": "unknown"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "skip": true,
-      "detail": "inconclusive: dy=-8 [search boundary] -> low-contrast frame (std=0.0 < 25); optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/-8",
-      "group": "stereo",
-      "frame": 135,
-      "branch": "unknown"
+      "frame": 1020,
+      "branch": "gameplay"
     },
     {
       "check": "horizontal_disparity_present",
       "ok": true,
-      "detail": "dx=-48 -48/-8",
+      "detail": "dx=-14 -14/0",
       "group": "stereo",
-      "frame": 135,
-      "branch": "unknown"
+      "frame": 1020,
+      "branch": "gameplay"
     },
     {
       "check": "not_mono_duplicate",
       "ok": true,
-      "detail": "identical=False -48/-8",
+      "detail": "identical=False -14/0",
       "group": "stereo",
-      "frame": 135,
-      "branch": "unknown"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=4.982 meanR=4.982 0/0",
-      "group": "stereo",
-      "frame": 150,
-      "branch": "unknown"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " 0/0",
-      "group": "stereo",
-      "frame": 150,
-      "branch": "unknown"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 0/0",
-      "group": "stereo",
-      "frame": 150,
-      "branch": "unknown"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
-      "group": "stereo",
-      "frame": 150,
-      "branch": "unknown"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
-      "group": "stereo",
-      "frame": 150,
-      "branch": "unknown"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=4.982 meanR=4.982 0/0",
-      "group": "stereo",
-      "frame": 165,
-      "branch": "unknown"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " 0/0",
-      "group": "stereo",
-      "frame": 165,
-      "branch": "unknown"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 0/0",
-      "group": "stereo",
-      "frame": 165,
-      "branch": "unknown"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
-      "group": "stereo",
-      "frame": 165,
-      "branch": "unknown"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
-      "group": "stereo",
-      "frame": 165,
-      "branch": "unknown"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=4.982 meanR=4.982 0/0",
-      "group": "stereo",
-      "frame": 180,
-      "branch": "unknown"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " 0/0",
-      "group": "stereo",
-      "frame": 180,
-      "branch": "unknown"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 0/0",
-      "group": "stereo",
-      "frame": 180,
-      "branch": "unknown"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": false,
-      "detail": "dx=0 0/0",
-      "group": "stereo",
-      "frame": 180,
-      "branch": "unknown"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": false,
-      "detail": "identical=True 0/0",
-      "group": "stereo",
-      "frame": 180,
-      "branch": "unknown"
+      "frame": 1020,
+      "branch": "gameplay"
     },
     {
       "group": "stereo",
       "check": "gameplay_captures_present",
       "ok": true,
-      "skip": true,
-      "detail": "no display_branch.log: per-frame display branch unknown (legacy capture or pre-label host)"
+      "detail": "6 gameplay / 0 cinema / 0 unknown of 6"
+    },
+    {
+      "group": "capture",
+      "check": "gameplay_window_has_content",
+      "ok": true,
+      "detail": "0 blank of 6 gameplay frame(s)"
+    },
+    {
+      "group": "capture",
+      "check": "gameplay_full_bleed_reached",
+      "ok": true,
+      "detail": "max BarScan active-rect fill=1.00 (need >= 0.9)"
     },
     {
       "group": "capture",
       "check": "capture_metadata_present",
       "ok": true,
-      "skip": true,
-      "detail": "no eye_frames.log: per-frame camera transform unknown (legacy capture / pre-#68 host)"
+      "detail": "6 frame(s) with camera transform, 6 distinct; HMD yaw span 36.308 deg"
     },
     {
       "group": "viewmodel",
@@ -594,34 +293,33 @@
     {
       "check": "comfort_vignette_applied",
       "ok": true,
-      "skip": true,
-      "detail": "no ComfortVignette line (pre-#68 host, or evaluate-only without a persisted host log)",
+      "detail": "max=1.000 while moving (threshold 0.050); 989/1050 frame(s) above, 989 locomotion frame(s)",
       "group": "comfort"
     },
     {
       "check": "no_green_chroma_glitch",
       "ok": true,
-      "detail": "0 green px (frame test_frame_0180.bmp)",
+      "detail": "0 green px (frame test_frame_1020.bmp)",
       "group": "comfort"
     },
     {
       "check": "has_content",
       "ok": true,
-      "detail": "rows=634 cols=1074 (frame test_frame_0180.bmp)",
+      "detail": "rows=2688 cols=2468 (frame test_frame_1020.bmp)",
       "group": "comfort"
     }
   ],
-  "mode": "evaluate-only",
+  "mode": "run",
   "artifacts": "C:\\Users\\GigelCastel\\riddick-vr\\tests\\xrsim\\artifacts",
   "hook_log": "F:\\The Chronicles of Riddick - Assault on Dark Athena\\System\\Win32_x86\\riddick_vr.log",
   "hook_log_scope": "current-run section",
   "markers": {},
   "live_gameplay": {
-    "gameplay": 0,
+    "gameplay": 6,
     "cinema": 0,
-    "unknown": 13,
+    "unknown": 0,
     "blank_gameplay": 0,
-    "distinct_gameplay": 0
+    "distinct_gameplay": 6
   },
   "content_gate": {
     "blank_skipped": 0,
@@ -634,16 +332,31 @@
     "translates": 0
   },
   "eye_frames": {
-    "count": 0,
-    "distinct": 0,
-    "yaw_span_deg": null
+    "count": 6,
+    "distinct": 6,
+    "yaw_span_deg": 36.308
   },
   "vertical_disparity": {
-    "ok": 9,
-    "inconclusive": 4,
+    "ok": 6,
+    "inconclusive": 0,
     "failed": 0
   },
-  "comfort_vignette": null,
-  "host_log": null,
-  "display_branch": {}
+  "comfort_vignette": {
+    "samples": 1050,
+    "max": 1.0,
+    "mean": 0.678,
+    "above": 989,
+    "locomotion": 989,
+    "max_locomotion": 1.0,
+    "threshold": 0.05
+  },
+  "host_log": "C:\\Users\\GigelCastel\\riddick-vr\\tests\\xrsim\\artifacts\\host.log",
+  "display_branch": {
+    "720": false,
+    "780": false,
+    "840": false,
+    "900": false,
+    "960": false,
+    "1020": false
+  }
 }

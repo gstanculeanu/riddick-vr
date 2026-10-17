@@ -23,7 +23,10 @@ The Host component is an independent 64-bit (x64) application responsible for al
 - In mock mode, the gameplay-only window is also **content-gated** (GH #72
   requirement 2): a gameplay-labelled frame is skipped while it is all-black
   (the GL<->D3D11 interop warm-up, mean luma <= 1) or byte-identical to the last
-  dumped frame (a frozen static 2D page). Each skip is logged as
+  dumped frame (a frozen static 2D page). **Both** eyes are sampled, so a frame
+  left with an empty eye against a lit one -- which would read as a spurious
+  stereo failure -- is skipped too (`EyePairIsBlank`, `src/host/dump_gate.h`,
+  unit-tested by `tests/dump_gate_tests.cpp`). Each skip is logged as
   `DumpGate skip frame=N reason=blank|frozen`, parsed by the harness into the
   report's `content_gate` key. This keeps the graded window live and advancing.
 - In mock mode, every dumped frame also records the **camera transform** it was

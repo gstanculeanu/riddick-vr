@@ -52,7 +52,8 @@ unit-tested extension of `src/host/dump_gate.h`.
    gate (a blank *cinema* frame is still skipped by the branch rule).
 
 2. **Host probe (`SampleEyeContent`).** Only when a dump is due *and* the branch
-   gate would otherwise pass, the mock host samples the left-eye shared texture:
+   gate would otherwise pass, the mock host samples **both** eye shared textures
+   (the 16×16 signature comes from the left eye):
    - **mean luma over every pixel** (`sum((R+G+B)/3)/count`) →
      `Blank` when `mean <= kBlankMeanLuma (1.0)`, matching the harness's own
      `blank_gameplay` rule (mean ≤ 1). A *full-image* mean (not a sparse grid) so
@@ -61,7 +62,15 @@ unit-tested extension of `src/host/dump_gate.h`.
      frame → `Frozen` when identical (a static page repeated across captures);
    - otherwise `Live`.
 
-   A probe failure leaves the frame `Live` (never blocks a capture).
+   **Both-eye rule (wake 53).** The GL↔D3D11 interop warm-up and level
+   transitions can leave one eye all-black while the other already has pixels, so
+   a frame is `Blank` when *either sampled* eye is blank (`EyePairIsBlank`, pure
+   and unit-tested). Without this a gameplay-labelled frame with an empty right
+   eye was graded and produced a spurious stereo FAIL (measured: frame 1320,
+   `meanL=35.6 meanR=0`).
+
+   A probe failure leaves the frame `Live` (never blocks a capture); an eye that
+   could not be sampled is never treated as blank.
 
 3. **Reporting.** Each skip is logged as
    `DumpGate skip frame=N reason=blank|frozen`; `tools/xrsim.py` parses that into

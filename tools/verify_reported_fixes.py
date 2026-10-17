@@ -209,7 +209,205 @@ def main():
             "GH #58: the native hand mesh must support an offline-baked posed "
             "variant selected by NativeHandPose")
 
-    print("[issue-fixes] source invariants passed (#40, #43-47, #52-54)")
+    # GH #61: the native hands must ship with the real Riddick skin diffuse
+    # bound. The commit that disabled it (52c2101) claimed the bake "decoded
+    # white"; that is false (the committed asset is warm skin tones with no
+    # near-white texels and the arm meshes' own UVs sample it), so a regression
+    # test pins the fact on the committed asset and the shipped INI keeps the
+    # texture enabled rather than reverting on the same false premise.
+    require("NativeHandTexture=1" in (ROOT / "riddick_vr.ini").read_text(encoding="utf-8") and
+            "EnsureNativeHandTexture" in hands and
+            'FindNativeHandTexture("Riddick_ArmScar_D")' in hands and
+            "GL_MODULATE" in hands and
+            "nativeHandTexture = 1" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            "tests/native_hand_skin_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "native_hand_skin_mapping" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "test_committed_asset_is_skin_toned" in
+            (ROOT / "tools/test_xtc_bake.py").read_text(encoding="utf-8"),
+            "GH #61: the shipped config must keep the real skin diffuse enabled "
+            "and the skin-toned bake must stay pinned by a regression test")
+
+    # GH #69: the mock host must label every capture with the display branch it
+    # published (cinema vs gameplay) and persist that label beside the frames,
+    # and the harness must consume the label so identical eyes are attributed
+    # instead of guessed (and a cinema-only run cannot pass the stereo gates).
+    xrsim_tool = (ROOT / "tools/xrsim.py").read_text(encoding="utf-8")
+    require("cinema=" in host and "display_branch.log" in host and
+            "stateRead && clientState.cinemaMode" in host and
+            "read_display_branch_labels" in xrsim_tool and
+            "gameplay_captures_present" in xrsim_tool and
+            "persist_host_log" in xrsim_tool and
+            'DISPLAY_LABEL_FILE = "display_branch.log"' in xrsim_tool,
+            "GH #69: XRSIM must label each capture with its display branch and "
+            "attribute identical eyes per frame")
+
+    # GH #69 requirement 1: the dump window must be gated on the hook-published
+    # display branch so the capture is live 3D gameplay (menu/cinema + interop
+    # warm-up frames have correctly-identical eyes and cannot validate stereo).
+    # The gate is a pure, unit-tested helper and scripted runs opt in.
+    require("ShouldDumpFrame" in (ROOT / "src/host/dump_gate.h").read_text(encoding="utf-8") and
+            "ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content)" in host and
+            "--dump-gameplay-only" in host_main and
+            "build_host_cmd" in xrsim_tool and
+            '"--dump-gameplay-only"' in xrsim_tool and
+            "dump_gate_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"),
+            "GH #69: XRSIM must gate the dump window on gameplay-only frames "
+            "(pure helper + --dump-gameplay-only + unit test)")
+
+    # GH #69 requirement 4: the hook truncates riddick_vr.log on every launch
+    # (logging.cpp: std::ios::out|std::ios::trunc), so a pre-run byte offset is
+    # not a run boundary -- the harness must recover the *current run's* section
+    # by its header or markers logged early in the new run are silently dropped.
+    require("std::ios::out | std::ios::trunc" in
+            (ROOT / "src/hook/logging.cpp").read_text(encoding="utf-8") and
+            "RUN_HEADER" in xrsim_tool and "extract_run_section" in xrsim_tool and
+            "read_fresh_hook_log" in xrsim_tool and
+            # The restored harness names the current-run log path `log_file`
+            # (a `LOG_FILE` constant is no longer used at this call site).
+            "read_fresh_hook_log(log_file, log_mark)" in xrsim_tool,
+            "GH #69: XRSIM must read the current-run hook-log section (the hook "
+            "truncates its log per launch), not slice by a stale byte offset")
+
+    # GH #71 requirement 1: the mock host follows the *game's* uncapped swap rate,
+    # so a frame-counted window cannot express the wall-clock the startup sequence
+    # needs. Reaching live gameplay must run with an unlimited frame count bounded
+    # by wall-clock, and must prove a full-bleed 3D scene was reached from the
+    # hook's structural BarScan active-rect signal -- not the `cinemaMode` bit,
+    # which mislabels the static 2D splash pages as gameplay (GH #72).
+    require("--reach-gameplay" in xrsim_tool and
+            "GAMEPLAY_DEFAULT_DURATION" in xrsim_tool and
+            "active_rect_fill" in xrsim_tool and
+            "BARSCAN_WINDOW_RE" in xrsim_tool and
+            "gameplay_full_bleed_reached" in xrsim_tool and
+            "0 if getattr(args, \"reach_gameplay\", False) else args.frames" in xrsim_tool and
+            "gameplay_capture_stats" in xrsim_tool and
+            "live_gameplay" in xrsim_tool,
+            "GH #71: XRSIM must reach live gameplay with an unlimited, wall-clock "
+            "bounded run and assert the full-bleed BarScan signal")
+
+    # GH #72 requirement 2: the gameplay-only dump window must also be
+    # *content-gated* -- a gameplay-labelled frame is skipped while it is
+    # all-black (GL<->D3D11 interop warm-up) or byte-identical to the last
+    # dumped frame (a frozen static 2D page), so the graded window is live,
+    # advancing 3D gameplay. The verdict is a pure FrameContent helper,
+    # unit-tested, and surfaced in the harness report.
+    dump_gate = (ROOT / "src/host/dump_gate.h").read_text(encoding="utf-8")
+    require("FrameContent" in dump_gate and
+            "FrameContent::Live" in dump_gate and
+            "SampleEyeContent" in host and
+            "kBlankMeanLuma" in host and
+            "RiddickVR::FrameContent::Frozen" in host and
+            "DumpGate skip frame=" in host and
+            "ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content)" in host and
+            # GH #72 (both-eye rule): a frame with an empty eye is not gradable
+            # (it reads as a spurious stereo failure), so the content probe
+            # samples both eyes.
+            "EyePairIsBlank" in dump_gate and
+            "EyePairIsBlank(leftLuma, leftSampled, rightLuma, rightSampled," in host and
+            "a blank right eye must mark the pair as blank" in
+            (ROOT / "tests/dump_gate_tests.cpp").read_text(encoding="utf-8") and
+            "FrameContent::Blank" in (ROOT / "tests/dump_gate_tests.cpp").read_text(encoding="utf-8") and
+            "content_gate_stats" in xrsim_tool and
+            '"content_gate"' in xrsim_tool and
+            "gameplay_window_has_content" in xrsim_tool,
+            "GH #72: the XRSIM gameplay window must be content-gated (blank "
+            "interop warm-up / frozen repeats excluded) and report why")
+
+    # GH #68 requirement 1: every dumped frame must record the head/eye transform
+    # and projection it was rendered with, so a capture is self-describing in 3D
+    # (the input GH #67 step 3 needs). The wire format is a pure helper
+    # (src/host/eye_frame.h), unit-tested, parsed back by the harness, and
+    # surfaced in the report as `eye_frames`.
+    eye_frame = (ROOT / "src/host/eye_frame.h").read_text(encoding="utf-8")
+    require("FormatEyeFrameLine" in eye_frame and
+            "EyeFrameSample" in eye_frame and
+            "eye_frames.log" in host and
+            "FormatEyeFrameLine(totalFrames, sample)" in host and
+            "tests/eye_frame_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "eye_frame_record" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "def read_eye_frames" in xrsim_tool and
+            "def eye_frame_stats" in xrsim_tool and
+            "capture_metadata_present" in xrsim_tool and
+            '"eye_frames"' in xrsim_tool,
+            "GH #68: the mock host must record each dumped frame's camera "
+            "transform (eye pose/projection) and the harness must parse it")
+
+    # GH #68 requirement 2 (second half): the frame budget must be asserted on a
+    # *frame-pacing* statistic, not on the arithmetic mean / single worst frame.
+    # The mock host follows the game's uncapped swap rate, so a one-off
+    # level-load hitch (measured ~760 ms) dominates mean/max without being a
+    # sustained 90 Hz regression. The summary therefore carries p50/p95 (pure
+    # helper src/host/frame_time_stats.h, unit-tested) and the harness asserts
+    # the budget on p50/p95 while still reporting max_ms and the drop count
+    # (ADR-0455).
+    frame_time = (ROOT / "src/host/frame_time_stats.h").read_text(encoding="utf-8")
+    require("PercentileMs" in frame_time and
+            "p50Ms" in frame_time and "p95Ms" in frame_time and
+            "SummarizeFrameTimes" in frame_time and
+            "FormatFrameBudgetLine" in frame_time and
+            "frame_time_stats.h" in host and
+            "FormatFrameBudgetLine(stats)" in host and
+            "tests/frame_time_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "frame_time_percentiles" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "p50_ms=([\\d.]+) p95_ms=([\\d.]+)" in xrsim_tool and
+            "p50 <= eff and p95 <= eff" in xrsim_tool and
+            '"p50_ms": p50' in xrsim_tool and
+            '"p95_ms": p95' in xrsim_tool,
+            "GH #68: the frame budget must be asserted on p50/p95 pacing "
+            "(with max/drops still reported) and surfaced in the harness report")
+
+    # GH #72 requirement 3: the dark-frame `dy=±4` is an alignment-estimator
+    # artefact, not a stereo defect (ADR-0454). The harness must gate the
+    # vertical-disparity verdict on the frame's contrast and on the optimum not
+    # being pinned to the search edge (an unquantifiable offset), and surface the
+    # verdict in the report -- so the graded window raises no false defect while a
+    # textured frame with a real, interior offset still fails.
+    _xrsim_tests = (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8")
+    require("MIN_DY_CONTRAST" in xrsim_tool and
+            "DY_SEARCH_BOUND" in xrsim_tool and
+            "dy_at_boundary" in xrsim_tool and
+            "vertical_disparity_stats" in xrsim_tool and
+            '"vertical_disparity"' in xrsim_tool and
+            "estimator artefact" in xrsim_tool and
+            "test_boundary_dy_is_inconclusive_not_failed" in _xrsim_tests and
+            "test_high_contrast_interior_dy_still_fails" in _xrsim_tests and
+            "test_low_contrast_vertical_shift_is_inconclusive" in _xrsim_tests,
+            "GH #72: the vertical-disparity verdict must be contrast- and "
+            "search-boundary-gated (artefact on dark/flat frames, ADR-0454) and "
+            "reported")
+
+    # GH #68 requirement 5 (comfort rules): the locomotion comfort vignette must
+    # be assertable without a headset, so a config/parse regression that disabled
+    # it cannot hide. The mock host reads the hook-published `comfortVignette`
+    # back every frame and summarises it against the locomotion input it published
+    # (pure helper src/host/comfort_vignette.h, unit-tested); XRSIM asserts the
+    # level actually rose while the run moved/turned, skipped -- never failed --
+    # when the line or the locomotion input is absent (ADR-0456).
+    comfort_hdr = (ROOT / "src/host/comfort_vignette.h").read_text(encoding="utf-8")
+    ipc_bridge = (ROOT / "src/bridge/ipc_bridge.cpp").read_text(encoding="utf-8")
+    require("ComfortVignetteStats" in comfort_hdr and
+            "AccumulateComfort" in comfort_hdr and
+            "FormatComfortVignetteLine" in comfort_hdr and
+            "comfort_vignette.h" in host and
+            "AccumulateComfort(s_comfort, clientState.comfortVignette" in host and
+            "FormatComfortVignetteLine(s_comfort)" in host and
+            # The defect this assertion found: WriteState must actually publish
+            # the comfort level (it copies hook->host fields by hand).
+            "m_pSharedState->comfortVignette = state.comfortVignette;" in ipc_bridge and
+            "tests/comfort_vignette_tests.cpp" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "comfort_vignette_summary" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "COMFORT_VIGNETTE_RE" in xrsim_tool and
+            "def parse_comfort" in xrsim_tool and
+            "def comfort_vignette_check" in xrsim_tool and
+            "comfort_vignette_applied" in xrsim_tool and
+            '"comfort_vignette"' in xrsim_tool and
+            "test_comfort_vignette_check_asserts_applied_during_locomotion" in _xrsim_tests and
+            "test_comfort_vignette_check_skips_without_line_or_locomotion" in _xrsim_tests,
+            "GH #68: the locomotion comfort vignette must be published to the host "
+            "and asserted applied during scripted movement")
+
+    print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
+          "#62, #64-68, #69, #71-72)")
     return 0
 
 

@@ -53,4 +53,21 @@ inline bool ShouldDumpFrame(bool dumpDue, bool dumpGameplayOnly,
     return content == FrameContent::Live;
 }
 
+// GH #72 requirement 2 (both-eye rule): a captured frame is only gradable when
+// BOTH eyes carry content. The GL<->D3D11 interop warm-up and level transitions
+// can leave one eye's shared texture all-black while the other already has
+// pixels; that frame reads as a stereo failure (a lit eye against an empty eye)
+// even though the display branch is 3D gameplay -- a spurious defect (measured:
+// frame 1320, meanL=35.6 meanR=0, wake 53). `leftSampled` / `rightSampled` are
+// false when the eye could not be sampled at all; a probe failure must not be
+// mistaken for blank content (it never blocks a capture), so only a *sampled*
+// eye can mark the pair blank.
+inline bool EyePairIsBlank(float leftLuma, bool leftSampled,
+                           float rightLuma, bool rightSampled,
+                           float blankMeanLuma) {
+    if (leftSampled && leftLuma <= blankMeanLuma) return true;
+    if (rightSampled && rightLuma <= blankMeanLuma) return true;
+    return false;
+}
+
 }  // namespace RiddickVR

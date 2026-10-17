@@ -16,6 +16,7 @@
 
 #include <cstdio>
 
+using RiddickVR::EyePairIsBlank;
 using RiddickVR::FrameContent;
 using RiddickVR::ShouldDumpFrame;
 
@@ -71,6 +72,21 @@ int main() {
     // and a blank unknown-branch frame are both still skipped.
     Check(!ShouldDumpFrame(true, true, true, /*cinema=*/true, FrameContent::Blank),
           "gameplay-only must skip a blank cinema frame");
+
+    // GH #72 requirement 2 (both-eye rule): a frame is blank if EITHER *sampled*
+    // eye is blank -- one empty eye against a lit one would read as a spurious
+    // stereo failure. An unsampled eye must NOT be treated as blank (a probe
+    // failure never blocks a capture).
+    Check(EyePairIsBlank(40.0f, true, 0.0f, true, 1.0f),
+          "a blank right eye must mark the pair as blank");
+    Check(EyePairIsBlank(0.0f, true, 40.0f, true, 1.0f),
+          "a blank left eye must mark the pair as blank");
+    Check(!EyePairIsBlank(40.0f, true, 40.0f, true, 1.0f),
+          "two lit eyes must not be blank");
+    Check(!EyePairIsBlank(0.0f, /*leftSampled=*/false, 40.0f, true, 1.0f),
+          "an unsampled left eye must not be treated as blank");
+    Check(!EyePairIsBlank(40.0f, true, 0.0f, /*rightSampled=*/false, 1.0f),
+          "an unsampled right eye must not be treated as blank");
 
     if (g_failures == 0) {
         std::puts("dump gate tests passed");
