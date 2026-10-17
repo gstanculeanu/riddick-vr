@@ -30,9 +30,13 @@
 //     buffers: DirectInput's one-byte-per-scan-code keyboard buffer and
 //     XInput's ``XINPUT_GAMEPAD`` button word;
 //   * the two ownership predicates the interceptor needs (which resolved proc
-//     name is ours, and whether a ``CreateDevice`` GUID is the keyboard).
+//     name is ours, and whether a ``CreateDevice`` GUID is the keyboard);
+//   * the vtable slots and env-token parsers the interceptor wires up.
 //
 // No Win32/GL dependency: unit-tested in ``tests/sim_input_bridge_tests.cpp``.
+// The (non-pure) interceptor that consumes this core -- the early
+// ``GetProcAddress`` IAT swap on MSystem.dll and the DirectInput/XInput wrappers
+// -- lives in ``src/hook/sim_input_bridge_win32.cpp`` (ADR-0468).
 
 #include <cstring>
 
@@ -71,6 +75,40 @@ inline bool SimRouteHasKeyboard(SimConfirmRoute route) {
 
 inline bool SimRouteHasGamepad(SimConfirmRoute route) {
     return route == SimConfirmRoute::Gamepad || route == SimConfirmRoute::Both;
+}
+
+// Case-insensitive ASCII equality (no <windows.h> here; ``_stricmp`` is not
+// available to the headless test build).
+inline bool SimTokenEquals(const char* a, const char* b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb - 'A' + 'a');
+        if (ca != cb) return false;
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+// Parse ``RIDDICKVR_SIM_CONFIRM``'s *value* (the token that opted in) into the
+// route the interceptor fabricates on. An empty token is a bare opt-in and
+// keeps ``fallback``; an unrecognised token also keeps ``fallback`` (a typo
+// must neither silently disable the confirm nor widen the route beyond what was
+// asked for). ``none``/``off`` is the explicit opt-out for the route while
+// leaving the bridge installed-and-idle.
+inline SimConfirmRoute SimRouteFromToken(const char* token,
+                                         SimConfirmRoute fallback = SimConfirmRoute::Both) {
+    if (!token || !*token) return fallback;
+    if (SimTokenEquals(token, "keyboard")) return SimConfirmRoute::Keyboard;
+    if (SimTokenEquals(token, "gamepad")) return SimConfirmRoute::Gamepad;
+    if (SimTokenEquals(token, "both")) return SimConfirmRoute::Both;
+    if (SimTokenEquals(token, "none") || SimTokenEquals(token, "off")) {
+        return SimConfirmRoute::None;
+    }
+    return fallback;
 }
 
 // The resolved proc names the interceptor takes over. ``GetProcAddress`` is
@@ -134,6 +172,51 @@ inline bool SimConfirmTick(unsigned long now,
     }
     return since < cfg.holdMs;
 }
+
+// Parse a plain unsigned decimal token (the harness's optional env overrides).
+// Rejects an absent/empty token, any non-digit, and anything over 32 bits.
+inline bool SimParseUnsigned(const char* token, unsigned long& out) {
+    if (!token || !*token) return false;
+    unsigned long value = 0;
+    for (const char* p = token; *p; ++p) {
+        if (*p < '0' || *p > '9') return false;
+        const unsigned long digit = static_cast<unsigned long>(*p - '0');
+        // Reject anything that would wrap 32 bits rather than silently accepting
+        // a truncated value (``unsigned long`` is 32-bit on Windows).
+        if (value > (0xFFFFFFFFul - digit) / 10ul) return false;
+        value = value * 10ul + digit;
+    }
+    out = value;
+    return true;
+}
+
+// Build the tap cadence from the three optional env tokens, falling back per
+// field: a millisecond field must be present, numeric and non-zero (a zero
+// period/hold is nonsense and would leave no gap), while ``maxTaps`` may be an
+// explicit 0 -- that is the legal "never tap" budget, not an error.
+inline SimConfirmScheduleConfig SimConfirmScheduleFromTokens(
+        const char* periodMsToken, const char* holdMsToken, const char* maxTapsToken,
+        SimConfirmScheduleConfig fallback) {
+    SimConfirmScheduleConfig cfg = fallback;
+    unsigned long value = 0;
+    if (SimParseUnsigned(periodMsToken, value) && value > 0) cfg.periodMs = value;
+    if (SimParseUnsigned(holdMsToken, value) && value > 0) cfg.holdMs = value;
+    if (SimParseUnsigned(maxTapsToken, value)) cfg.maxTaps = static_cast<unsigned int>(value);
+    return cfg;
+}
+
+// ---------------------------------------------------------------------------
+// The two vtable slots the interceptor patches in place (the DirectInput route)
+// ---------------------------------------------------------------------------
+// IDirectInputA / IDirectInputDeviceA (the DirectX-3 ``dinput.dll`` interfaces,
+// which is what ``DirectInputCreateA`` hands back): IUnknown occupies 0..2, so
+// IDirectInputA::CreateDevice is slot 3 and
+// IDirectInputDeviceA::GetDeviceState is slot 9 (GH #80). Pinned here so the
+// headless test locks the ABI the interceptor hard-codes.
+enum : int {
+    kDirectInputCreateDeviceSlot = 3,
+    kDirectInputDeviceGetDeviceStateSlot = 9,
+};
 
 // ---------------------------------------------------------------------------
 // DirectInput keyboard state (the keyboard route)

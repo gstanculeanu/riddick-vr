@@ -2,6 +2,87 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 66 — 2026-10-17 23:35 (scheduled loop)
+- **Unit:** GH **#80 requirement 1** — implemented the simulator-only input
+  bridge's *interceptor* (the early `GetProcAddress` IAT swap + the
+  DirectInput/XInput wrappers), consuming the wake-65 pure core unchanged, and
+  landed the harness half that makes it drivable. Hook source + tests + tools +
+  docs; **no deploy, no live run** (the sim install's hook is stale).
+- **Why this unit:** it is the explicit "Next" of wake 65, and #80 is the only
+  remaining route to #71 req 1 (the reach that makes the #68 iteration vehicle
+  useful). The pure core existed; the interceptor — the part that actually
+  fabricates the confirm — did not.
+- **Change (hook):**
+  - `src/hook/sim_input_bridge_win32.{h,cpp}` (new): `SimInputBridgeInstallOnAttach()`
+    swaps **one** IAT entry — `MSystem.dll`'s `KERNEL32.dll!GetProcAddress` — from
+    `DllMain(DLL_PROCESS_ATTACH)` (loader-lock-safe: env read + `GetModuleHandle`
+    + one `VirtualProtect`/write; no `LoadLibrary`/IO/logging; breadcrumb via
+    `OutputDebugStringA`). `Hook_GetProcAddress` resolves+stashes the real proc and
+    returns our wrapper for exactly `XInputGetState` / `DirectInputCreateA`; an
+    ordinal or any other name falls through.
+    - gamepad route: `Hook_XInputGetState` forwards, ORs `START|A` into the
+      engine's own `XINPUT_STATE`, bumps `dwPacketNumber` on change; keeps
+      `ERROR_DEVICE_NOT_CONNECTED` (never invents a pad).
+    - keyboard route: `Hook_DirectInputCreateA` forwards then patches the returned
+      `IDirectInputA`'s `CreateDevice` (**vtable slot 3**) in place; on
+      `GUID_SysKeyboard` it patches that device's `GetDeviceState` (**slot 9**) to
+      OR `DIK_RETURN` into the engine's 256-byte, one-byte-per-scan-code buffer.
+      In-place patches keep `this` correct; the device hook checks
+      `self == keyboardDevice` so a shared vtable forwards other devices
+      untouched, and it only clears the byte it set.
+    - `SimInputBridgeLogStartupReport()` (called from the deferred init, after the
+      logger exists) reports gate/route/installed + whether the engine has asked
+      for the input procs; `Hook_GetProcAddress` logs `took over <name>` the
+      instant the ctor resolves them — the datum that shows whether the swap beat
+      `CInputContext_DInput` (ADR-0467 residual), *reported, not assumed*.
+  - `src/hook/dllmain.cpp` — `SimInputBridgeInstallOnAttach()` in
+    `DLL_PROCESS_ATTACH`; `SimInputBridgeLogStartupReport()` after logger init.
+  - `src/hook/sim_input_bridge.h` — added the pure, headless-tested parts the
+    interceptor needs: `SimRouteFromToken` (case-insensitive route token),
+    `SimParseUnsigned` + `SimConfirmScheduleFromTokens` (the optional env cadence
+    overrides; a 32-bit-overflow token is refused, an explicit `maxTaps=0` is the
+    legal "never tap"), and the two vtable-slot constants
+    (`kDirectInputCreateDeviceSlot = 3`,
+    `kDirectInputDeviceGetDeviceStateSlot = 9`) pinning the ABI.
+- **Change (harness):** `tools/xrsim.py` — `sim_confirm_env()` (pure, tested) +
+  `--sim-confirm [keyboard|gamepad|both]` + `--sim-confirm-max-taps/-period-ms/
+  -hold-ms`; sets the second gate token (`RIDDICKVR_SIM_CONFIRM…`) for the game
+  process only, recorded in the report as `sim_confirm`. Gate stays off by
+  default (the two-token rule, requirement 3). Module docstring + `docs/vr-scenarios.md`
+  describe the now-implemented bridge and its deploy-gated validation.
+- **Decisive finding (read-only PE import table of the shipped sim install):**
+  `MSystem.dll` imports `KERNEL32.dll!GetProcAddress` + `!LoadLibraryA` (145
+  KERNEL32 thunks) and does **not** import `dinput.dll`/`dinput8.dll`/
+  `xinput1_3.dll` (its DLLs: WSOCK32, WINMM, KERNEL32, USER32, GDI32, SHELL32,
+  MCCDyn, WS2_32, ole32, OLEAUT32). So the constructor's resolution goes through
+  `MSystem.dll`'s own import-entry pointer — a single swappable slot — and the
+  intercept must be on `GetProcAddress`, not an IAT import of the input DLLs
+  (confirms the wake-64 inference with the module list). `DarkAthena.exe` imports
+  `MSystem.dll` but not `opengl32`/`RndrGL` (13 DLLs, one thunk each).
+- **Evidence (offline):** `tools/build-all.ps1` Release, **no `-Deploy`** OK
+  (`dist/opengl32.dll` rebuilt; `dist/` is gitignored, the game install untouched);
+  **CTest 22/22 on x86 AND x64** (incl. the extended `sim_input_bridge_pure_core`:
+  route-token, cadence-token and vtable-slot tests; the overflow test caught a
+  real bug in my first `SimParseUnsigned` — `unsigned long` is 32-bit on Windows,
+  so a post-hoc `> 0xFFFFFFFF` check could never fire; fixed with a pre-multiply
+  bound); all 10 `tools/test_*.py` PASS (incl. 3 new xrsim tests); `xrsim
+  --selftest` PASS; `verify_reported_fixes` (now asserting the interceptor + install
+  call + harness half, `#40..#80`) PASS; `verify_hook_init`, `validate_addresses`,
+  `verify_test_artifacts`, `scenario_tests.py --check` PASS. **No live sim run**:
+  the bridge is inert without the opt-in token, and the sim install runs the stale
+  hook, so a run would exercise nothing new.
+- **Blocker / honest limit:** live validation remains deploy-gated (ADR-0468). The
+  keyboard route is the workhorse (the splash says `PRESS ENTER`); the gamepad
+  route can only add to a machine that already has an XInput device. The residual
+  ordering risk (does the hook's `DllMain` precede `CInputContext_DInput`'s ctor?)
+  is now *reported* by the interceptor rather than assumed. Fallback if the swap
+  is too late: the wake-64 in-process console route (`loadgame Checkpoint`).
+- **Next:** the deploy-gated ladder is unchanged; the top item is still #71 req 1:
+  the one interactive deploy + `python tools/xrsim.py --reach-gameplay
+  --sim-confirm keyboard --sim-confirm-max-taps 60`, confirming the
+  `took over DirectInputCreateA` line and that the run leaves the splash. Also
+  unchanged: #67 step 3, #72 req 1 A/B, #68 req 5, #79 hook half, #76 step 1.
+
 ## Wake 65 — 2026-10-17 23:22 (scheduled loop)
 - **Unit:** GH **#80 requirement 1** — decided *where* the simulator-only input
   bridge can legally install the `GetProcAddress` intercept, and landed the

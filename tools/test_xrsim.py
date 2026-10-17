@@ -1361,6 +1361,42 @@ def test_game_arg_flags_parse(td):
         assert xrsim.main(["--selftest"]) == 0
 
 
+# ------------------------- GH #80: the harness half of the sim input bridge gate
+def test_sim_confirm_env_is_off_by_default(td):
+    """The bridge is a two-token gate: RIDDICKVR_SIM alone (already set by every
+    sim run) must never fabricate input, so with no --sim-confirm the harness
+    adds nothing to the game environment (GH #80 requirement 3)."""
+    assert xrsim.sim_confirm_env() == {}
+    assert xrsim.sim_confirm_env(None, 5, 250, 80) == {}
+
+
+def test_sim_confirm_env_sets_route_and_cadence(td):
+    assert xrsim.sim_confirm_env("keyboard") == {"RIDDICKVR_SIM_CONFIRM": "keyboard"}
+    assert xrsim.sim_confirm_env("both", max_taps=7) == {
+        "RIDDICKVR_SIM_CONFIRM": "both",
+        "RIDDICKVR_SIM_CONFIRM_MAX_TAPS": "7"}
+    assert xrsim.sim_confirm_env("gamepad", 12, 250, 80) == {
+        "RIDDICKVR_SIM_CONFIRM": "gamepad",
+        "RIDDICKVR_SIM_CONFIRM_MAX_TAPS": "12",
+        "RIDDICKVR_SIM_CONFIRM_PERIOD_MS": "250",
+        "RIDDICKVR_SIM_CONFIRM_HOLD_MS": "80"}
+    # max_taps 0 is the legal "never tap" budget, not "not set".
+    assert xrsim.sim_confirm_env("keyboard", max_taps=0)["RIDDICKVR_SIM_CONFIRM_MAX_TAPS"] == "0"
+
+
+def test_sim_confirm_flags_parse(td):
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.main(["--selftest"]) == 0
+        # A bare --sim-confirm means the default route ("both"); an explicit
+        # route, the max-taps bound and the leading-dash-free cadence flags all
+        # parse without argparse treating them as game tokens.
+        assert xrsim.main(["--sim-confirm", "--selftest"]) == 0
+        assert xrsim.main(["--sim-confirm", "keyboard",
+                           "--sim-confirm-max-taps", "3", "--selftest"]) == 0
+        assert xrsim.main(["--sim-confirm=gamepad", "--sim-confirm-period-ms", "250",
+                           "--sim-confirm-hold-ms", "80", "--selftest"]) == 0
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -1438,6 +1474,9 @@ def main() -> int:
              test_game_command_passes_tokens_verbatim,
              test_game_command_defaults_to_bare_exe,
              test_game_arg_flags_parse,
+             test_sim_confirm_env_is_off_by_default,
+             test_sim_confirm_env_sets_route_and_cadence,
+             test_sim_confirm_flags_parse,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

@@ -123,6 +123,18 @@ commands from its command line. `--game-arg` is kept (repeatable, unit-tested
 `xinput1_3.dll!XInputGetState` via `LoadLibrary`/`GetProcAddress`, so the bridge
 must intercept `GetProcAddress`, not an IAT import.
 
+**Update (wake 66, GH #80 req 1, ADR-0467/0468):** that hook-side bridge is now
+implemented. The hook swaps `MSystem.dll`'s `KERNEL32!GetProcAddress` IAT entry
+at `DLL_PROCESS_ATTACH` (before `CInputContext_DInput`'s constructor at
+`0x1010b440` resolves the procs), wraps `XInputGetState` (gamepad: `START|A`) and
+`DirectInputCreateA` → in-place `CreateDevice` (slot 3) → `GetDeviceState`
+(slot 9) for `GUID_SysKeyboard` (`DIK_RETURN`). It is **off unless both**
+`RIDDICKVR_SIM` and `RIDDICKVR_SIM_CONFIRM` are set (requirement 3). The harness
+half is `python tools/xrsim.py --reach-gameplay --sim-confirm [keyboard|gamepad|both]`
+(`--sim-confirm-max-taps`/`-period-ms`/`-hold-ms`; recorded as `sim_confirm`).
+Live validation is **deploy-gated** — the sim install runs a stale hook build, so
+the harness command is the one interactive A/B, not something this loop can run.
+
 **Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
 (mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical
 registration **unmeasurable** — `best_dy` pins to the search edge and moves with

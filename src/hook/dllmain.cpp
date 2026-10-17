@@ -4,6 +4,7 @@
 #include "camera_hook.h"
 #include "stereo_renderer.h"
 #include "iat_hook.h"
+#include "sim_input_bridge_win32.h"
 
 // WGL exports hooked directly
 extern "C" {
@@ -257,6 +258,10 @@ static void EnsureHookInitializedImpl() {
     RiddickVR::Logger::Instance().Initialize(logPath);
     VR_LOG_INFO("Riddick VR Hook DLL Attached (PID: %lu)", GetCurrentProcessId());
 
+    // GH #80: report the sim input bridge's attach-time install outcome (it is
+    // silent unless RIDDICKVR_SIM + RIDDICKVR_SIM_CONFIRM are both set).
+    RiddickVR::SimInputBridgeLogStartupReport();
+
     RawDebugLog("DeferredInit: Initializing OpenGLProxy");
     if (!RiddickVR::OpenGLProxy::Initialize()) {
         RawDebugLog("DeferredInit: OpenGLProxy::Initialize failed!");
@@ -291,6 +296,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         case DLL_PROCESS_ATTACH: {
             g_hHookModule = hModule;
             DisableThreadLibraryCalls(hModule);
+            // GH #80 (ADR-0467/0468): the simulator-only input bridge must be
+            // installed *before* CInputContext_DInput's constructor resolves
+            // XInputGetState/DirectInputCreateA, which the deferred init (first
+            // wglCreateContext) is not guaranteed to precede. The install is a
+            // single loader-lock-safe IAT pointer swap and is inert unless both
+            // RIDDICKVR_SIM and RIDDICKVR_SIM_CONFIRM are set.
+            RiddickVR::SimInputBridgeInstallOnAttach();
             // Loader-lock-safe attach breadcrumb (OutputDebugString never touches
             // the loader lock; visible in DebugView/dbgview without file IO).
             // Answers "did the proxy DLL load?" when the game stalls pre-GL.

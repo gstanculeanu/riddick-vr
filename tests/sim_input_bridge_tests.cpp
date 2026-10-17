@@ -8,6 +8,8 @@
 using RiddickVR::ApplySimConfirmToGamepad;
 using RiddickVR::BumpSimPacketNumber;
 using RiddickVR::kDikReturn;
+using RiddickVR::kDirectInputCreateDeviceSlot;
+using RiddickVR::kDirectInputDeviceGetDeviceStateSlot;
 using RiddickVR::kDirectInputKeyboardBytes;
 using RiddickVR::kXInputGamepadA;
 using RiddickVR::kXInputGamepadStart;
@@ -17,10 +19,12 @@ using RiddickVR::SimBridgeOwnsProcName;
 using RiddickVR::SimConfirmPeriod;
 using RiddickVR::SimConfirmRoute;
 using RiddickVR::SimConfirmScheduleConfig;
+using RiddickVR::SimConfirmScheduleFromTokens;
 using RiddickVR::SimConfirmState;
 using RiddickVR::SimConfirmTick;
 using RiddickVR::SimInputBridgeEnabled;
 using RiddickVR::SimInputGate;
+using RiddickVR::SimRouteFromToken;
 using RiddickVR::SimRouteHasGamepad;
 using RiddickVR::SimRouteHasKeyboard;
 using RiddickVR::XInputGamepadState;
@@ -54,6 +58,62 @@ static void TestRoutes() {
     Check(!SimRouteHasKeyboard(SimConfirmRoute::Gamepad), "Gamepad route is not keyboard");
     Check(SimRouteHasKeyboard(SimConfirmRoute::Both) && SimRouteHasGamepad(SimConfirmRoute::Both),
           "Both covers both");
+}
+
+static void TestRouteToken() {
+    Check(SimRouteFromToken(nullptr, SimConfirmRoute::Both) == SimConfirmRoute::Both,
+          "an absent token keeps the fallback");
+    Check(SimRouteFromToken("", SimConfirmRoute::Both) == SimConfirmRoute::Both,
+          "an empty token (bare opt-in) keeps the fallback");
+    Check(SimRouteFromToken("keyboard") == SimConfirmRoute::Keyboard, "keyboard token");
+    Check(SimRouteFromToken("KEYBOARD") == SimConfirmRoute::Keyboard, "the token is case-insensitive");
+    Check(SimRouteFromToken("Gamepad") == SimConfirmRoute::Gamepad, "gamepad token");
+    Check(SimRouteFromToken(" both ", SimConfirmRoute::Keyboard) == SimConfirmRoute::Keyboard,
+          "a padded token is not trimmed, so it falls back");
+    Check(SimRouteFromToken("both") == SimConfirmRoute::Both, "both token");
+    Check(SimRouteFromToken("none") == SimConfirmRoute::None, "none opts out");
+    Check(SimRouteFromToken("off") == SimConfirmRoute::None, "off opts out");
+    Check(SimRouteFromToken("typo", SimConfirmRoute::Keyboard) == SimConfirmRoute::Keyboard,
+          "an unrecognised token keeps the fallback (never widens the route)");
+}
+
+static void TestScheduleTokens() {
+    const SimConfirmScheduleConfig base;  // 400 / 100 / 300
+
+    {
+        SimConfirmScheduleConfig c = SimConfirmScheduleFromTokens(nullptr, nullptr, nullptr, base);
+        Check(c.periodMs == base.periodMs && c.holdMs == base.holdMs && c.maxTaps == base.maxTaps,
+              "absent tokens keep every field");
+    }
+    {
+        SimConfirmScheduleConfig c = SimConfirmScheduleFromTokens("250", "80", "7", base);
+        Check(c.periodMs == 250 && c.holdMs == 80 && c.maxTaps == 7, "plain decimals parse");
+    }
+    {
+        SimConfirmScheduleConfig c = SimConfirmScheduleFromTokens("0", "0", "", base);
+        Check(c.periodMs == base.periodMs && c.holdMs == base.holdMs, "a zero period/hold is refused, not applied");
+        Check(c.maxTaps == base.maxTaps, "an empty maxTaps keeps the fallback");
+    }
+    {
+        SimConfirmScheduleConfig c = SimConfirmScheduleFromTokens("abc", "12x", "0", base);
+        Check(c.periodMs == base.periodMs && c.holdMs == base.holdMs, "a non-numeric millisecond is refused");
+        Check(c.maxTaps == 0, "an explicit maxTaps 0 is legal (never tap)");
+    }
+    {
+        SimConfirmScheduleConfig c = SimConfirmScheduleFromTokens("4294967295", nullptr, nullptr, base);
+        Check(c.periodMs == 4294967295ul, "the 32-bit maximum is accepted");
+
+        SimConfirmScheduleConfig over = SimConfirmScheduleFromTokens("4294967296", nullptr, nullptr, base);
+        Check(over.periodMs == base.periodMs, "one past the 32-bit maximum is refused");
+    }
+}
+
+static void TestVtableSlots() {
+    // The interceptor hard-codes these two COM vtable indices; the ABI is pinned
+    // here so a wrong slot is a test failure, not a silent mis-patch (GH #80).
+    Check(kDirectInputCreateDeviceSlot == 3, "IDirectInputA::CreateDevice is vtable slot 3");
+    Check(kDirectInputDeviceGetDeviceStateSlot == 9,
+          "IDirectInputDeviceA::GetDeviceState is vtable slot 9");
 }
 
 static void TestProcOwnership() {
@@ -180,8 +240,11 @@ static void TestGamepad() {
 int main() {
     TestGate();
     TestRoutes();
+    TestRouteToken();
     TestProcOwnership();
     TestSchedule();
+    TestScheduleTokens();
+    TestVtableSlots();
     TestDirectInputKeyboard();
     TestKeyboardGuid();
     TestGamepad();

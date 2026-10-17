@@ -58,6 +58,8 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/gl_matrix_tracker.h
         src/hook/display_branch.h
         src/hook/sim_input_bridge.h
+        src/hook/sim_input_bridge_win32.cpp
+        src/hook/sim_input_bridge_win32.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/vr_config.cpp
@@ -268,7 +270,10 @@ if(BUILD_TESTING)
     # DirectInputCreateA once, in CInputContext_DInput's constructor (0x1010b440),
     # so the intercept must precede it (ADR-0467). This pins the pure core --
     # enable gate, tap cadence, and the DirectInput/XInput state encodings
-    # (src/hook/sim_input_bridge.h) -- which is headless-testable.
+    # (src/hook/sim_input_bridge.h) -- which is headless-testable. The Win32
+    # interceptor that consumes it (early MSystem.dll GetProcAddress swap +
+    # DirectInput/XInput wrappers, src/hook/sim_input_bridge_win32.cpp) is on
+    # the opengl32 proxy target above; ADR-0468.
     add_executable(riddick_vr_sim_input_bridge_tests tests/sim_input_bridge_tests.cpp)
     target_include_directories(riddick_vr_sim_input_bridge_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook

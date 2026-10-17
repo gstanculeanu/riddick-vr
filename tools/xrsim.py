@@ -93,6 +93,19 @@ tokens are what the bridge would execute in-process. Leading-dash tokens (e.g.
 ``-env``) must use the ``--game-arg=VALUE`` form so argparse does not read them as
 options. The report records the tokens as ``game_args``.
 
+``--sim-confirm [ROUTE]`` (GH #80) is the third and last route to gameplay: the
+hook's simulator-only input bridge fabricates the confirm **in-process** on the
+engine's own device read path, which is the only surface that is not fed by the
+suppressed ``SendInput``. The hook installs the intercept at attach time, before
+``CInputContext_DInput``'s constructor resolves ``XInputGetState``/
+``DirectInputCreateA`` (ADR-0467), and is inert unless ``RIDDICKVR_SIM`` *and*
+``RIDDICKVR_SIM_CONFIRM`` are both set; this flag sets the second token for the
+game process. ``ROUTE`` is ``keyboard`` (DirectInput ``DIK_RETURN``, the splash
+prompt), ``gamepad`` (XInput ``START|A``) or ``both``; tuning lives in
+``--sim-confirm-max-taps``/``-period-ms``/``-hold-ms``. The report records the
+env it passed as ``sim_confirm``. The mechanism is in ADR-0468; its live
+validation is deploy-gated (the sim install runs a stale hook build).
+
 The gameplay-only dump window is *content-gated* (GH #72 requirement 2): even a
 gameplay-labelled frame is kept out while it is all-black (the GL<->D3D11 interop
 warm-up) or byte-identical to the last dumped frame (a frozen static page), so the
@@ -1311,6 +1324,34 @@ def game_command(game_exe, extra_args=None):
     return cmd
 
 
+def sim_confirm_env(route=None, max_taps=None, period_ms=None, hold_ms=None):
+    """The GH #80 sim input bridge's opt-in environment for the *game* process.
+
+    Both input-free routes to a live scene are measured dead (posted window
+    messages -- ADR-0466; the engine's command line -- its wake-64 addendum), so
+    the confirm has to be fabricated in-process on the engine's own device read
+    path. The hook installs that bridge at attach time (ADR-0467/0468) and is
+    inert unless ``RIDDICKVR_SIM`` (already set) *and* ``RIDDICKVR_SIM_CONFIRM``
+    are present -- this helper is the harness's half of that two-token gate.
+
+    ``route`` is the ``RIDDICKVR_SIM_CONFIRM`` token -- ``keyboard`` (DirectInput
+    DIK_RETURN, the splash prompt), ``gamepad`` (XInput START|A) or ``both``.
+    The cadence overrides default to the bridge's own 400 ms period / 100 ms hold
+    / 300-tap budget; ``max_taps`` is the deterministic bound a scripted A/B
+    usually wants. Returns ``{}`` when the bridge is not opted in.
+    """
+    if not route:
+        return {}
+    env = {"RIDDICKVR_SIM_CONFIRM": str(route)}
+    if max_taps is not None:
+        env["RIDDICKVR_SIM_CONFIRM_MAX_TAPS"] = str(int(max_taps))
+    if period_ms is not None:
+        env["RIDDICKVR_SIM_CONFIRM_PERIOD_MS"] = str(int(period_ms))
+    if hold_ms is not None:
+        env["RIDDICKVR_SIM_CONFIRM_HOLD_MS"] = str(int(hold_ms))
+    return env
+
+
 def build_host_cmd(args, artifacts: Path):
     """Build the mock-host command line for one scripted run.
 
@@ -1351,6 +1392,11 @@ def run_sim(args, artifacts: Path):
     host_cmd = build_host_cmd(args, artifacts)
 
     env = dict(os.environ, RIDDICKVR_SIM="1")  # GH #68: no desktop input
+    # GH #80: opt the hook's sim input bridge in (a no-op unless --sim-confirm).
+    env.update(sim_confirm_env(getattr(args, "sim_confirm", None),
+                               getattr(args, "sim_confirm_max_taps", None),
+                               getattr(args, "sim_confirm_period_ms", None),
+                               getattr(args, "sim_confirm_hold_ms", None)))
     print(f"[xrsim] host: {' '.join(host_cmd)}")
     host = subprocess.Popen(host_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1, env=env)
@@ -1832,6 +1878,23 @@ def main(argv=None):
                          "hook-side sim bridge")
     ap.add_argument("--host-exe", default=None,
                     help="riddickvr-host.exe (env RIDDICKVR_HOST_EXE)")
+    ap.add_argument("--sim-confirm", nargs="?", const="both", default=None,
+                    metavar="ROUTE",
+                    help="opt the hook's simulator-only input bridge in (GH #80): "
+                         "fabricate the confirm in-process on the engine's own "
+                         "device path. ROUTE = keyboard (DirectInput DIK_RETURN; "
+                         "the default) | gamepad (XInput START|A) | both. Sets "
+                         "RIDDICKVR_SIM_CONFIRM for the game process; the bridge "
+                         "is otherwise inert (ADR-0467/0468)")
+    ap.add_argument("--sim-confirm-max-taps", type=int, default=None,
+                    help="bound the fabricated confirm to N taps (GH #80); the "
+                         "bridge default is 300")
+    ap.add_argument("--sim-confirm-period-ms", type=int, default=None,
+                    help="tap-to-tap spacing for the fabricated confirm (GH #80); "
+                         "bridge default 400 ms")
+    ap.add_argument("--sim-confirm-hold-ms", type=int, default=None,
+                    help="how long one fabricated tap reads as down (GH #80); "
+                         "bridge default 100 ms")
     ap.add_argument("--scenario-immediate", action="store_true",
                     help="start the scenario at host frame 0 instead of waiting for gameplay")
     ap.add_argument("--evaluate-only", action="store_true",
@@ -1886,6 +1949,11 @@ def main(argv=None):
                         "comfort_vignette": parse_comfort(host_log),
                         "menu_advance": menu_stats,
                         "game_args": list(getattr(args, "game_arg", None) or []),
+                        "sim_confirm": sim_confirm_env(
+                            getattr(args, "sim_confirm", None),
+                            getattr(args, "sim_confirm_max_taps", None),
+                            getattr(args, "sim_confirm_period_ms", None),
+                            getattr(args, "sim_confirm_hold_ms", None)) or None,
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

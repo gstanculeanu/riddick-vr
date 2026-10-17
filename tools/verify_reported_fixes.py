@@ -668,6 +668,8 @@ def main():
     # two-token enable gate, the bounded tap cadence, and the DirectInput /
     # XInput state encodings -- with headless tests; the interception is next.
     sim_bridge_hdr = (ROOT / "src/hook/sim_input_bridge.h").read_text(encoding="utf-8")
+    sim_bridge_cpp = (ROOT / "src/hook/sim_input_bridge_win32.cpp").read_text(encoding="utf-8")
+    dllmain = (ROOT / "src/hook/dllmain.cpp").read_text(encoding="utf-8")
     require("SimInputBridgeEnabled" in sim_bridge_hdr and
             "SimConfirmRoute" in sim_bridge_hdr and
             "SimConfirmTick" in sim_bridge_hdr and
@@ -679,15 +681,38 @@ def main():
             "ApplySimConfirmToGamepad" in sim_bridge_hdr and
             "BumpSimPacketNumber" in sim_bridge_hdr and
             "RIDDICKVR_SIM_CONFIRM" in sim_bridge_hdr and
+            "SimRouteFromToken" in sim_bridge_hdr and
+            "SimConfirmScheduleFromTokens" in sim_bridge_hdr and
+            "kDirectInputCreateDeviceSlot = 3" in sim_bridge_hdr and
+            "kDirectInputDeviceGetDeviceStateSlot = 9" in sim_bridge_hdr and
+            # GH #80 req 1 (wake 66): the interceptor itself -- the early
+            # GetProcAddress IAT swap on MSystem.dll and the DirectInput/XInput
+            # wrappers -- installed from DllMain (ADR-0467/0468).
+            "KERNEL32.dll\", \"GetProcAddress" in sim_bridge_cpp and
+            "Hook_GetProcAddress" in sim_bridge_cpp and
+            "Hook_XInputGetState" in sim_bridge_cpp and
+            "Hook_DirectInputCreateA" in sim_bridge_cpp and
+            "kDirectInputCreateDeviceSlot" in sim_bridge_cpp and
+            "kDirectInputDeviceGetDeviceStateSlot" in sim_bridge_cpp and
+            "SimInputBridgeInstallOnAttach" in sim_bridge_cpp and
+            "SimInputBridgeInstallOnAttach();" in dllmain and
+            "SimInputBridgeLogStartupReport();" in dllmain and
+            "src/hook/sim_input_bridge_win32.cpp" in cmake and
+            "sim_confirm_env" in
+            (ROOT / "tools/xrsim.py").read_text(encoding="utf-8") and
+            "--sim-confirm" in
+            (ROOT / "tools/xrsim.py").read_text(encoding="utf-8") and
             "tests/sim_input_bridge_tests.cpp" in cmake and
             "sim_input_bridge_pure_core" in cmake and
             "0x1010b440" in
-            (ROOT / "docs/adr/0467-sim-input-bridge-install-point.md").read_text(encoding="utf-8"),
+            (ROOT / "docs/adr/0467-sim-input-bridge-install-point.md").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0468-sim-input-bridge-interception-mechanism.md").exists(),
             "GH #80: the simulator-only input bridge's pure core (two-token "
             "enable gate, bounded tap cadence, DirectInput/XInput state "
-            "encodings) must exist, be unit-tested, and its install point must "
-            "be recorded as the input context's constructor (0x1010b440), not "
-            "the hook's deferred init")
+            "encodings), its install point (the input context's constructor, "
+            "0x1010b440), and the interceptor (the early GetProcAddress IAT swap "
+            "on MSystem.dll + the DirectInput/XInput wrappers wired from DllMain) "
+            "must exist, be unit-tested, and be recorded")
 
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
           "#62, #64-68, #69, #71-73, #75-80)")
