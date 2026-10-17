@@ -88,3 +88,41 @@ Mock run `RIDDICKVR_SIM=1`, fresh `dist/riddickvr-host.exe`, `--advance-menu`:
   then it is off, so a default run posts nothing.
 - The reach failure is now honestly attributed (splash branch + a disabled,
   documented attempt) rather than silently producing zero frames.
+
+## Addendum (autoloop wake 64) — the console/command-line route is also dead
+
+Wake 63 recorded "no savegame on the box" and left route (b) as "no CLI switch
+and no save". A read-only sweep of the *sim* install (F:) corrects both:
+
+- **Savegames do exist**, at
+  `%APPDATA%/Starbreeze/Riddick/Content/Save/<profile>/` (`01.Escape`,
+  `Checkpoint`, `_filler000`, `_profile`; profile `Gigel`, `GAME_LASTVALIDPROFILE`
+  in `Environment.cfg`). So route (b) is not void for lack of a save.
+- **The engine's console surface is real.** `MSystem.dll` registers the id-style
+  console (`exec`/`echo`/`history`/`commands`/`bind*`); the game logic lives in
+  `Content/GameClasses_Win32_x86.dll` and `Content/GameWorld_Win32_x86.dll`,
+  which name `loadgame`, `savegame`, `checkpoint`, `changemap`,
+  `cg_newgame`/`cg_goto_newgame`, `cg_loadlastvalidprofile`, and the message
+  `"Have to select a valid profile before loading a map"`.
+- **But the command line does not execute them.** Three input-free attempts
+  (harness `--game-arg`, all bounded by wall-clock) each left the run on the
+  `PRESS ENTER` splash for the full budget:
+  1. `+loadgame Checkpoint` (60 s) — the engine's own console command;
+  2. `+quit` (25 s) — a `+command` that would exit at once *if* the engine ran
+     console commands from the command line;
+  3. `-env <copy of Environment.cfg + COMMANDLINE=+quit> -nowriteenv` (20 s) —
+     `MSystem.dll` documents `"CommandLine is overrided by value in environment
+     file."`, so the override path was tested too.
+
+  A posted command line therefore cannot drive this engine. Route (b)
+  survives only as an *in-process* call (the hook executing the console command),
+  which is route (a) with a different injection point.
+
+Consequence: the harness keeps `--game-arg` (repeatable, pure `game_command`
+helper, recorded as `game_args`) as the exact handle a hook-side bridge would use,
+and the input bridge (hook `DirectInputCreateA`/`GetDeviceState`/`XInputGetState`
+— see GH #80) remains the only path to an input-free reach. Note the input DLLs
+are loaded at runtime (`dinput.dll` + `DirectInputCreateA`, `xinput1_3.dll` +
+`XInputGetState`, both via `LoadLibrary`/`GetProcAddress`), so the bridge must
+intercept the resolved proc, not an IAT import.
+

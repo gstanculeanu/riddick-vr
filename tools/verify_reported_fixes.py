@@ -346,6 +346,25 @@ def main():
             "attempt and record its outcome; the engine ignores posted window "
             "messages, so it must stay off by default")
 
+    # GH #71 requirement 1 (second input-free route, measured): the engine's
+    # console surface (loadgame/changemap/cg_newgame in the Content game DLLs) is
+    # real and savegames exist, but the engine does NOT execute `+`-prefixed
+    # console commands from its command line (nor a COMMANDLINE env override), so
+    # `--game-arg` alone cannot reach gameplay. The harness keeps the repeatable
+    # `--game-arg` pass-through as the exact handle for the hook-side sim bridge
+    # (ADR-0466 route (a)); `game_command` is pure/unit-tested and the tokens are
+    # recorded in the report as `game_args`.
+    require("def game_command" in xrsim_tool and
+            '"--game-arg"' in xrsim_tool and
+            'action="append"' in xrsim_tool and
+            'game_command(game_exe, getattr(args, "game_arg", None))' in xrsim_tool and
+            '"game_args": list(getattr(args, "game_arg", None) or [])' in xrsim_tool and
+            "test_game_command_passes_tokens_verbatim" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8"),
+            "GH #71 req 1: XRSIM must expose a repeatable, unit-tested --game-arg "
+            "pass-through (the handle for the hook-side sim input bridge) and "
+            "record the tokens in the report; the engine ignores +console commands")
+
     # GH #72 requirement 2: the gameplay-only dump window must also be
     # *content-gated* -- a gameplay-labelled frame is skipped while it is
     # all-black (GL<->D3D11 interop warm-up) or byte-identical to the last

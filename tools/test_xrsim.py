@@ -523,7 +523,7 @@ def _args(**kw):
         dump_branch=kw.get("dump_branch", "gameplay"),
         reach_gameplay=kw.get("reach_gameplay", False), duration=kw.get("duration"),
         game_dir=kw.get("game_dir"), game_exe=kw.get("game_exe"),
-        host_exe=kw.get("host_exe"),
+        host_exe=kw.get("host_exe"), game_arg=kw.get("game_arg"),
         scenario_immediate=kw.get("scenario_immediate", False),
         require_parallax=kw.get("require_parallax", False),
         evaluate_only=True, selftest=False)
@@ -1332,6 +1332,35 @@ def test_advance_menu_flags_parse(td):
         assert xrsim.main(["--no-advance-menu", "--selftest"]) == 0
 
 
+# ----------------------------------- GH #71 req 1: input-free route to gameplay
+def test_game_command_passes_tokens_verbatim(td):
+    """--game-arg tokens reach the game argv unchanged (no shell re-splitting),
+    so a `+loadgame checkpoint` console sequence can drive the title with no
+    input at all (the only input-safe route, ADR-0466)."""
+    assert xrsim.game_command("DarkAthena.exe", ["+loadgame", "checkpoint"]) == [
+        "DarkAthena.exe", "+loadgame", "checkpoint"]
+
+
+def test_game_command_defaults_to_bare_exe(td):
+    assert xrsim.game_command("DarkAthena.exe") == ["DarkAthena.exe"]
+    assert xrsim.game_command("DarkAthena.exe", None) == ["DarkAthena.exe"]
+    assert xrsim.game_command("DarkAthena.exe", []) == ["DarkAthena.exe"]
+    # Empty tokens are dropped, never passed as argv holes.
+    assert xrsim.game_command("g.exe", ["+exec", "", "auto.cfg"]) == [
+        "g.exe", "+exec", "auto.cfg"]
+
+
+def test_game_arg_flags_parse(td):
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.main(["--game-arg", "+loadgame", "--game-arg", "checkpoint",
+                           "--selftest"]) == 0
+        # Leading-dash game tokens (e.g. -env) need the `--game-arg=VALUE` form,
+        # or argparse reads them as harness options.
+        assert xrsim.main(["--game-arg=-env", "--game-arg", "x.cfg",
+                           "--game-arg=-nowriteenv", "--selftest"]) == 0
+        assert xrsim.main(["--selftest"]) == 0
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -1406,6 +1435,9 @@ def main() -> int:
              test_gameplay_reached_requires_menu_then_gameplay,
              test_post_confirm_is_a_noop_without_a_pid,
              test_advance_menu_flags_parse,
+             test_game_command_passes_tokens_verbatim,
+             test_game_command_defaults_to_bare_exe,
+             test_game_arg_flags_parse,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

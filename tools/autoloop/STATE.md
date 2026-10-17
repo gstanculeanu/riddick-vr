@@ -2,6 +2,80 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 64 — 2026-10-17 22:24 (scheduled loop)
+- **Unit:** GH **#71 requirement 1** (the top blocker — the reach makes the #68
+  iteration vehicle useless for live validation) — tested the *second* input-free
+  route (the engine's own console/command line) to a **decidable negative**, and
+  landed the harness capability (`--game-arg`) that is the handle for the
+  remaining route. Harness + tests + tools + docs + a new issue; **no C++/asset
+  change, no build, no deploy**.
+- **Why this unit:** #68/#71 is the top open item, every player-visible ladder
+  item is deploy-gated, and wake 63 left route (b) as "no CLI switch and no save".
+  This wake read the *sim* install (F:) read-only and found that claim was wrong,
+  then measured whether the engine's console can be driven from the command line.
+- **New decisive findings (measured / read-only, not inferred):**
+  1. **Savegames DO exist** (wake 63 said none):
+     `%APPDATA%\Starbreeze\Riddick\Content\Save\Gigel\{01.Escape, Checkpoint,
+     _filler000, _profile}` (`GAME_LASTVALIDPROFILE=Gigel`). Route (b) is not void
+     for lack of a save.
+  2. **The engine's console surface is real**: `MSystem.dll` registers the
+     id-style console (`exec`/`echo`/`history`/`commands`/`bind*`, and
+     `CConsole::ExecuteString`); the game logic lives in
+     `Content\GameClasses_Win32_x86.dll` + `Content\GameWorld_Win32_x86.dll`,
+     which name `loadgame`, `savegame`, `checkpoint`, `changemap`,
+     `cg_newgame`/`cg_goto_newgame`, `cg_loadlastvalidprofile`, and
+     `"Have to select a valid profile before loading a map"`.
+  3. **But the command line does not execute them** (three wall-clock-bounded
+     `--game-arg` runs, each left on the `PRESS ENTER` splash for the full
+     budget): `+loadgame Checkpoint` (60 s), `+quit` (25 s — would exit at once
+     *if* the engine ran `+` console commands), and `-env <copy of
+     Environment.cfg + COMMANDLINE=+quit> -nowriteenv` (20 s — MSystem documents
+     `"CommandLine is overrided by value in environment file."`). A posted
+     command line cannot drive this engine.
+  4. **The input DLLs are runtime-resolved**: `MSystem.dll` loads
+     `dinput.dll`+`DirectInputCreateA` and `xinput1_3.dll`+`XInputGetState` via
+     `LoadLibrary`/`GetProcAddress` (`.\Input\Win32_DInput\MInput_DI.cpp`,
+     `CInputContext_DInput`), so a bridge must intercept `GetProcAddress` in
+     `MSystem.dll`, **not** an IAT import of those DLLs.
+- **Change:**
+  - `tools/xrsim.py`: `game_command(game_exe, extra_args)` (pure) + a repeatable
+    `--game-arg TOKEN` (leading-dash tokens via `--game-arg=VALUE`), forwarded to
+    the game `Popen`; the tokens are recorded in the report as `game_args`; the
+    docstring documents the measured negative and the hook-side handoff.
+  - `tools/test_xrsim.py`: +3 tests (verbatim tokens, bare-exe/empty-token
+    defaults, both `--game-arg` forms parse); `_args` gains `game_arg`.
+  - `tools/verify_reported_fixes.py`: a new GH #71 req-1 invariant (helper +
+    flag + report key + test wired).
+  - `docs/adr/0466-...md`: a **wake-64 addendum** (savegames exist; console
+    surface; the three measured command-line negatives; the runtime-resolved
+    input DLLs) + a `docs/vr-scenarios.md` update note.
+  - **Filed GH #80** — `[FEATURE] Simulator-only input bridge: hook the engine's
+    DirectInput/XInput so XRSIM can reach gameplay` (the concrete next slice:
+    intercept `GetProcAddress` in `MSystem.dll`; wrap `XInputGetState` and/or
+    `DirectInputCreateA` → `CreateDevice`(vtable slot 3) →
+    `GetDeviceState`(slot 9); a pure sim-only schedule; inert without
+    `RIDDICKVR_SIM=1`).
+- **Evidence (offline):** `python tools/test_xrsim.py` PASS (all, incl. the 3
+  new); `python tools/xrsim.py --selftest` PASS; `verify_reported_fixes.py` PASS
+  (`#40..#79`); `scenario_tests.py --check`, `verify_hook_init`,
+  `validate_addresses`, `verify_test_artifacts`, all `tools/test_*.py` PASS. **No
+  C++ changed → no `build-all.ps1`/CTest** (documented).
+- **Evidence (live, allowed exception `RIDDICKVR_SIM=1`):** the three
+  `--game-arg` probes above (full-duration runs on the splash; the `-env` cfg was
+  a temp file, the install untouched). The committed `tests/xrsim/report.json`
+  baseline is unchanged (probes wrote to `%TEMP%`).
+- **Blocker / honest limit (the loud one):** GH #71 req 1 is **still not
+  achievable offline**. Both non-hook routes are now measured dead (posted
+  messages — wake 63; command line — this wake), so the *only* remaining path is
+  the hook-side sim input bridge (GH #80), which is deploy-gated: the sim install
+  runs the stale 12:47 hook, and deploying is a hard rule. Route (b) survives only
+  as an in-process call (the hook executing a console command), i.e. route (a)
+  with a different injection point.
+- **Next:** GH #80 — implement the sim-only input bridge (pure schedule +
+  `GetProcAddress` interception) offline; validate with the one interactive deploy.
+  The deploy-gated ladder is otherwise unchanged (#67 step 3, #72 req 1 A/B, #68
+  req 5, #79 hook half).
+
 ## Wake 63 — 2026-10-17 21:55 (scheduled loop)
 - **Unit:** GH **#71 requirement 1** — established the *decidable* root cause of the
   XRSIM reach failure and encoded the sim-safe attempt + its negative result.

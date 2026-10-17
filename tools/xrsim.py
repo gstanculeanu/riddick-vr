@@ -69,6 +69,30 @@ transition -- not a bare full-bleed -- is the signal). Tune with
 ``--advance-interval``/``--advance-max-taps``; the report records it as
 ``menu_advance``.
 
+``--game-arg`` (GH #71 requirement 1, repeatable) passes extra tokens straight to
+the game's argv, so a scripted run can try to drive the engine's *own* id-style
+console without any input. That is the second input-free route: the engine's
+command surface is real (``exec``/``echo``/``history``/``commands`` in
+``MSystem.dll``; ``loadgame``/``savegame``/``changemap``/``cg_newgame``/
+``cg_loadlastvalidprofile`` in ``Content/GameClasses_Win32_x86.dll`` and
+``Content/GameWorld_Win32_x86.dll``), and real savegames exist under
+``%APPDATA%/Starbreeze/Riddick/Content/Save/<profile>/`` (``Checkpoint``,
+``01.Escape``, ``_profile``).
+
+**Measured ineffective (2026-10-17):** three input-free attempts all left the run
+on the ``PRESS ENTER`` splash for its whole wall-clock budget -- ``--game-arg
++loadgame Checkpoint`` (the engine's own console command), ``--game-arg +quit``
+(a ``+command`` that would exit immediately *if* the engine executed console
+commands from the command line), and ``-env <cfg with COMMANDLINE=+quit>
+-nowriteenv`` (MSystem documents a ``COMMANDLINE`` override in the environment
+file). The engine does not run ``+``-prefixed console commands from its command
+line, and the environment-file ``COMMANDLINE`` override does not either, so
+``--game-arg`` alone cannot reach gameplay. It is kept because it is the exact
+harness handle for the *hook-side* bridge (route (a) in ADR-0466): the same
+tokens are what the bridge would execute in-process. Leading-dash tokens (e.g.
+``-env``) must use the ``--game-arg=VALUE`` form so argparse does not read them as
+options. The report records the tokens as ``game_args``.
+
 The gameplay-only dump window is *content-gated* (GH #72 requirement 2): even a
 gameplay-labelled frame is kept out while it is all-black (the GL<->D3D11 interop
 warm-up) or byte-identical to the last dumped frame (a frozen static page), so the
@@ -1266,6 +1290,25 @@ def gameplay_reached_from_sequence(branch_seq):
 
 
 # ------------------------------------------------------------------ orchestration
+def game_command(game_exe, extra_args=None):
+    """The game's argv: the exe plus any harness-supplied arguments.
+
+    GH #71 requirement 1: the engine's console is id-style (``bind``/``exec``/
+    ``echo``/``history``/``commands``; ``MSystem.dll``) and it registers the
+    game-side commands ``loadgame``/``savegame``/``checkpoint`` and
+    ``cg_loadlastvalidprofile`` (``GameClasses_Win32_x86.dll``). Passing a
+    ``+<command> <arg>`` sequence therefore *may* drive the title to a live
+    scene without any input at all -- the one route that stays inside the
+    simulator's input-safety rule. ``--game-arg`` is repeatable so each token
+    (``+loadgame``, ``checkpoint``) is passed verbatim, with no shell quoting.
+    """
+    cmd = [str(game_exe)]
+    for a in (extra_args or []):
+        if a:
+            cmd.append(str(a))
+    return cmd
+
+
 def build_host_cmd(args, artifacts: Path):
     """Build the mock-host command line for one scripted run.
 
@@ -1310,8 +1353,9 @@ def run_sim(args, artifacts: Path):
     host = subprocess.Popen(host_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1, env=env)
     time.sleep(1.5)
-    print(f"[xrsim] game: {game_exe}")
-    game = subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
+    game_cmd = game_command(game_exe, getattr(args, "game_arg", None))
+    print(f"[xrsim] game: {' '.join(game_cmd)}")
+    game = subprocess.Popen(game_cmd, cwd=str(game_dir), env=env)
 
     # GH #71 requirement 1: post the confirm keystroke to the game's own window
     # to *try* to advance the startup splash/menu. This is targeted window
@@ -1778,6 +1822,12 @@ def main(argv=None):
                     help="game System\\Win32_x86 dir (env RIDDICKVR_GAME_DIR)")
     ap.add_argument("--game-exe", default=None,
                     help="game exe (env RIDDICKVR_GAME_EXE; default <game-dir>\\DarkAthena.exe)")
+    ap.add_argument("--game-arg", action="append", default=None, metavar="TOKEN",
+                    help="extra game command-line token, repeatable (GH #71 req 1); "
+                         "e.g. --game-arg +loadgame --game-arg checkpoint. Leading-dash "
+                         "tokens must use --game-arg=VALUE. Measured ineffective alone "
+                         "(the engine ignores +console commands); the handle for the "
+                         "hook-side sim bridge")
     ap.add_argument("--host-exe", default=None,
                     help="riddickvr-host.exe (env RIDDICKVR_HOST_EXE)")
     ap.add_argument("--scenario-immediate", action="store_true",
@@ -1833,6 +1883,7 @@ def main(argv=None):
                         "stereo_kind": stereo_kind_stats(checks),
                         "comfort_vignette": parse_comfort(host_log),
                         "menu_advance": menu_stats,
+                        "game_args": list(getattr(args, "game_arg", None) or []),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

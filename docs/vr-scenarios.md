@@ -110,6 +110,19 @@ window (`MOS Win32/OpenGL`, visible, foreground) and posted 21 confirm taps over
 only), but it is **off by default** and measured ineffective; reaching gameplay
 needs a hook-side bridge of the engine's input or a start-at-level route.
 
+**Update (wake 64, ADR-0466 addendum):** the *command-line* route is dead too.
+The engine's console surface is real (`loadgame`/`savegame`/`changemap`/
+`cg_newgame` in `Content/GameClasses_Win32_x86.dll` + `GameWorld_Win32_x86.dll`)
+and savegames exist (`%APPDATA%/Starbreeze/Riddick/Content/Save/Gigel/`), but
+`python tools/xrsim.py --game-arg +loadgame Checkpoint`, `--game-arg +quit`, and
+`-env <cfg + COMMANDLINE=+quit> -nowriteenv` all left the run on the splash for
+its full wall-clock budget — the engine does not execute `+`-prefixed console
+commands from its command line. `--game-arg` is kept (repeatable, unit-tested
+`game_command`, recorded as `game_args`) as the handle for the hook-side bridge
+(GH #80): `MSystem.dll` resolves `dinput.dll!DirectInputCreateA` and
+`xinput1_3.dll!XInputGetState` via `LoadLibrary`/`GetProcAddress`, so the bridge
+must intercept `GetProcAddress`, not an IAT import.
+
 **Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
 (mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical
 registration **unmeasurable** — `best_dy` pins to the search edge and moves with
