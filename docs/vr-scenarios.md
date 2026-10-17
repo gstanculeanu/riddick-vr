@@ -135,6 +135,20 @@ half is `python tools/xrsim.py --reach-gameplay --sim-confirm [keyboard|gamepad|
 Live validation is **deploy-gated** — the sim install runs a stale hook build, so
 the harness command is the one interactive A/B, not something this loop can run.
 
+**Update (wake 67, GH #80 req 1):** the interceptor is now *executed* offline, so
+it is no longer validated by inspection alone. `SimInputBridgeInstallOnModule`
+is the module-agnostic mechanism (`SimInputBridgeInstallOnAttach` is exactly
+`InstallOnModule(GetModuleHandleA("MSystem.dll"))`), and
+`tests/sim_input_bridge_win32_tests.cpp` installs the bridge on *its own* module
+and drives the engine's exact path — CTest `sim_input_bridge_win32_intercept`
+(gate-on: `GetProcAddress` returns the wrappers, `XInputGetState` ORs `START|A`
+into the engine's `XINPUT_STATE` and bumps the packet, `DirectInputCreateA`'s
+`GUID_SysKeyboard` device gets slot 9 replaced; near-miss/other names pass
+through) and `sim_input_bridge_win32_inert` (gate-off: every pointer is the real
+one). It SKIPs without the input DLLs, and x86-only (the hook ships x86). This
+proves the *mechanism*; the ADR-0467 ordering against the real constructor still
+needs the one deploy.
+
 **Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
 (mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical
 registration **unmeasurable** — `best_dy` pins to the search edge and moves with

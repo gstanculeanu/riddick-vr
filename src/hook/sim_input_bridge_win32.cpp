@@ -228,7 +228,7 @@ void ReadEnvString(const char* name, char* out, DWORD outSize) {
 
 }  // namespace
 
-void SimInputBridgeInstallOnAttach() {
+void SimInputBridgeInstallOnModule(HMODULE hModule) {
     // Requirement 3: two independent tokens. This -- and only this -- is the
     // work a non-sim (or non-opted-in) run does here; nothing is installed.
     g_gate.simEnvironment = ReadEnvFlag("RIDDICKVR_SIM");
@@ -250,14 +250,15 @@ void SimInputBridgeInstallOnAttach() {
 
     // ADR-0467: MSystem.dll is a static import of DarkAthena.exe, so it is
     // always mapped by the time the hook DLL loads. Its GetProcAddress IAT entry
-    // exists; swapping it is the loader-lock-safe early seam.
-    HMODULE hMSystem = GetModuleHandleA("MSystem.dll");
-    if (!hMSystem) {
+    // exists; swapping it is the loader-lock-safe early seam. The caller passes
+    // the module (the DllMain entry passes MSystem.dll; the offline interceptor
+    // test passes its own module -- the mechanism is module-agnostic).
+    if (!hModule) {
         InterlockedExchange(&g_installed, 0);
         return;
     }
 
-    const bool ok = IATHook::Hook(hMSystem, "KERNEL32.dll", "GetProcAddress",
+    const bool ok = IATHook::Hook(hModule, "KERNEL32.dll", "GetProcAddress",
                                   reinterpret_cast<void*>(&Hook_GetProcAddress),
                                   reinterpret_cast<void**>(&g_realGetProcAddress));
     InterlockedExchange(&g_installed, ok ? 1 : 0);
@@ -265,8 +266,14 @@ void SimInputBridgeInstallOnAttach() {
     // Loader-lock-safe breadcrumb (OutputDebugString touches no files): answers
     // "did the sim bridge install?" when the logger does not exist yet.
     OutputDebugStringA(ok
-        ? "RiddickVR: XRSIM input bridge installed (GetProcAddress intercept in MSystem.dll)\r\n"
-        : "RiddickVR: XRSIM input bridge FAILED to install (MSystem.dll GetProcAddress not found)\r\n");
+        ? "RiddickVR: XRSIM input bridge installed (GetProcAddress intercept)\r\n"
+        : "RiddickVR: XRSIM input bridge FAILED to install (GetProcAddress not found)\r\n");
+}
+
+void SimInputBridgeInstallOnAttach() {
+    // The production seam: MSystem.dll is the module whose GetProcAddress the
+    // input context's constructor resolves through (ADR-0467).
+    SimInputBridgeInstallOnModule(GetModuleHandleA("MSystem.dll"));
 }
 
 void SimInputBridgeLogStartupReport() {

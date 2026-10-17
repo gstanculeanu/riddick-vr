@@ -2,6 +2,77 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 67 — 2026-10-17 23:50 (scheduled loop)
+- **Unit:** GH **#80 requirement 1** — the simulator-only input bridge's
+  *interceptor* is now **executed offline** (until now only its pure core was
+  tested; the Win32 half that actually fabricates the confirm had never run
+  anywhere except inside a deployed hook run). Hook seam + a new x86 CTest +
+  tools + docs; **no deploy, no live run, no game/asset change**.
+- **Why this unit:** #80 is the only remaining route to #71 req 1, every
+  player-visible ladder item is deploy-gated, and wake 66 landed the interceptor
+  with — by its own words — *nothing but inspection* validating the one path the
+  loop still believes in. Making that path verifiable headlessly is the highest
+  offline value available and matches the prompt's "extend the iteration vehicle
+  to cover whatever you are fixing".
+- **Change (hook):** `src/hook/sim_input_bridge_win32.{h,cpp}` —
+  `SimInputBridgeInstallOnAttach()` is now exactly
+  `SimInputBridgeInstallOnModule(GetModuleHandleA("MSystem.dll"))`, a
+  module-parameterized install seam. Same contract (two-token gate, loader-lock-safe,
+  one `KERNEL32.dll!GetProcAddress` IAT swap, `installed=no` on a null module or a
+  missing import). The mechanism is module-agnostic, which is what makes it
+  testable.
+- **Change (tests):** `tests/sim_input_bridge_win32_tests.cpp` (new CTest, x86
+  only — the hook ships x86 and the engine resolves the legacy 32-bit
+  `dinput.dll`). It installs the bridge on **its own module** and drives the
+  engine's exact resolution path. Two CTest cases:
+  - `sim_input_bridge_win32_intercept` (`gate-on`): after the install,
+    `GetProcAddress("XInputGetState")` / `"DirectInputCreateA"` return the
+    wrappers; an unrelated proc, a near-miss (`DirectInputCreateW`) and a
+    different proc from the same DLL all pass through; calling the wrapped
+    `XInputGetState` with the engine's own `XINPUT_STATE` buffer yields `START|A`
+    with the packet bumped (index 1 untouched); the `IDirectInputA` returned by
+    the wrapped `DirectInputCreateA` has a live `CreateDevice` whose
+    `GUID_SysKeyboard` device has slot 9 replaced.
+  - `sim_input_bridge_win32_inert` (`gate-off`, requirement 3): every resolved
+    pointer is the real one and no state is fabricated.
+  Both SKIP (exit 42) without the input DLLs; a missing keyboard *device*
+  downgrades the vtable sub-check to a note (routing + XInput need no device).
+  `tests/sim_bridge_probe_dll.cpp` (new) supplies the independent *unpatched*
+  baseline (below).
+- **Decisive gotcha found (measured, not inferred):** the first version resolved
+  the "before" and "after" pointers with two identical
+  `GetProcAddress(hMod, "SameName")` calls in the test executable — and the
+  Release optimizer **common-subexpression-eliminated** them, so the "after"
+  resolution silently reused the "before" result and the intercept looked broken
+  (it wasn't). Proven by contrast: inserting a couple of unrelated calls between
+  them made the test pass 13/13, removing them made it fail again — a
+  codegen-dependent false negative. Fixed by taking the baselines through
+  `ProbeGetProcAddressA` in a separate `riddick_vr_sim_bridge_probe` **DLL**
+  (whose own IAT the test never patches), so the two resolutions can never be
+  merged.
+- **Evidence (offline):** `tools/build-all.ps1 -Config Release`, **no `-Deploy`**
+  OK (x86 proxy + x64 host; `dist/` gitignored, the game install untouched);
+  **CTest 24/24 on x86** (incl. the 2 new cases; `sim_input_bridge_win32_intercept`
+  PASS under CTest and 10/10 direct), **22/22 on x64** (the new cases are x86-only
+  by design); all 10 `tools/test_*.py` PASS; `xrsim.py --selftest` PASS;
+  `verify_reported_fixes` PASS (`#40..#80`, #80 invariant extended with the seam +
+  the two tests); `verify_hook_init`, `validate_addresses`,
+  `verify_test_artifacts`, `scenario_tests.py --check` PASS. **No live sim run**:
+  the interceptor is inert without the two-token gate and the sim install runs the
+  stale hook, so a run would exercise nothing new.
+- **Blocker / honest limit:** this proves the interceptor's *mechanism*
+  end-to-end in-process (the IAT swap routes `GetProcAddress` to the wrappers, the
+  wrappers fabricate the engine-shaped state, they stay inert without the gate).
+  It does **not** settle the ADR-0467 residual — whether `DllMain`'s swap beats
+  `CInputContext_DInput`'s constructor (0x1010b440) inside the real game. That is
+  still the one interactive deploy; its first datum remains the per-request
+  `took over …` line.
+- **Next:** unchanged deploy-gated ladder. Top: #71 req 1 — the one interactive
+  deploy + `python tools/xrsim.py --reach-gameplay --sim-confirm keyboard
+  --sim-confirm-max-taps 60`, confirming `took over DirectInputCreateA` (or
+  `XInputGetState`) and that the run leaves the splash. Otherwise #67 step 3,
+  #72 req 1 A/B, #68 req 5, #79 hook half, #76 step 1.
+
 ## Wake 66 — 2026-10-17 23:35 (scheduled loop)
 - **Unit:** GH **#80 requirement 1** — implemented the simulator-only input
   bridge's *interceptor* (the early `GetProcAddress` IAT swap + the

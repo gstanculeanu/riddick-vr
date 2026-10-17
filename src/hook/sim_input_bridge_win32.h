@@ -32,6 +32,20 @@ namespace RiddickVR {
 // per-request log line, because the loader lock forbids logging here.
 void SimInputBridgeInstallOnAttach();
 
+// The module-parameterized install seam. ``SimInputBridgeInstallOnAttach()`` is
+// exactly ``SimInputBridgeInstallOnModule(GetModuleHandleA("MSystem.dll"))``;
+// the offline interceptor test installs the same bridge on *its own* module to
+// drive the engine's resolution path (``GetProcAddress`` -> wrapper -> injected
+// state) without a game and without a deploy. The mechanism -- swap one
+// ``KERNEL32.dll!GetProcAddress`` IAT entry and wrap the two resolved procs --
+// is module-agnostic, which is why this seam exists.
+//
+// Same contract as the DllMain entry: loader-lock-safe, inert (a single env
+// read, no install) unless both ``RIDDICKVR_SIM`` and ``RIDDICKVR_SIM_CONFIRM``
+// are set, and a no-op that records ``installed=no`` when ``hModule`` is null or
+// imports no ``GetProcAddress``.
+void SimInputBridgeInstallOnModule(HMODULE hModule);
+
 // Called once from the deferred hook init, after the logger exists. Reports
 // whether the intercept installed and whether the engine has since asked for
 // its input procs (i.e. whether the swap provably beat the input context's

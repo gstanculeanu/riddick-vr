@@ -90,3 +90,43 @@ import directory:
 - The response-time cost is one `GetProcAddress` indirection for MSystem.dll's
   own resolutions and, while opted in, one `GetTickCount` + comparison per
   keyboard/XInput poll — no per-frame allocation, no draw-path change.
+
+## Addendum (wake 67): the interceptor is now *executed* offline
+
+The consequence above — "the interceptor cannot be live-validated by this loop"
+— was true when written, but it left the single remaining route to GH #71 req 1
+validated by inspection alone. That is now closed without a game and without a
+deploy:
+
+1. **A module-parameterized install seam.** `SimInputBridgeInstallOnModule(HMODULE)`
+   is the mechanism; `SimInputBridgeInstallOnAttach()` is now exactly
+   `SimInputBridgeInstallOnModule(GetModuleHandleA("MSystem.dll"))`. The swap
+   (one `KERNEL32.dll!GetProcAddress` IAT entry) and the two wrappers are
+   module-agnostic, so the bridge can be installed on a module a test is allowed
+   to touch.
+2. **`tests/sim_input_bridge_win32_tests.cpp` drives the engine's exact path**
+   (*x86 only*: the hook ships x86 and the engine resolves the legacy 32-bit
+   `dinput.dll`). It installs the bridge on its own module and CTest runs it in
+   two modes:
+   - `sim_input_bridge_win32_intercept` (`gate-on`): after the install,
+     `GetProcAddress("XInputGetState")` / `GetProcAddress("DirectInputCreateA")`
+     return the wrappers; an unrelated proc, a near-miss (`DirectInputCreateW`)
+     and a different proc from the same DLL all pass through; calling the
+     wrapped `XInputGetState` with the engine's own `XINPUT_STATE` buffer yields
+     `START|A` with the packet number bumped (index 1 untouched); and the
+     `IDirectInputA` returned by the wrapped `DirectInputCreateA` has a live
+     `CreateDevice` whose `GUID_SysKeyboard` device has slot 9 replaced.
+   - `sim_input_bridge_win32_inert` (`gate-off`, requirement 3): with the
+     two-token gate off, every resolved pointer is the real one and no state is
+     fabricated.
+3. Both SKIP (exit 42) when `dinput.dll` / `XInput1_3.dll` are absent. The
+   device-vtable sub-check downgrades to a note if `CreateDevice(GUID_SysKeyboard)`
+   is unavailable; the routing and XInput checks need no device.
+
+**What this does and does not prove.** It proves the interceptor's *mechanism*
+end-to-end in-process: the IAT swap routes `GetProcAddress` calls to the
+wrappers, the wrappers fabricate the confirm into the engine's buffer shapes, and
+they stay inert without the gate. It does **not** prove the ADR-0467 residual
+(the ordering against `CInputContext_DInput`'s constructor inside the real game)
+— that still needs the one interactive deploy, whose first datum remains the
+per-request `took over …` line.

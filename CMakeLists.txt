@@ -279,4 +279,42 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME sim_input_bridge_pure_core COMMAND riddick_vr_sim_input_bridge_tests)
+
+    # GH #80 (requirement 1): the same bridge's *interceptor* -- the Win32 half
+    # that actually routes the engine's resolution calls to our wrappers -- run
+    # end-to-end offline. The test installs the bridge on its own module (the
+    # mechanism is module-agnostic: production passes MSystem.dll, ADR-0467/0468),
+    # drives the engine's exact path (GetProcAddress -> wrapper -> injected
+    # XInput/DirectInput state), and proves the gate-off inertness control
+    # (requirement 3). No game, no deploy, no OS input; SKIP (42) without the
+    # input DLLs. x86 only: the hook ships x86 and the engine resolves the 32-bit
+    # legacy dinput.dll named in GH #80.
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        # An independent, *unpatched* resolution path for the test: the bridge
+        # patches the test executable's GetProcAddress IAT, so the baseline must
+        # come from a module the test never patches (the optimizer would
+        # otherwise CSE the two identical GetProcAddress calls and hide a broken
+        # intercept).
+        add_library(riddick_vr_sim_bridge_probe SHARED tests/sim_bridge_probe_dll.cpp)
+
+        add_executable(riddick_vr_sim_input_bridge_win32_tests
+            tests/sim_input_bridge_win32_tests.cpp
+            src/hook/sim_input_bridge_win32.cpp
+            src/hook/iat_hook.cpp
+            src/hook/logging.cpp
+        )
+        target_include_directories(riddick_vr_sim_input_bridge_win32_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+        )
+        target_link_libraries(riddick_vr_sim_input_bridge_win32_tests PRIVATE
+            riddick_vr_sim_bridge_probe
+        )
+        add_test(NAME sim_input_bridge_win32_intercept
+                 COMMAND riddick_vr_sim_input_bridge_win32_tests gate-on)
+        add_test(NAME sim_input_bridge_win32_inert
+                 COMMAND riddick_vr_sim_input_bridge_win32_tests gate-off)
+        set_tests_properties(sim_input_bridge_win32_intercept
+                             sim_input_bridge_win32_inert
+                             PROPERTIES SKIP_RETURN_CODE 42)
+    endif()
 endif()

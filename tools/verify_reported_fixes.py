@@ -704,6 +704,18 @@ def main():
             (ROOT / "tools/xrsim.py").read_text(encoding="utf-8") and
             "tests/sim_input_bridge_tests.cpp" in cmake and
             "sim_input_bridge_pure_core" in cmake and
+            # GH #80 req 1 (wake 67): the interceptor is now *executed* offline.
+            # The bridge installs through a module-parameterized seam, and a
+            # headless test installs it on its own module and drives the engine's
+            # exact resolution path -- gate-on interception (GetProcAddress ->
+            # wrapper -> injected XInput/DirectInput state) plus a gate-off
+            # inertness control. No game, no deploy.
+            "SimInputBridgeInstallOnModule" in
+            (ROOT / "src/hook/sim_input_bridge_win32.h").read_text(encoding="utf-8") and
+            "SimInputBridgeInstallOnModule" in sim_bridge_cpp and
+            "tests/sim_input_bridge_win32_tests.cpp" in cmake and
+            "sim_input_bridge_win32_intercept" in cmake and
+            "sim_input_bridge_win32_inert" in cmake and
             "0x1010b440" in
             (ROOT / "docs/adr/0467-sim-input-bridge-install-point.md").read_text(encoding="utf-8") and
             (ROOT / "docs/adr/0468-sim-input-bridge-interception-mechanism.md").exists(),
