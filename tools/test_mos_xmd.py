@@ -11,7 +11,9 @@ Exit code 0 = pass, 1 = fail.
 """
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -20,6 +22,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mos_xmd  # noqa: E402  (path injected above)
 
 MAGIC = b"MOS DATAFILE2.0\x00"
+
+# Every synthetic model is written under one per-process directory, *not* the OS
+# temp root. The corpus checks (``xmd_pose.check`` / ``xmd_fk --inventory``)
+# walk ``os.path.dirname(path)`` recursively, so writing to the shared temp root
+# let any unrelated ``.xmd``/``.xmg`` that happens to live there (e.g. a whole
+# game tree copied in by an XRSIM shadow install) be parsed by the test (GH #82).
+_TMP_ROOT = tempfile.mkdtemp(prefix="riddickvr-xmd-tests-")
+atexit.register(shutil.rmtree, _TMP_ROOT, ignore_errors=True)
 
 
 def _node(name: str, sibling: int, child: int,
@@ -53,8 +63,13 @@ def build_container(nodes, payloads):
     return blob
 
 
-def _write_tmp(blob: bytes) -> str:
-    fd, path = tempfile.mkstemp(suffix=".xmd")
+def _write_tmp(blob: bytes, directory: str | None = None) -> str:
+    """Write ``blob`` to a fresh ``.xmd`` in an isolated temp directory.
+
+    ``directory`` overrides the default per-process directory (``_TMP_ROOT``);
+    callers that then scan ``os.path.dirname(path)`` are guaranteed to see only
+    the models this process wrote."""
+    fd, path = tempfile.mkstemp(suffix=".xmd", dir=directory or _TMP_ROOT)
     with os.fdopen(fd, "wb") as f:
         f.write(blob)
     return path
@@ -1245,6 +1260,24 @@ def test_matrix_map_groups_ignores_direct_clusters(tmp_dir):
         os.remove(path)
 
 
+def test_write_tmp_is_isolated(tmp_dir):
+    # GH #82: synthetic models must not land in the OS temp root, or a corpus
+    # scan of `os.path.dirname(path)` walks unrelated files there.
+    path = _write_tmp(b"\x00" * 16)
+    try:
+        assert os.path.dirname(path) == _TMP_ROOT, path
+        assert os.path.abspath(os.path.dirname(path)) != \
+            os.path.abspath(tempfile.gettempdir()), path
+        # An explicit directory wins (the tests' own TemporaryDirectory).
+        other = _write_tmp(b"\x00" * 16, tmp_dir)
+        try:
+            assert os.path.dirname(other) == os.path.abspath(tmp_dir), other
+        finally:
+            os.remove(other)
+    finally:
+        os.remove(path)
+
+
 def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
@@ -1284,7 +1317,8 @@ def main() -> int:
              test_keys_decodes_latin1_binary_key,
              test_matrix_map_groups_conflicting_palettes,
              test_matrix_map_groups_agreeing_palettes,
-             test_matrix_map_groups_ignores_direct_clusters)
+             test_matrix_map_groups_ignores_direct_clusters,
+             test_write_tmp_is_isolated)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

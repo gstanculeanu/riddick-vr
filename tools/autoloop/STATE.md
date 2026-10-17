@@ -2,6 +2,73 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 72 — 2026-10-18 01:34 (scheduled loop)
+- **Unit:** GH **#82** — the two red `test_xmd_*` are fixed by giving the
+  synthetic `.xmd` models an **isolated temp directory**, and the real root cause
+  is now measured (it was *not* stale synthetic builders). Test-hygiene fix +
+  ADR + a new issue for the real-asset bug; **no C++ change, no build, no deploy,
+  no live run**.
+- **Why this unit:** #82 is the last locally-red item on `main` and every
+  validation this loop runs (`tools/test_*.py`) passes through it; two wakes
+  disagreed about whether it was red (the owner read it green, the peer red under
+  `--inventory --check`), so it needed a decidable cause rather than another
+  invocation.
+- **Root cause (measured):** `test_mos_xmd._write_tmp` used
+  `tempfile.mkstemp()` with **no `dir`** — the OS temp root — while
+  `test_xmd_pose.test_check_clean_and_empty` / `test_main_cli` and
+  `test_xmd_fk.test_cli` run the *corpus* check over `os.path.dirname(path)`
+  (`xmd_pose.check` / `xmd_fk.main(["--inventory", root, "--check"])`), which
+  `os.walk`s recursively. Wake 70/71's **XRSIM shadow install** (ADR-0471) left a
+  full game tree at `%TEMP%\xrsim71-shadow\Content\Models`, so the scan swept the
+  installed game's **1285** `.xmd` models; `xmd_pose.check`
+  (`tools/xmd_pose.py:366`) and `xmd_fk.check` (`tools/xmd_fk.py:465`) call
+  `x.skeleton()` **outside** their `try/except`, so the first non-skeleton `NODES`
+  aborted the run (`NODES size 228 != 19 * 34`). Reproduced directly: a synthetic
+  model written to `%TEMP%` + `xmd_pose.check(dirname)` raises the same error
+  while `Xmd(path).skeleton()` on the same file is fine.
+- **Change:** `tools/test_mos_xmd.py` — `_write_tmp(blob, directory=None)` writes
+  into `directory or _TMP_ROOT`, where
+  `_TMP_ROOT = tempfile.mkdtemp("riddickvr-xmd-tests-")` (removed at process exit
+  via `atexit`); new regression test `test_write_tmp_is_isolated` (default dir is
+  `_TMP_ROOT` and not `tempfile.gettempdir()`; an explicit `directory` wins).
+  `docs/adr/0473-xmd-test-temp-isolation.md`.
+- **Decisive side finding (the red test was pointing at a real bug):** `Xmd.skeleton()`
+  (`tools/mos_xmd.py:1579`) resolves its payload with `self.chunk("NODES")`, and
+  `chunk()` (`:1109`) returns the **first** node named `NODES` anywhere in the
+  container — it never scopes to the `SKELETON` parent. A read-only survey of the
+  installed 2004 `Content\Models\**\*.xmd` (1285 files) gives: **462** with
+  `SKELETON`+`NODES`+`NODEINDICES` at 34 B/record (the ADR-0418 layout); **731**
+  with a bare `NODES` and **no** `SKELETON`/`NODEINDICES` at **12 B/record**
+  (e.g. `CoordSys.xmd` `NODES data_size=228 count=19`); **63** with no `NODES`;
+  **29** with an empty skeleton. So the documented corpus check
+  `xmd_pose.py --inventory <game>\Content\Models --check` is **red against the
+  installed game**, and any `skeleton()` caller on a static prop raises. The
+  Riddick character models (the native-hand path) are unaffected — every skeletal
+  `Characters\Riddick\*.xmd` is `SKELETON`+34 B (e.g. `Riddick_B03.xmd`: two
+  `NODES`, 2516/74 and 816/24). **Filed GH #84** with the survey table and a
+  proposed fix (select the `NODES` with a `NODEINDICES` sibling / 34-byte tiling /
+  `SKELETON` parent; return `None` instead of raising; still raise on a genuine
+  34-byte count mismatch), noting the synthetic builders that build a bare root
+  `NODES` must keep working.
+- **Evidence (offline):** `python tools/test_mos_xmd.py`,
+  `tools/test_xmd_pose.py`, `tools/test_xmd_fk.py` PASS; the full
+  **`tools/test_*.py` = 11/11 PASS** (previously 9/11);
+  `tools/xrsim.py --selftest`, `tools/verify_reported_fixes.py` (#40..#81),
+  `tools/verify_hook_init.py`, `tools/validate_addresses.py` (result PASS),
+  `tools/verify_test_artifacts.py`, `tools/scenario_tests.py --check` PASS. **No
+  C++ changed → no `build-all`/CTest** (documented).
+- **Blocker / honest limit:** this removes the *environment-dependent* red; it
+  does not fix the real-asset `skeleton()` bug (GH #84), which the corpus check
+  will still hit as soon as it is pointed at the game install. No live run this
+  wake (nothing player-visible changed).
+- **Next:** (1) GH #84 — scope `skeleton()` to the `SKELETON` `NODES` (and return
+  `None` for a non-skeleton `NODES`), so `xmd_pose/xmd_fk --check` works on the
+  installed 2004 assets (then re-check the `--check` corpus over the install
+  read-only); (2) the deploy-gated ladder is otherwise unchanged and now
+  live-capable via `--shadow-install` (#72 req 1 latch A/B, #67 step 3, #68
+  req 5, #79 hook half, #76 step 1); (3) GH #83 (single-instance scheduler guard)
+  still open.
+
 ## Wake 71 — 2026-10-18 01:25 (scheduled loop)
 - **Unit:** GH **#71 req 1 / #80 follow-up** — the sim input bridge is now
   **observable**, so the reach is decidable from a run instead of inferred: it
