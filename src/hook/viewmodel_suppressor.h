@@ -38,6 +38,16 @@
 // so the pass signature can be logged (FrameTrace) or the engine arms can be
 // driven by the controller (viewmodel_drive.h) with suppression off.
 //
+// GH #67 step 2 (observation-only, union with the above): the SAME window is
+// used to *identify* the first-person viewmodel pass before it is driven from
+// the controller. With `observe` on (ViewmodelObserve=1) the window opens and
+// the per-frame tallies plus a representative GL_MODELVIEW are recorded, but a
+// draw is never skipped -- ShouldSuppressDraw() stays false unless `enabled` is
+// also set. The dispatcher formats one `ViewmodelProbe` log line per sampled
+// frame (see opengl_proxy.cpp). Observation is independent of the suppression
+// and track switches; enabling suppression suppresses *without* observing
+// unless both are set.
+//
 // It uses no Windows/GL headers so it
 // compiles on the x64 host and is unit-tested headlessly (no game launch), like
 // combat_guard.h / combat_strike.h.
@@ -59,11 +69,37 @@ struct ViewmodelSuppressionConfig {
     bool enabled = false;
     // GH #66: keep the window and counters live without suppressing draws.
     bool track = false;
+    // GH #67 step 2: observation-only mode. The window opens on the same
+    // boundary and the per-frame draw tallies plus a representative modelview
+    // are recorded, but ShouldSuppressDraw() still returns false -- nothing is
+    // ever skipped. This is how the first-person viewmodel pass is *identified*
+    // before it is driven from the controller (or suppressed, GH #63). Default
+    // off.
+    bool observe = false;
     // Window opener (see the header comment). Default is the classic
     // depth-only-clear boundary; PROVISIONAL, select on a headset.
     ViewmodelWindowOpener opener = ViewmodelWindowOpener::DepthOnlyClear;
     // NearPlaneDrop: open when near < worldNear * nearRatio.
     float nearRatio = 0.5f;
+};
+
+// GH #67 step 2: what the observation pass saw in one frame. Pure data so the
+// draw dispatcher can format one parseable log line. `sample` is the
+// GL_MODELVIEW in effect at the FIRST draw observed inside the window (the pass
+// usually loads one viewmodel-relative matrix and draws its submeshes), or
+// all-zero when no draw was inside the window this frame.
+struct ViewmodelObservationSnapshot {
+    bool windowOpened = false; // the window opened this frame
+    unsigned drawsInside = 0;  // draws observed with the window open
+    unsigned drawsOutside = 0; // draws observed with the window closed
+    bool hadSample = false;    // a modelview was captured this frame
+    // GH #67 step 1: matrix composition seen inside the window. RndrGL builds a
+    // sub-object transform with glPushMatrix + glTranslatef (it does not import
+    // glMultMatrixf/glRotatef), so a non-zero count here is direct evidence that
+    // the sampled modelview must be the *composed* one (gl_matrix_tracker.h).
+    unsigned pushesInside = 0;
+    unsigned translatesInside = 0;
+    float sample[16] = {};     // column-major, as uploaded to GL_MODELVIEW
 };
 
 // One frame's pass signature as tokens: C (colour clear), D (depth-only clear),
@@ -78,6 +114,9 @@ public:
     const ViewmodelSuppressionConfig& Config() const { return config_; }
     bool Enabled() const { return config_.enabled; }
     bool Active() const { return config_.enabled || config_.track; }
+    // GH #67 step 2: observation-only mode (window state maintained, never
+    // suppresses on its own).
+    bool Observing() const { return config_.observe; }
     bool WindowOpen() const { return windowOpen_; }
 
     // Frame start: a full colour clear. Closes any open window and re-bases the
@@ -92,8 +131,8 @@ public:
 
     // Mid-frame depth-only clear. Opens the window when that opener is selected.
     void NoteDepthOnlyClear() {
-        if (!Active()) return;
-        AppendToken("D");
+        if (!Tracking()) return;
+        if (Active()) AppendToken("D");
         if (config_.opener == ViewmodelWindowOpener::DepthOnlyClear ||
             config_.opener == ViewmodelWindowOpener::Either) {
             Open();
@@ -104,18 +143,18 @@ public:
     void NoteProjectionLoad() { NoteProjectionLoad(true, 0.0f); }
 
     void NoteProjectionLoad(bool perspective, float nearPlane) {
-        if (!Active()) return;
+        if (!Tracking()) return;
         const bool nearKnown = nearPlane > 0.0f && nearPlane < 1.0e9f;
         if (!perspective) {
-            AppendToken("O");
+            if (Active()) AppendToken("O");
             windowOpen_ = false;
             return;
         }
         if (nearKnown) {
             char tok[24];
             FormatNear(tok, sizeof(tok), nearPlane);
-            AppendToken(tok);
-        } else {
+            if (Active()) AppendToken(tok);
+        } else if (Active()) {
             AppendToken("P?");
         }
         const bool hadWorldNear = worldNear_ > 0.0f;
@@ -145,9 +184,9 @@ public:
     }
 
     // Called once per intercepted engine draw call. Returns true when this draw
-    // should be skipped (only when enabled; track alone never suppresses).
+    // should be skipped (only when enabled; track/observe alone never suppress).
     bool ShouldSuppressDraw() {
-        if (!Active()) return false;
+        if (!Tracking()) return false;
         ++frameDraws_;
         ++drawRun_;
         if (windowOpen_) {
@@ -159,6 +198,60 @@ public:
             }
         }
         return false;
+    }
+
+    // GH #67 step 2 (observation-only): called once per intercepted draw in
+    // observe mode, before/independent of ShouldSuppressDraw. Counts the draw by
+    // window state and (via the dispatcher's SetObservedSample) captures the
+    // first in-window modelview. Never suppresses.
+    void NoteObservedDraw() {
+        if (!config_.observe) return;
+        if (windowOpen_) {
+            ++observeDrawsInside_;
+            observeWindowOpened_ = true;
+        } else {
+            ++observeDrawsOutside_;
+        }
+    }
+
+    // Records the GL_MODELVIEW in effect at the first draw inside the window.
+    // Only the first per window is kept (the first-person pass loads one matrix
+    // and draws its submeshes), so later world/HUD matrices cannot overwrite it.
+    void SetObservedSample(const float* matrix16) {
+        if (!config_.observe || !windowOpen_ || hasObserveSample_) return;
+        for (int i = 0; i < 16; ++i) observeSample_[i] = matrix16[i];
+        hasObserveSample_ = true;
+    }
+
+    // GH #67 step 1: count the matrix-composition calls seen inside the window.
+    // No-ops unless observing with the window open, so the suppression path is
+    // untouched. Called from the RndrGL glPushMatrix/glTranslatef hooks.
+    void NoteObservedPush() {
+        if (config_.observe && windowOpen_) ++observePushes_;
+    }
+    void NoteObservedTranslate() {
+        if (config_.observe && windowOpen_) ++observeTranslates_;
+    }
+
+    // Publishes this frame's observation and re-bases the observation counters.
+    ViewmodelObservationSnapshot ComputeSnapshot() {
+        ViewmodelObservationSnapshot snap;
+        snap.windowOpened = observeWindowOpened_;
+        snap.drawsInside = observeDrawsInside_;
+        snap.drawsOutside = observeDrawsOutside_;
+        snap.hadSample = hasObserveSample_;
+        snap.pushesInside = observePushes_;
+        snap.translatesInside = observeTranslates_;
+        if (hasObserveSample_) {
+            for (int i = 0; i < 16; ++i) snap.sample[i] = observeSample_[i];
+        }
+        observeWindowOpened_ = false;
+        observeDrawsInside_ = 0;
+        observeDrawsOutside_ = 0;
+        hasObserveSample_ = false;
+        observePushes_ = 0;
+        observeTranslates_ = 0;
+        return snap;
     }
 
     // Per-frame tallies (draws seen / draws suppressed while active).
@@ -173,6 +266,11 @@ public:
     const char* LastFrameTrace() const { return lastTrace_; }
 
 private:
+    // The window state machine runs whenever any consumer needs it: suppression
+    // (`enabled`), pass tracing / controller drive (`track`), or the GH #67
+    // step-2 probe (`observe`). Only `enabled` can skip a draw.
+    bool Tracking() const { return Active() || config_.observe; }
+
     void Open() {
         windowOpen_ = true;
         windowDraws_ = 0;
@@ -246,6 +344,15 @@ private:
     int traceLen_ = 0;
     char trace_[kViewmodelTraceCapacity] = {};
     char lastTrace_[kViewmodelTraceCapacity] = {};
+
+    // GH #67 step 2 observation state (never affects suppression).
+    bool observeWindowOpened_ = false;
+    bool hasObserveSample_ = false;
+    unsigned observeDrawsInside_ = 0;
+    unsigned observeDrawsOutside_ = 0;
+    unsigned observePushes_ = 0;
+    unsigned observeTranslates_ = 0;
+    float observeSample_[16] = {};
 };
 
 } // namespace RiddickVR

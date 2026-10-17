@@ -155,6 +155,8 @@ void LoadVRConfig() {
         // signature is provisional and must be confirmed on a headset).
         cfg.suppressEngineViewmodel = ReadInt(iniPath, "SuppressEngineViewmodel", cfg.suppressEngineViewmodel) ? 1 : 0;
         cfg.viewmodelDepthClearWindow = ReadInt(iniPath, "ViewmodelDepthClearWindow", cfg.viewmodelDepthClearWindow) ? 1 : 0;
+        // GH #67 step 2: observation-only first-person viewmodel probe.
+        cfg.viewmodelObserve = ReadInt(iniPath, "ViewmodelObserve", cfg.viewmodelObserve) ? 1 : 0;
         // GH #63/#66/#67: window opener, pass trace and controller-driven engine arms.
         cfg.viewmodelTrace = ReadInt(iniPath, "ViewmodelTrace", cfg.viewmodelTrace) ? 1 : 0;
         {
@@ -171,8 +173,8 @@ void LoadVRConfig() {
         cfg.viewmodelDriveYaw = ClampF(ReadFloat(iniPath, "ViewmodelDriveYaw", cfg.viewmodelDriveYaw), -180.0f, 180.0f);
         cfg.viewmodelDrivePitch = ClampF(ReadFloat(iniPath, "ViewmodelDrivePitch", cfg.viewmodelDrivePitch), -180.0f, 180.0f);
         cfg.viewmodelDriveRoll = ClampF(ReadFloat(iniPath, "ViewmodelDriveRoll", cfg.viewmodelDriveRoll), -180.0f, 180.0f);
-        VR_LOG_INFO("Viewmodel config: suppress=%d drive=%d trace=%d opener=%d nearRatio=%.2f upm=%.1f anchor=[%.2f,%.2f,%.2f] rot=[%.0f,%.0f,%.0f]",
-            cfg.suppressEngineViewmodel, cfg.driveEngineViewmodel, cfg.viewmodelTrace,
+        VR_LOG_INFO("Viewmodel config: suppress=%d drive=%d trace=%d observe=%d opener=%d nearRatio=%.2f upm=%.1f anchor=[%.2f,%.2f,%.2f] rot=[%.0f,%.0f,%.0f]",
+            cfg.suppressEngineViewmodel, cfg.driveEngineViewmodel, cfg.viewmodelTrace, cfg.viewmodelObserve,
             cfg.viewmodelWindowOpener, cfg.viewmodelNearRatio, cfg.viewmodelUnitsPerMeter,
             cfg.viewmodelAnchorX, cfg.viewmodelAnchorY, cfg.viewmodelAnchorZ,
             cfg.viewmodelDriveYaw, cfg.viewmodelDrivePitch, cfg.viewmodelDriveRoll);

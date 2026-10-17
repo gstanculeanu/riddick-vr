@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 
+using RiddickVR::ViewmodelObservationSnapshot;
 using RiddickVR::ViewmodelSuppressionConfig;
 using RiddickVR::ViewmodelSuppressor;
 using RiddickVR::ViewmodelWindowOpener;
@@ -262,6 +263,107 @@ int main() {
         const size_t len = std::strlen(s.LastFrameTrace());
         Check(len > 0 && len < static_cast<size_t>(RiddickVR::kViewmodelTraceCapacity),
               "a long trace must truncate inside the fixed buffer");
+    }
+
+    // GH #67 step 2: observation-only mode opens the same window and records
+    // tallies, but never suppresses -- even though `enabled` stays false.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = false;
+        cfg.observe = true;
+        s.Configure(cfg);
+        Check(s.Observing(), "observe must be reported once configured");
+        Check(!s.Enabled(), "observation must not enable suppression");
+
+        s.NoteColorClear();                 // frame start: world pass
+        s.NoteObservedDraw();
+        s.NoteObservedDraw();
+        Check(!s.WindowOpen(), "observation alone must not open a window before a clear");
+
+        s.NoteDepthOnlyClear();             // first-person pass begins
+        Check(s.WindowOpen(), "observe mode must open the window on a depth-only clear");
+        Check(!s.ShouldSuppressDraw(), "observe mode must never suppress a draw");
+
+        // GH #67 step 1: matrix-composition calls inside the window are counted as
+        // evidence that the pass composes a sub-transform (so the composed, not
+        // merely loaded, modelview must be captured).
+        s.NoteObservedPush();
+        s.NoteObservedTranslate();
+
+        float vm[16] = {};
+        for (int i = 0; i < 16; ++i) vm[i] = static_cast<float>(i);
+        s.NoteObservedDraw();
+        s.SetObservedSample(vm);
+        // A second in-window matrix must not overwrite the first.
+        float later[16] = {};
+        s.SetObservedSample(later);
+        s.NoteObservedDraw();
+
+        const ViewmodelObservationSnapshot snap = s.ComputeSnapshot();
+        Check(snap.windowOpened, "the snapshot must record the window opening");
+        Check(snap.drawsInside == 2, "the snapshot must count in-window draws");
+        Check(snap.drawsOutside == 2, "the snapshot must count out-of-window draws");
+        Check(snap.pushesInside == 1 && snap.translatesInside == 1,
+              "the snapshot must count in-window matrix composition");
+        Check(snap.hadSample, "the snapshot must carry the first in-window matrix");
+        Check(snap.sample[0] == 0.0f && snap.sample[5] == 5.0f && snap.sample[15] == 15.0f,
+              "the captured matrix must be the first in-window modelview");
+
+        // Re-basing: a second snapshot without new activity is empty.
+        const ViewmodelObservationSnapshot empty = s.ComputeSnapshot();
+        Check(!empty.windowOpened && empty.drawsInside == 0 && empty.drawsOutside == 0 &&
+              !empty.hadSample && empty.pushesInside == 0 && empty.translatesInside == 0,
+              "a snapshot must re-base the per-frame observation counters");
+
+        s.NoteSwap();
+        Check(!s.ShouldSuppressDraw(), "observe mode must stay inert across a swap");
+        Check(s.TotalSuppressed() == 0, "observe mode must never accumulate suppressions");
+    }
+
+    // GH #67 step 2: with suppression enabled the window still opens, and
+    // observing has no effect on the suppress decision.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = true;
+        cfg.observe = true;
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteObservedDraw();
+        s.NoteDepthOnlyClear();
+        s.NoteObservedDraw();
+        Check(s.ShouldSuppressDraw(), "suppression must be unchanged when also observing");
+        const ViewmodelObservationSnapshot snap = s.ComputeSnapshot();
+        Check(snap.windowOpened && snap.drawsInside == 1 && snap.drawsOutside == 1,
+              "observing must count draws while suppression is enabled too");
+    }
+
+    // GH #67 step 1: matrix-composition counting is inert without observe, and
+    // outside an open window.
+    {
+        ViewmodelSuppressor s;
+        ViewmodelSuppressionConfig cfg;
+        cfg.enabled = true;   // suppression on, observation off
+        s.Configure(cfg);
+        s.NoteColorClear();
+        s.NoteDepthOnlyClear();
+        s.NoteObservedPush();
+        s.NoteObservedTranslate();
+        const ViewmodelObservationSnapshot snap = s.ComputeSnapshot();
+        Check(snap.pushesInside == 0 && snap.translatesInside == 0,
+              "matrix composition must not be counted when not observing");
+
+        ViewmodelSuppressor o;
+        ViewmodelSuppressionConfig oc;
+        oc.observe = true;
+        o.Configure(oc);
+        o.NoteColorClear();               // window closed
+        o.NoteObservedPush();
+        o.NoteObservedTranslate();
+        const ViewmodelObservationSnapshot outside = o.ComputeSnapshot();
+        Check(outside.pushesInside == 0 && outside.translatesInside == 0,
+              "matrix composition outside the window must not be counted");
     }
 
     if (g_failures == 0) {

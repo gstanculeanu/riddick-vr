@@ -25,6 +25,7 @@ def main():
     dialogue = (ROOT / "src/hook/dialogue_navigation.h").read_text(encoding="utf-8")
     config = (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8")
     pose_header = (ROOT / "src/hook/native_hand_pose.h").read_text(encoding="utf-8")
+    xrsim_tool = (ROOT / "tools/xrsim.py").read_text(encoding="utf-8")
 
     require("vrState.cinemaMode = false" not in camera,
             "camera update must not override the renderer's cinema decision")
@@ -191,6 +192,44 @@ def main():
             "LastFrameTrace()" in proxy and
             "viewmodel_drive_tests.cpp" in cmake_text,
             "GH #63/#66/#67: viewmodel window must track the FP pass, expose a trace, and the controller drive must be opt-in and unit-tested")
+
+    # GH #67 step 2: the engine's own first-person viewmodel pass must be
+    # *identifiable* before it can be driven from the controller. The observation
+    # mode reuses the GH #66 depth-only-clear boundary, records the in/out-of-
+    # window draw tallies and the modelview at the first in-window draw, never
+    # suppresses, defaults off, and is consumed by XRSIM (which skips, not fails,
+    # when the probe was not run).
+    require("bool observe = false;" in suppressor and
+            "ViewmodelObservationSnapshot" in suppressor and
+            "NoteObservedDraw" in suppressor and "SetObservedSample" in suppressor and
+            "ComputeSnapshot" in suppressor and
+            "viewmodelObserve = 0" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            "ViewmodelObserve" in config and
+            "ViewmodelProbe" in proxy and
+            "s_viewmodelSuppressor.Observing()" in proxy and
+            "s_viewmodelSuppressor.NoteObservedDraw()" in proxy and
+            "s_viewmodelSuppressor.SetObservedSample(s_lastView)" in proxy and
+            "viewmodel_probe_stats" in xrsim_tool and
+            "viewmodel_pass_identified" in xrsim_tool,
+            "GH #67: the first-person viewmodel pass must be identifiable by an "
+            "off-by-default, non-suppressing observation probe consumed by XRSIM")
+
+    # GH #67 step 1: the draw-time modelview must be the *effective* one. RndrGL
+    # composes transforms from glLoadMatrixf + glPushMatrix/glTranslatef/
+    # glPopMatrix, so a software mirror (gl_matrix_tracker.h) must be fed by the
+    # intercepted composition calls and must drive GetLastViewMatrix().
+    tracker = ROOT / "src/hook/gl_matrix_tracker.h"
+    require(tracker.exists() and
+            "class GlMatrixTracker" in tracker.read_text(encoding="utf-8") and
+            "NoteModelviewPush" in proxy and
+            "NoteModelviewTranslatef" in proxy and
+            "s_modelviewTracker" in proxy and
+            "OPENGL32.dll" in dllmain and
+            "glPushMatrix" in dllmain and
+            "gl_matrix_tracker_tests.cpp" in cmake_text,
+            "GH #67: the draw-time modelview must be composed (glPushMatrix/"
+            "glTranslatef/glPopMatrix mirrored by gl_matrix_tracker.h), not just "
+            "the last loaded glLoadMatrixf")
 
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
