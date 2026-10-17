@@ -152,6 +152,11 @@ private:
     bool m_running = false;
     bool m_sessionActive = false;
     uint32_t m_frameIndex = 0;
+    // GH #77: provenance of the per-eye view/projection matrices recorded in
+    // `eye_frames.log`. True only when `xrLocateViews` actually returned views
+    // (real headset); false for the synthetic constant baseline the mock host
+    // uses, so a capture never claims a scene-faithful eye view it lacks.
+    bool m_eyeViewsFromRuntime = false;
 
     bool m_mockMode = false;
     std::string m_dumpDir;

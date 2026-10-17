@@ -997,26 +997,46 @@ def test_viewmodel_probe_check_requires_an_in_window_draw(td):
 
 
 # ----------------------- per-frame camera transform (GH #68 requirement 1)
-def _eye_frames_file(art, frames):
+def _rot3(q):
+    """Row-major rotation of quaternion q (x, y, z, w) -- mirrors the host."""
+    x, y, z, w = q
+    return [[1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)]]
+
+
+def _mat(rot=None, tx=0.0):
+    """A column-major 16-float view token with an optional row-major rotation."""
+    r = rot or [[1.0 if i == j else 0.0 for j in range(3)] for i in range(3)]
+    m = [0.0] * 16
+    for c in range(3):
+        for row in range(3):
+            m[c * 4 + row] = r[row][c]
+    m[12] = tx
+    m[15] = 1.0
+    return "[" + " ".join(f"{v:.4f}" for v in m) + "]"
+
+
+def _eye_frames_file(art, frames, source=None, faithful=False):
     """Write an ``eye_frames.log`` in the host's wire format.
 
     ``frames`` is a list of ``(frame, yaw_deg)``; the head pose is a pure yaw
-    rotation so the recorded yaw span is easy to assert.
+    rotation so the recorded yaw span is easy to assert. ``source`` appends the
+    GH #77 ``eye=`` token (omitted when None = a legacy line). When ``faithful``
+    the view rotation is built from the head pose (a real runtime view); otherwise
+    it is the host's identity-rotation synthetic baseline.
     """
-    def mat():
-        vals = ["0.0000"] * 16
-        for i in (0, 5, 10, 15):
-            vals[i] = "1.0000"
-        return "[" + " ".join(vals) + "]"
-
     lines = ["# frame=NNNN hmdpos=x,y,z hmdquat=x,y,z,w "
-             "viewL=[16] viewR=[16] projL=[16] projR=[16]"]
+             "viewL=[16] viewR=[16] projL=[16] projR=[16] eye=<runtime|synthetic>"]
     for frame, yaw in frames:
         half = math.radians(yaw) / 2.0
         qx, qy, qz, qw = 0.0, math.sin(half), 0.0, math.cos(half)
+        rot = _rot3((qx, qy, qz, qw)) if faithful else None
+        tok = f" eye={source}" if source else ""
         lines.append(f"frame={frame} hmdpos=0.0000,1.7000,0.0000 "
                      f"hmdquat={qx:.4f},{qy:.4f},{qz:.4f},{qw:.4f} "
-                     f"viewL={mat()} viewR={mat()} projL={mat()} projR={mat()}")
+                     f"viewL={_mat(rot, -0.0325)} viewR={_mat(rot, 0.0325)} "
+                     f"projL={_mat()} projR={_mat()}{tok}")
     (art / xrsim.EYE_FRAMES_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1029,13 +1049,37 @@ def test_eye_frame_log_parsed(td):
     assert rec["hmd_pos"] == [0.0, 1.7, 0.0], rec
     assert len(rec["hmd_quat"]) == 4, rec
     assert len(rec["view_l"]) == 16 and len(rec["proj_r"]) == 16, rec
+    # GH #77: a legacy line with no eye= token parses as source "unknown".
+    assert rec["source"] == "unknown", rec
     stats = xrsim.eye_frame_stats(art)
     assert stats["count"] == 2 and stats["distinct"] == 2, stats
     assert abs(stats["yaw_span_deg"] - 40.0) < 0.5, stats
     # Absent file -> empty, never fabricated.
     assert xrsim.read_eye_frames(Path(td) / "nope") == {}
     assert xrsim.eye_frame_stats(Path(td) / "nope") == {
-        "count": 0, "distinct": 0, "yaw_span_deg": None}
+        "count": 0, "distinct": 0, "yaw_span_deg": None,
+        "source": None, "view_head_rotation_deviation_deg": None,
+        "proj_lr_identical": None}
+
+
+def test_eye_frame_provenance_parsed(td):
+    """GH #77: the eye= token is parsed into source and the view/head rotation
+    deviation is measured -- ~0 for a faithful runtime view, ~the head's own
+    rotation for the host's identity-rotation synthetic baseline."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _eye_frames_file(art, [(15, -30.0), (30, 30.0)], source="synthetic")
+    assert xrsim.read_eye_frames(art)[15]["source"] == "synthetic"
+    syn = xrsim.eye_frame_stats(art)
+    assert syn["source"] == "synthetic", syn
+    assert syn["proj_lr_identical"] is True, syn
+    # Identity views vs a 30 deg head pose -> a large, measured deviation.
+    assert syn["view_head_rotation_deviation_deg"] > 20.0, syn
+
+    art2 = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _eye_frames_file(art2, [(15, -30.0), (30, 30.0)], source="runtime", faithful=True)
+    rt = xrsim.eye_frame_stats(art2)
+    assert rt["source"] == "runtime", rt
+    assert rt["view_head_rotation_deviation_deg"] < 1.0, rt
 
 
 def test_eye_frame_check_skipped_without_file(td):
@@ -1046,6 +1090,9 @@ def test_eye_frame_check_skipped_without_file(td):
     passed, checks = xrsim.evaluate(_args(), art, "", "")
     rec = [c for c in checks if c["check"] == "capture_metadata_present"][0]
     assert rec["ok"] is True and rec.get("skip") is True, rec
+    # GH #77: the provenance check is skipped alongside it, never silently passed.
+    prov = [c for c in checks if c["check"] == "eye_views_scene_faithful"][0]
+    assert prov["ok"] is True and prov.get("skip") is True, prov
     assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
 
 
@@ -1059,6 +1106,43 @@ def test_eye_frame_check_present_with_file(td):
     rec = [c for c in checks if c["check"] == "capture_metadata_present"][0]
     assert rec["ok"] is True and not rec.get("skip"), rec
     assert "camera transform" in rec["detail"], rec
+
+
+def test_eye_view_scene_faithful_skips_synthetic(td):
+    """GH #77: a mock/sim capture (identity-rotation synthetic views) must SKIP
+    the scene-faithful check with the measured deviation as evidence -- it must
+    not pass as if the placeholder matrices were the frame's real eye views."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    _eye_frames_file(art, [(15, 25.0)], source="synthetic")
+    _, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "eye_views_scene_faithful"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+    assert "placeholder" in rec["detail"] and "GH #77" in rec["detail"], rec
+
+
+def test_eye_view_scene_faithful_grades_runtime(td):
+    """GH #77: a real-headset capture (views built from the head pose) passes;
+    runtime-labelled but pose-inconsistent views fail the run."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    _eye_frames_file(art, [(15, 25.0)], source="runtime", faithful=True)
+    _, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "eye_views_scene_faithful"][0]
+    assert rec["ok"] is True and not rec.get("skip"), rec
+
+    art2 = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art2 / "test_frame_0015.bmp", base)
+    _save(art2 / "right_0015.bmp", _shift_h(base, 3))
+    # Claims runtime but leaves the views at the synthetic baseline: inconsistent.
+    _eye_frames_file(art2, [(15, 25.0)], source="runtime", faithful=False)
+    _, checks2 = xrsim.evaluate(_args(), art2, "", "")
+    rec2 = [c for c in checks2 if c["check"] == "eye_views_scene_faithful"][0]
+    assert rec2["ok"] is False and not rec2.get("skip"), rec2
 
 
 def test_eye_frame_report_key_records_yaw_span(td):
@@ -1162,6 +1246,9 @@ def main() -> int:
              test_eye_frame_check_skipped_without_file,
              test_eye_frame_check_present_with_file,
              test_eye_frame_report_key_records_yaw_span,
+             test_eye_frame_provenance_parsed,
+             test_eye_view_scene_faithful_skips_synthetic,
+             test_eye_view_scene_faithful_grades_runtime,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

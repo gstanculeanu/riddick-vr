@@ -12,7 +12,7 @@
 // transform the hook injected for the sampled frame so the captured
 // `GL_MODELVIEW` can be made camera-relative.
 //
-// The mock host therefore writes one machine-readable line per *dumped* frame
+// The host therefore writes one machine-readable line per *dumped* frame
 // to `<dump-dir>\eye_frames.log` (same truncate-then-append pattern as
 // `display_branch.log`). The formatting is a pure, dependency-free helper so
 // `tests/eye_frame_tests.cpp` can pin the wire format without a GPU, and
@@ -20,10 +20,23 @@
 //
 // Format (one line per dumped frame):
 //   frame=NNNN hmdpos=x,y,z hmdquat=x,y,z,w \
-//     viewL=[m0 .. m15] viewR=[m0 .. m15] projL=[m0 .. m15] projR=[m0 .. m15]
+//     viewL=[m0 .. m15] viewR=[m0 .. m15] projL=[m0 .. m15] projR=[m0 .. m15] \
+//     eye=<runtime|synthetic>
 //
 // Matrices are column-major (the same layout the shared-memory protocol and
 // OpenGL use) and space-separated inside `[...]`, rounded to 4 decimals.
+//
+// GH #77: the trailing `eye=` token records *where the four matrices came from*,
+// because in the headless mock host they are NOT the frame's real per-eye views.
+// Mock mode never establishes an OpenXR session, so `xrLocateViews` is never
+// called and the host fills `left/rightEyeView` + `left/rightEyeProjection` with
+// a *synthetic constant baseline* -- identity rotation, a +/- half-IPD X
+// translation, and identical projections -- independent of the scripted head
+// pose. `eye=synthetic` marks that (the only case in a mock/sim run);
+// `eye=runtime` marks views actually returned by `xrLocateViews` on a real
+// headset. A consumer must not treat `eye=synthetic` matrices as a scene-faithful
+// per-eye view (they carry no head rotation); the head pose (hmdpos/hmdquat),
+// applied by the hook, is the authoritative camera input.
 
 #include <cstdint>
 #include <iomanip>
@@ -32,7 +45,7 @@
 
 namespace RiddickVR {
 
-// One frame's camera transform: the mock host's published HMD pose and the
+// One frame's camera transform: the host's published HMD pose and the
 // per-eye view (world -> eye) and projection matrices.
 struct EyeFrameSample {
     float hmdPos[3] = {0.0f, 0.0f, 0.0f};
@@ -41,6 +54,10 @@ struct EyeFrameSample {
     float viewR[16] = {};
     float projL[16] = {};
     float projR[16] = {};
+    // GH #77: true when the four matrices were returned by a real
+    // `xrLocateViews` call; false for the host's synthetic constant baseline
+    // (every mock/sim run). See the file header.
+    bool viewsFromRuntime = false;
 };
 
 inline void AppendMatrix(std::ostringstream& os, const float* m) {
@@ -70,6 +87,7 @@ inline std::string FormatEyeFrameLine(uint32_t frame, const EyeFrameSample& s) {
     AppendMatrix(os, s.projL);
     os << " projR=";
     AppendMatrix(os, s.projR);
+    os << " eye=" << (s.viewsFromRuntime ? "runtime" : "synthetic");
     return os.str();
 }
 

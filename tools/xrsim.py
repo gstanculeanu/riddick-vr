@@ -52,11 +52,17 @@ graded window is live, advancing 3D gameplay. The report carries
 ``content_gate {blank_skipped, frozen_skipped}`` and, for gameplay-only runs, the
 ``gameplay_window_has_content`` check.
 
-Every dumped frame also carries the head/eye transform and projection the mock
-host rendered it with (``eye_frames.log`` in the dump dir, GH #68 requirement 1),
+Every dumped frame also carries the head/eye transform and projection the host
+rendered it with (``eye_frames.log`` in the dump dir, GH #68 requirement 1),
 so a capture is self-describing in 3D. The report's ``eye_frames`` key summarises
 it and the ``capture_metadata_present`` check confirms it when present (skipped
-for legacy captures).
+for legacy captures). GH #77: the record's trailing ``eye=`` token states where
+the four matrices came from -- ``runtime`` (real ``xrLocateViews`` output) or
+``synthetic`` (the host's constant baseline; every mock/sim run, and it carries
+no head rotation). The key reports ``source`` and how far the recorded view
+rotation is from the head pose, so the ``eye_views_scene_faithful`` check can
+grade a real-headset capture and *skip* (never silently pass) a mock one instead
+of treating the placeholder matrices as the frame's real per-eye view.
 
 The mock host also summarises the hook-published locomotion comfort level
 (``comfortVignette``, Track C #9) together with the move/turn input it published,
@@ -170,11 +176,22 @@ DISPLAY_LABEL_FILE = "display_branch.log"
 # so a capture is self-describing in 3D -- the input GH #67 step 3 needs. Parsed
 # here for the report; `capture_metadata_present` is *skipped* when the file is
 # absent (a legacy capture or a host build predating #68), never failed.
+#
+# GH #77: the trailing `eye=runtime|synthetic` token records the *provenance* of
+# the four matrices. A mock/sim run never calls `xrLocateViews`, so the host
+# fills them with a constant baseline (identity rotation, +/- half-IPD, identical
+# projections) that carries no head rotation -- `eye=synthetic`. Only a real
+# headset produces `eye=runtime`. The token is optional so a legacy capture still
+# parses (source = "unknown").
 EYE_FRAMES_FILE = "eye_frames.log"
 EYE_FRAME_RE = re.compile(
     r"frame=(\d+)\s+hmdpos=([-\d.,eE]+)\s+hmdquat=([-\d.,eE]+)\s+"
     r"viewL=\[([-\d.eE ]+)\]\s+viewR=\[([-\d.eE ]+)\]\s+"
-    r"projL=\[([-\d.eE ]+)\]\s+projR=\[([-\d.eE ]+)\]")
+    r"projL=\[([-\d.eE ]+)\]\s+projR=\[([-\d.eE ]+)\](?:\s+eye=(\w+))?")
+# GH #77: a runtime eye view must derive from the head pose (the host builds the
+# eye view from `views[i].pose`, whose orientation equals the HMD's). 1 degree is
+# a generous tolerance for the wire format's 4-decimal rounding.
+EYE_VIEW_ROTATION_TOL_DEG = 1.0
 
 # GH #72 requirement 2: the mock host's content gate logs every gameplay frame
 # it kept out of the graded window (all-black interop warm-up = `blank`; a
@@ -590,9 +607,9 @@ def read_eye_frames(artifacts):
     """GH #68 requirement 1: map frame number -> camera transform.
 
     Read from the mock host's ``eye_frames.log`` (``src/host/eye_frame.h``). Each
-    record is the HMD pose plus the per-eye view and projection matrices that
-    produced the dumped frame. Returns ``{}`` when the file is absent (a legacy
-    capture or a host build predating #68).
+    record is the HMD pose, the per-eye view and projection matrices, and (GH
+    #77) the provenance of those matrices. Returns ``{}`` when the file is absent
+    (a legacy capture or a host build predating #68).
     """
     path = Path(artifacts) / EYE_FRAMES_FILE
     frames = {}
@@ -610,6 +627,8 @@ def read_eye_frames(artifacts):
                 "view_r": [float(v) for v in m.group(5).split()],
                 "proj_l": [float(v) for v in m.group(6).split()],
                 "proj_r": [float(v) for v in m.group(7).split()],
+                # GH #77: provenance token; absent on a pre-#77 capture.
+                "source": m.group(8) if m.group(8) else "unknown",
             }
         except ValueError:
             continue
@@ -622,6 +641,49 @@ def _quat_yaw_deg(q):
                                    1.0 - 2.0 * (y * y + z * z)))
 
 
+def _rot3_from_quat(q):
+    """Column-major storage, returned row-major: matches the host's
+    ``CreateViewFromPose`` rotation block (both eyes share the head orientation)."""
+    x, y, z, w = q
+    return [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ]
+
+
+def _rot3_from_view(m):
+    """Row-major 3x3 rotation of a column-major 4x4 view matrix."""
+    return [[m[0], m[4], m[8]],
+            [m[1], m[5], m[9]],
+            [m[2], m[6], m[10]]]
+
+
+def _mat3_mul(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)]
+            for i in range(3)]
+
+
+def _rot3_angle_deg(r):
+    trace = r[0][0] + r[1][1] + r[2][2]
+    c = max(-1.0, min(1.0, (trace - 1.0) * 0.5))
+    return math.degrees(math.acos(c))
+
+
+def _view_head_rotation_deviation_deg(view, hmd_quat):
+    """Angular distance (deg) between the recorded view's rotation and the head
+    pose's rotation. A scene-faithful runtime view (built from the eye pose, whose
+    orientation equals the head's) is ~0; the host's synthetic baseline is
+    identity and so deviates by the head's own rotation (GH #77)."""
+    if len(view) != 16 or len(hmd_quat) != 4:
+        return None
+    r_view = _rot3_from_view(view)
+    r_head = _rot3_from_quat(hmd_quat)
+    # rel = R_view * R_head^T; identity iff R_view == R_head.
+    r_head_t = [[r_head[j][i] for j in range(3)] for i in range(3)]
+    return round(_rot3_angle_deg(_mat3_mul(r_view, r_head_t)), 3)
+
+
 def eye_frame_stats(artifacts):
     """Summarise the per-dump camera transforms (GH #68 requirement 1).
 
@@ -629,12 +691,23 @@ def eye_frame_stats(artifacts):
     how many distinct HMD poses there were, and ``yaw_span_deg`` the peak-to-peak
     HMD yaw. A mock run oscillates the head, so a non-zero yaw span is a concrete
     "the capture window was not a frozen head" signal.
+
+    GH #77 adds the *provenance* of the four matrices: ``source`` (``runtime`` /
+    ``synthetic`` / ``unknown``, or ``mixed``), ``view_head_rotation_deviation_deg``
+    (max over frames of the view rotation's distance from the head pose -- ~0 for
+    a faithful runtime view, ~the head's own rotation for the synthetic baseline)
+    and ``proj_lr_identical`` (the synthetic baseline's two projections are equal).
     """
     frames = read_eye_frames(artifacts)
     if not frames:
-        return {"count": 0, "distinct": 0, "yaw_span_deg": None}
+        return {"count": 0, "distinct": 0, "yaw_span_deg": None,
+                "source": None, "view_head_rotation_deviation_deg": None,
+                "proj_lr_identical": None}
     yaws = []
     poses = set()
+    sources = set()
+    deviations = []
+    proj_identical = []
     for rec in frames.values():
         q = rec["hmd_quat"]
         if len(q) != 4:
@@ -642,9 +715,21 @@ def eye_frame_stats(artifacts):
         yaws.append(_quat_yaw_deg(q))
         poses.add(tuple(round(v, 3) for v in q) +
                   tuple(round(v, 3) for v in rec["hmd_pos"]))
+        sources.add(rec.get("source", "unknown"))
+        dev = _view_head_rotation_deviation_deg(rec["view_l"], q)
+        if dev is not None:
+            deviations.append(dev)
+        if len(rec["proj_l"]) == 16 and len(rec["proj_r"]) == 16:
+            proj_identical.append(rec["proj_l"] == rec["proj_r"])
     span = (max(yaws) - min(yaws)) if yaws else None
+    source = (sources.pop() if len(sources) == 1
+              else ("mixed" if sources else "unknown"))
     return {"count": len(frames), "distinct": len(poses),
-            "yaw_span_deg": round(span, 3) if span is not None else None}
+            "yaw_span_deg": round(span, 3) if span is not None else None,
+            "source": source,
+            "view_head_rotation_deviation_deg": (round(max(deviations), 3)
+                                                 if deviations else None),
+            "proj_lr_identical": (all(proj_identical) if proj_identical else None)}
 
 
 def frame_signature(path: Path):
@@ -1174,12 +1259,40 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
                        "ok": True,
                        "detail": (f"{eye_stats['count']} frame(s) with camera "
                                   f"transform, {eye_stats['distinct']} distinct; "
-                                  f"HMD yaw span {eye_stats['yaw_span_deg']} deg")})
+                                  f"HMD yaw span {eye_stats['yaw_span_deg']} deg; "
+                                  f"eye views={eye_stats['source']}")})
+        # GH #77: the capture is only *really* self-describing when the recorded
+        # per-eye matrices came from the runtime. A mock/sim run records the
+        # host's constant baseline (`eye=synthetic`), which carries no head
+        # rotation -- so this check grades a real-headset capture and *skips* a
+        # mock one with the measured deviation as evidence, instead of letting a
+        # placeholder be read as the frame's real per-eye view.
+        src = eye_stats["source"]
+        dev = eye_stats["view_head_rotation_deviation_deg"]
+        if src == "runtime":
+            ok = dev is not None and dev <= EYE_VIEW_ROTATION_TOL_DEG
+            checks.append({"group": "capture", "check": "eye_views_scene_faithful",
+                           "ok": ok,
+                           "detail": (f"runtime eye views track the head pose "
+                                      f"(max view/head rotation deviation {dev} deg"
+                                      f", tol {EYE_VIEW_ROTATION_TOL_DEG})")})
+        else:
+            checks.append({"group": "capture", "check": "eye_views_scene_faithful",
+                           "ok": True, "skip": True,
+                           "detail": (f"eye views are not from the runtime "
+                                      f"(source={src}); the recorded view rotation "
+                                      f"deviates from the head pose by up to {dev} "
+                                      f"deg, so these matrices are a placeholder, "
+                                      f"not the frame's real per-eye view (GH #77)")})
     else:
         checks.append({"group": "capture", "check": "capture_metadata_present",
                        "ok": True, "skip": True,
                        "detail": f"no {EYE_FRAMES_FILE}: per-frame camera "
                                  "transform unknown (legacy capture / pre-#68 host)"})
+        checks.append({"group": "capture", "check": "eye_views_scene_faithful",
+                       "ok": True, "skip": True,
+                       "detail": f"no {EYE_FRAMES_FILE}: eye-view provenance "
+                                 "unknown (legacy capture / pre-#77 host)"})
     # 3. interaction markers
     req = []
     if args.scenario and Path(args.scenario).is_file():

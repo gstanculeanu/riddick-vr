@@ -1012,6 +1012,9 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
 
             state.leftEyeView = CreateViewFromPose(views[0].pose);
             state.rightEyeView = CreateViewFromPose(views[1].pose);
+            // GH #77: these views are the real per-eye transforms the runtime
+            // returned, so the captured frame's eye record is scene-faithful.
+            m_eyeViewsFromRuntime = true;
 
             // GH #36: HMD pose is the centroid midpoint of both eyes, not the
             // left eye (avoids a constant half-IPD lateral bias in gesture
@@ -1028,6 +1031,10 @@ void OpenXRManager::UpdateTracking(RiddickVRSharedState& state, XrTime predicted
     }
 
     // Fallback: Default synthetic 65mm IPD baseline matrices
+    // GH #77: no runtime called xrLocateViews, so mark these placeholder views
+    // as synthetic -- they carry no head rotation and are not a scene-faithful
+    // per-eye view.
+    m_eyeViewsFromRuntime = false;
     state.hmdPose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
     state.hmdPose.position = {0.0f, 0.0f, 0.0f};
     state.hmdPose.isValid = true;
@@ -1989,6 +1996,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     sample.hmdQuat[1] = state.hmdPose.orientation.y;
                     sample.hmdQuat[2] = state.hmdPose.orientation.z;
                     sample.hmdQuat[3] = state.hmdPose.orientation.w;
+                    // GH #77: record where the eye matrices came from so a
+                    // consumer never treats the mock's synthetic baseline as a
+                    // scene-faithful per-eye view.
+                    sample.viewsFromRuntime = m_eyeViewsFromRuntime;
                     for (int i = 0; i < 16; ++i) {
                         sample.viewL[i] = state.leftEyeView.m[i];
                         sample.viewR[i] = state.rightEyeView.m[i];
@@ -2002,7 +2013,8 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     if (eyeFile) {
                         if (dumps == 0) {
                             eyeFile << "# frame=NNNN hmdpos=x,y,z hmdquat=x,y,z,w"
-                                       " viewL=[16] viewR=[16] projL=[16] projR=[16]\n";
+                                       " viewL=[16] viewR=[16] projL=[16] projR=[16]"
+                                       " eye=<runtime|synthetic>\n";
                         }
                         eyeFile << FormatEyeFrameLine(totalFrames, sample) << "\n";
                     }
@@ -2027,7 +2039,10 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                                 static_cast<double>(state.hmdPose.orientation.z), static_cast<double>(state.hmdPose.orientation.w));
                         writeMat("leftEyeView", state.leftEyeView.m, false);
                         writeMat("rightEyeView", state.rightEyeView.m, false);
-                        writeMat("leftEyeProjection", state.leftEyeProjection.m, true);
+                        writeMat("leftEyeProjection", state.leftEyeProjection.m, false);
+                        writeMat("rightEyeProjection", state.rightEyeProjection.m, false);
+                        fprintf(meta, "  \"eyeViews\": \"%s\"\n",
+                                m_eyeViewsFromRuntime ? "runtime" : "synthetic");
                         fprintf(meta, "}\n");
                         fclose(meta);
                     }

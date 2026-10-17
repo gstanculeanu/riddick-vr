@@ -94,6 +94,8 @@ int main() {
     s.projL[11] = -1.0f; s.projL[14] = -0.1f;
     s.projR[0] = 1.0f; s.projR[5] = 1.0f; s.projR[10] = -1.0001f;
     s.projR[11] = -1.0f; s.projR[14] = -0.1f;
+    // GH #77: provenance token -- real runtime views.
+    s.viewsFromRuntime = true;
 
     const std::string line = FormatEyeFrameLine(300, s);
 
@@ -104,10 +106,23 @@ int main() {
     Check(line.find(" viewR=[") != std::string::npos, "line must carry viewR=[");
     Check(line.find(" projL=[") != std::string::npos, "line must carry projL=[");
     Check(line.find(" projR=[") != std::string::npos, "line must carry projR=[");
+    Check(line.find(" eye=runtime") != std::string::npos,
+          "line must carry the GH #77 eye= provenance token");
 
     const auto fields = Fields(line);
-    // frame=, hmdpos=, hmdquat=, viewL=, viewR=, projL=, projR=.
-    Check(fields.size() == 7, "line must have exactly 7 whitespace-separated fields");
+    // frame=, hmdpos=, hmdquat=, viewL=, viewR=, projL=, projR=, eye=.
+    Check(fields.size() == 8, "line must have exactly 8 whitespace-separated fields");
+    if (fields.size() == 8) {
+        Check(StartsWith(fields[7], "eye="), "the last field must be the eye= token");
+    }
+
+    // GH #77: the provenance token reflects `viewsFromRuntime` (a sample left at
+    // its default is the host's synthetic baseline, never claimed as runtime).
+    EyeFrameSample synthetic{};
+    Check(FormatEyeFrameLine(300, synthetic).find(" eye=synthetic") != std::string::npos,
+          "a default sample must report eye=synthetic");
+    Check(FormatEyeFrameLine(300, s).find(" eye=synthetic") == std::string::npos,
+          "a runtime sample must not report eye=synthetic");
 
     // The pose tokens are exactly 3 / 4 comma-separated numbers.
     Check(CountChar(fields[0], ',') == 0, "frame token has no commas");
