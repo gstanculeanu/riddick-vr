@@ -2,6 +2,66 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 54 — 2026-10-17 19:14 (scheduled loop)
+- **Unit:** GH **#74**, the remaining **hook half** (wake 53's stated Next) — finish
+  the union so the GH #67 step-1/step-2 viewmodel machinery is restored *beside*
+  PR #70's `track`/trace/`NearPlaneDrop` window and controller drive. Hook C++ +
+  config + tests/tools/docs; **no deploy, no game/asset change**.
+- **Why this unit:** #74 is the top open item and the two earlier wakes restored
+  only its Python and host halves. The hook half was the last red: at HEAD
+  `src/hook/opengl_proxy.cpp` had `s_modelviewTracker` gone and all four
+  `NoteModelview*` entry points as **no-op linker stubs**, and
+  `viewmodel_suppressor.h` had no `observe` mode — while `tools/xrsim.py`,
+  `tools/test_xrsim.py`, `src/hook/README.md`, ADR-0450/0451 and the
+  `gl_matrix_tracker` CTest still assumed them. GH #67 step 3 has no input without
+  this restore.
+- **Change (union):**
+  - `viewmodel_suppressor.h`: `ViewmodelSuppressionConfig.observe` +
+    `ViewmodelObservationSnapshot` + `NoteObservedDraw`/`SetObservedSample`/
+    `ComputeSnapshot`/`NoteObservedPush`/`NoteObservedTranslate`/`Observing`
+    restored; a private `Tracking()` (`Active() || observe`) now drives the window
+    state machine so suppression, trace/drive and observation share one boundary
+    (only `enabled` can skip a draw).
+  - `opengl_proxy.cpp`: `s_modelviewTracker` + real `NoteModelview*` bodies
+    restored; `wglMakeCurrent` resets the tracker; `BuildViewmodelSuppressionConfig`
+    sets `cfg.observe`; the swap handler emits `ViewmodelProbe [#N]: inside=..
+    outside=.. sample=.. pushes=.. translates=..` + the matrix line; the
+    `GL_MODELVIEW` load feeds the tracker with the **effective** matrix (the drive
+    correction when drive is active, else `m`); `ShouldSuppressDrawCall` records
+    the observation before the unchanged suppression decision. The `viewmodelTrace`
+    line and the drive branch are untouched.
+  - `vr_config.{h,cpp}` + `riddick_vr.ini` + `tools/riddick_vr.ini.example`:
+    `ViewmodelObserve` (default 0) is read/parsed/documented again; the config log
+    line gains `observe=%d`.
+  - `tests/viewmodel_suppressor_tests.cpp`: the GH #67 observation cases restored
+    on top of the branch's `track`/trace/near-plane cases (open on depth-clear,
+    in/out tallies, first-in-window sample, push/translate counting,
+    observe-with-suppression, inert-without-observe).
+  - `tools/verify_reported_fixes.py`: the GH #67 step-2 + step-1 invariants
+    re-added; `xrsim_tool` now read once near the top so the earlier block resolves
+    it.
+  - `docs/adr/0457-viewmodel-hook-union-restores-gh67-observation.md` (new).
+- **Evidence:** `build-all.ps1 -Config Release` OK (x86 `opengl32.dll` + x64 host;
+  **no `-Deploy`**); CTest **19/19 PASS on x64 AND x86**; all 9 `tools/test_*.py`
+  PASS; `xrsim.py --selftest` PASS; `validate_addresses` + `verify_hook_init` +
+  `verify_reported_fixes` (with the re-added #67 invariants) PASS. Commit
+  `8c873f6`.
+- **Blocker / honest limit:** the restore is **hook-side and off by default**
+  (`ViewmodelObserve=0`), so it cannot be live-validated by this loop — the probe
+  only appears in a hook build deployed to the game install, and deploying is
+  forbidden (the sim install's hook is stale). The tracker is forwarding-only: it
+  changes only what `GetLastViewMatrix()` reports, never what the engine renders.
+  `scenario_tests.py --check` is still red on `hands_view.json` (GH **#75**,
+  pre-existing, unchanged).
+- **Next:** with the hook half reconciled, #74 is essentially closed pending one
+  interactive deploy: set `ViewmodelObserve=1` and read
+  `ViewmodelProbe [#N]: ... pushes=.. translates=..` + the matrix from a 3D
+  gameplay frame (confirms the pass boundary + the composed viewmodel transform),
+  which is GH #67 step 3's input. Otherwise #75 (make the scenario validator
+  tolerate an idle inspection profile), or regenerate `tests/xrsim/report.json`
+  once a deterministic gameplay reach exists (#71/#72).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 53 — 2026-10-17 19:05 (scheduled loop)
 - **Unit:** GH **#74**, the **host half** (wake 52's stated Next) — reconcile the
   pr-70 regression so the repo's host-side XRSIM capabilities (GH #68/#71/#72)
