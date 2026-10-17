@@ -54,6 +54,7 @@
 
 using RiddickVR::SimInputBridgeInstallOnModule;
 using RiddickVR::SimInputBridgeLogStartupReport;
+using RiddickVR::SimInputBridgeLogSummary;
 using RiddickVR::kDirectInputCreateDeviceSlot;
 using RiddickVR::kDirectInputDeviceGetDeviceStateSlot;
 using RiddickVR::kXInputGamepadA;
@@ -178,6 +179,10 @@ int main(int argc, char** argv) {
     // ---- install the bridge on our own module and re-resolve ---------------
     SimInputBridgeInstallOnModule(hSelf);
     SimInputBridgeLogStartupReport();  // must not crash in either mode
+    // GH #71 req 1: the observed-activity summary is emitted from the wrappers on
+    // a cadence and from DllMain's detach. Calling it here proves it is safe
+    // before (and without) a live engine polling the wrappers.
+    SimInputBridgeLogSummary();
 
     FARPROC gotDirectInputCreateA = GetProcAddress(hDinput, "DirectInputCreateA");
     FARPROC gotXInputGetState = GetProcAddress(hXInput, "XInputGetState");

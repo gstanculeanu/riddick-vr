@@ -132,8 +132,8 @@ at `DLL_PROCESS_ATTACH` (before `CInputContext_DInput`'s constructor at
 `RIDDICKVR_SIM` and `RIDDICKVR_SIM_CONFIRM` are set (requirement 3). The harness
 half is `python tools/xrsim.py --reach-gameplay --sim-confirm [keyboard|gamepad|both]`
 (`--sim-confirm-max-taps`/`-period-ms`/`-hold-ms`; recorded as `sim_confirm`).
-Live validation is **deploy-gated** — the sim install runs a stale hook build, so
-the harness command is the one interactive A/B, not something this loop can run.
+Live validation is no longer deploy-gated: use `--shadow-install` (ADR-0471) so
+the run exercises the repo-built hook while the install stays untouched.
 
 **Update (wake 67, GH #80 req 1):** the interceptor is now *executed* offline, so
 it is no longer validated by inspection alone. `SimInputBridgeInstallOnModule`
@@ -146,8 +146,34 @@ into the engine's `XINPUT_STATE` and bumps the packet, `DirectInputCreateA`'s
 `GUID_SysKeyboard` device gets slot 9 replaced; near-miss/other names pass
 through) and `sim_input_bridge_win32_inert` (gate-off: every pointer is the real
 one). It SKIPs without the input DLLs, and x86-only (the hook ships x86). This
-proves the *mechanism*; the ADR-0467 ordering against the real constructor still
-needs the one deploy.
+proves the *mechanism*; the ADR-0467 ordering against the real constructor was
+measured resolved on 2026-10-18 — a shadow run's startup report already carried
+`inputProcRequests=2`, i.e. the `DllMain` swap **beats** `CInputContext_DInput`'s
+constructor for both procs (see the wake-71 update below).
+
+**Update (wake 71, GH #71 req 1 / #80 follow-up, ADR-0472):** the bridge now
+*reports what it observed*, so the reach is decidable from a run instead of
+inferred. It names every input proc the engine resolved through the swapped
+`GetProcAddress` (`owned` by the route or merely `observed`), counts how often
+the engine polled each wrapped entry point, counts the confirms it fabricated,
+and records the real API's return code. A parseable `summary` line is emitted on
+a poll cadence from the wrappers (a harness run `TerminateProcess`es the game, so
+`DLL_PROCESS_DETACH` never runs); the harness parses it into the `input_bridge`
+report key and prints one summary line, flagging `xinput_connected` /
+`xinput_device_not_connected`. It is *reported*, not graded (no criterion yet).
+
+Measured 2026-10-18 with `--shadow-install … --require-fresh-hook
+--sim-confirm both` (hook `sha256 38648e15…` = the build under review):
+`inputProcRequests=2` — the engine resolved **both** `XInputGetState` and
+`DirectInputCreateA` through the swapped `GetProcAddress`, and the bridge owned
+both — yet `polls=0`, `taps=0`, `createDevicePatched=0`: the engine **never
+calls** either entry point in a 120 s session. So fabricating the confirm on
+those device read paths cannot advance the splash, and the reach must come from
+another surface (`RndrGL.dll` imports Raw Input — ADR-0466 — or the in-process
+console route of ADR-0466's wake-64 addendum). Also note the wake-70 reading
+that this run's `route=keyboard` datum was `XInputGetState` is wrong:
+`SimBridgeOwnsProcName` is route-scoped, so a keyboard-route run can only own
+`DirectInputCreateA`.
 
 **Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
 (mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical

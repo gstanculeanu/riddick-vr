@@ -130,6 +130,66 @@ static void TestProcOwnership() {
     Check(!SimBridgeOwnsProcName("XInputGetState", SimConfirmRoute::None), "None owns nothing");
 }
 
+static void TestInputProcNames() {
+    // GH #71 req 1: the closed set the interceptor reports against. A near-miss
+    // or a different casing must never be reported as an input proc.
+    using RiddickVR::kSimInputProcNameCount;
+    using RiddickVR::SimBridgeIsInputProcName;
+    using RiddickVR::SimInputProcNameAt;
+    using RiddickVR::SimInputProcNameIndex;
+
+    Check(SimInputProcNameIndex("XInputGetState") >= 0, "XInputGetState is an input proc");
+    Check(SimInputProcNameIndex("XInputGetCapabilities") >= 0, "capabilities is an input proc");
+    Check(SimInputProcNameIndex("DirectInputCreateA") >= 0, "DirectInputCreateA is an input proc");
+    Check(SimInputProcNameIndex("DirectInputCreateW") >= 0, "the W variant is tracked too");
+    Check(SimInputProcNameIndex("xinputgetstate") < 0, "GetProcAddress is case-sensitive");
+    Check(SimInputProcNameIndex("XInputGetStateEx") < 0, "a near-miss is not an input proc");
+    Check(SimInputProcNameIndex("CreateFileA") < 0, "an unrelated proc is not an input proc");
+    Check(SimInputProcNameIndex(nullptr) < 0, "a null name is not an input proc");
+    Check(!SimBridgeIsInputProcName("GetProcAddress"), "GetProcAddress itself is not an input proc");
+    Check(SimBridgeIsInputProcName("XInputGetState"), "SimBridgeIsInputProcName agrees with the index");
+
+    // The table is a stable, total mapping: every index in range names a proc
+    // that maps back to itself, and out-of-range indices are null.
+    for (int i = 0; i < kSimInputProcNameCount; ++i) {
+        const char* name = SimInputProcNameAt(i);
+        Check(name != nullptr && SimInputProcNameIndex(name) == i,
+              "SimInputProcNameAt/Index are inverse over the table");
+    }
+    Check(SimInputProcNameAt(-1) == nullptr && SimInputProcNameAt(kSimInputProcNameCount) == nullptr,
+          "out-of-range indices are null");
+}
+
+static void TestPollLogCadence() {
+    // GH #71 req 1: the wrappers log a *doubling* cadence over the first
+    // kSimPollLogPowerCap polls, then every kSimPollLogEvery, so neither a small
+    // poll count nor a flood is hidden. The property that matters: consecutive
+    // logged counts are never more than a factor of two apart, so the true count
+    // is always within one doubling of a logged one.
+    using RiddickVR::kSimPollLogEvery;
+    using RiddickVR::kSimPollLogPowerCap;
+    using RiddickVR::SimShouldLogPoll;
+
+    Check(!SimShouldLogPoll(0) && !SimShouldLogPoll(-3), "no line for a non-poll");
+    for (long n = 1; n <= kSimPollLogPowerCap; n <<= 1) {
+        Check(SimShouldLogPoll(n), "a power-of-two poll is logged");
+    }
+    Check(!SimShouldLogPoll(3) && !SimShouldLogPoll(100) && !SimShouldLogPoll(127),
+          "a poll in the doubling cadence's gap is not logged");
+    Check(SimShouldLogPoll(kSimPollLogEvery) && SimShouldLogPoll(2 * kSimPollLogEvery),
+          "every kSimPollLogEvery is logged after the cap");
+    Check(!SimShouldLogPoll(kSimPollLogEvery + 1), "a poll just past the period is not logged");
+
+    long last = 0;
+    for (long n = 1; n <= 4000; ++n) {
+        if (!SimShouldLogPoll(n)) continue;
+        Check(last == 0 || n <= 2 * last,
+              "consecutive logged poll counts are within a factor of two");
+        last = n;
+    }
+    Check(last >= 4000 - kSimPollLogEvery, "the cadence keeps up at high counts");
+}
+
 static void TestSchedule() {
     SimConfirmScheduleConfig cfg;  // 400 ms period, 100 ms hold, 300 taps
 
@@ -242,6 +302,8 @@ int main() {
     TestRoutes();
     TestRouteToken();
     TestProcOwnership();
+    TestInputProcNames();
+    TestPollLogCadence();
     TestSchedule();
     TestScheduleTokens();
     TestVtableSlots();

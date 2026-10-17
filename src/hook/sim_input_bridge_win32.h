@@ -52,4 +52,13 @@ void SimInputBridgeInstallOnModule(HMODULE hModule);
 // constructor). Silent when the bridge is inert.
 void SimInputBridgeLogStartupReport();
 
+// GH #71 req 1 / #80 follow-up: emit the bridge's *observed* activity as one
+// parseable line -- how often the engine polled each device entry point, how
+// many confirms the bridge fabricated, and the real API's last return code.
+// Called on a fixed cadence from the wrappers themselves, because a harness run
+// kills the game process (``TerminateProcess``), so ``DLL_PROCESS_DETACH`` --
+// which already logs -- must not be the only emission point. Silent when the
+// bridge is inert.
+void SimInputBridgeLogSummary();
+
 }  // namespace RiddickVR

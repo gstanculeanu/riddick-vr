@@ -2,6 +2,87 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 71 — 2026-10-18 01:25 (scheduled loop)
+- **Unit:** GH **#71 req 1 / #80 follow-up** — the sim input bridge is now
+  **observable**, so the reach is decidable from a run instead of inferred: it
+  names every input proc the engine resolved through the swapped
+  `GetProcAddress` (`owned`/`observed`), counts its polls and fabricated
+  confirms, and records the real API's return code; the harness parses this into
+  an `input_bridge` report key. Hook + tests + harness + docs (ADR-0472); **no
+  deploy, no asset change**.
+- **Why this unit:** #71 req 1 is the loop's top blocker and the bridge is its
+  only remaining route; the shadow install (wake 70) made live iteration
+  possible, but the bridge's only output was a one-shot counter dump that cannot
+  say *which* proc the engine resolved, whether it is ever polled, or what the
+  real API returned — and it invited a misreading (see the correction below).
+- **Change (pure core):** `sim_input_bridge.h` — a closed, case-sensitive
+  input-proc table (`SimInputProcNameAt`/`SimInputProcNameIndex`/
+  `SimBridgeIsInputProcName`, 7 names) so the interceptor can report what the
+  engine actually asked for; headless test `TestInputProcNames` (total + inverse
+  + rejects near-misses).
+- **Change (hook):** `sim_input_bridge_win32.{h,cpp}` — records **every** input
+  proc the engine requests (owned or not) and logs each name once; the XInput
+  wrapper counts polls / press edges / the real return code (first poll, every
+  120th poll, and on a result change); the DirectInput keyboard wrapper counts
+  polls / injected `DIK_RETURN`s; `SimInputBridgeLogSummary()` emits one parseable
+  `summary route=… polls=… taps=… lastRealResult=… procs[…]` line and is called
+  **from the wrappers on a cadence** — because a harness run `TerminateProcess`es
+  the game, so `DLL_PROCESS_DETACH` never runs — and from `DllMain` detach for a
+  graceful exit. Route-gated interception is unchanged.
+- **Change (harness):** `tools/xrsim.py` — `parse_input_bridge` +
+  `input_bridge_stats` + 5 regexes; report key `input_bridge` in both the `run`
+  and `--evaluate-only` paths; one printed summary line; docstring updated.
+  `tools/test_xrsim.py` +4 cases; `verify_reported_fixes.py` gains a #80/#71
+  invariant (ADR-0472).
+- **Evidence (offline):** `tools/build-all.ps1 -Config Release`, **no `-Deploy`**
+  OK (x86 proxy 489984 B + x64 host); **CTest 22/22 x64, 24/24 x86**; all 11
+  `tools/test_*.py` green except the two **pre-existing** red ones (GH #82 —
+  untouched by this wake, see below); `xrsim.py --selftest`,
+  `verify_reported_fixes` (#40..#81), `verify_hook_init`, `validate_addresses`,
+  `verify_test_artifacts`, `scenario_tests.py --check` PASS.
+- **Evidence (live, `RIDDICKVR_SIM=1`, read-only shadow install, no deploy):** a
+  shadow + `--require-fresh-hook --sim-confirm both` run of **this build**
+  (`sha256 38648e15…`, `fresh=true`) recorded `inputProcRequests=2`: the engine
+  resolved **both** `XInputGetState` and `DirectInputCreateA` through the
+  `DllMain`-swapped `GetProcAddress` (the ADR-0467 residual is settled **yes** for
+  both), **both owned** by the bridge — and then `polls=0 taps=0
+  createDevicePatched=0 keyboardWrapped=0` over 120 s, i.e. **the wrappers were
+  never called**. A second, own run (`--shadow-dir` isolated, 30 s) confirmed the
+  current build is exercised (`deployed_hook_matches_build` PASS, 9 gameplay
+  frames, `comfort_vignette_applied` PASS `max=1.000` on 230/240 moving frames,
+  `eye_views_scene_faithful` PASS) but its `input_bridge` key was empty because
+  its hook log never appeared (see the blocker).
+- **Decisive finding:** fabricating the confirm on the engine's DirectInput/XInput
+  read path cannot advance the splash — this session's engine **resolves those
+  procs and never polls them**. The reach must therefore come from another
+  surface (`RndrGL.dll` imports Raw Input — ADR-0466; or the in-process console
+  command route of ADR-0466's wake-64 addendum). **Correction to the record:** the
+  wake-70 reading "it was `XInputGetState`, not `DirectInputCreateA`" is
+  impossible — that run was `route=keyboard` and `SimBridgeOwnsProcName` is
+  route-scoped, so `inputProcRequests=1` there can only be `DirectInputCreateA`
+  (resolved, never called; `createDevicePatched=0`).
+- **Blocker / honest limit (the loud one):** **another agent instance was running
+  this same wake concurrently** (`python tools\xrsim.py --shadow-install …
+  --shadow-dir %TEMP%\riddickvr-shadow-w71 … --sim-confirm both`, plus a 120 s run
+  at 01:11 that used the *default* shadow dir). It (a) rebuilt the shared default
+  shadow dir mid-run, deleting my first run's hook log, and (b) left a second
+  `DarkAthena.exe` alive while my isolated run ran, so that run's shared-memory
+  frames may have come from the other instance. Live attribution is therefore
+  **partly borrowed** this wake; the `inputProcRequests=2 / polls=0` datum is
+  still about *this* build (the shadow's hook sha256 matches `dist\opengl32.dll`),
+  but the loop must not run two live harnesses at once.
+- **Also measured (pre-existing, NOT this wake):** `tools/test_xmd_pose.py`
+  (`NODES size 228 != 19 * 34`) and `tools/test_xmd_fk.py` (`--inventory --check`)
+  are **still red on `main`** (GH #82) — none of this wake's files is involved.
+- **Next:** (1) with **one** live harness at a time, re-run `--shadow-install
+  --require-fresh-hook --sim-confirm both` and confirm `polls=0` is not a
+  focus/`TerminateProcess` artefact; (2) then stop fabricating on
+  DirectInput/XInput and decide (REA first) where the confirm is actually read —
+  the **Raw Input** path in the engine/RndrGL, or the in-process **console
+  command** (`loadgame Checkpoint`); (3) the deploy-gated ladder is otherwise
+  unchanged (#72 req 1 latch A/B is now live-capable, #67 step 3, #68 req 5,
+  #79 hook half, #76 step 1); (4) fix the two red `test_xmd_*` (GH #82).
+
 ## Wake 70 — 2026-10-18 00:39 (scheduled loop)
 - **Unit:** GH **#81 follow-up — BROKE THE DEPLOY GATE**: a live XRSIM run can now
   exercise the **current** hook build with **zero writes to the game install**, via

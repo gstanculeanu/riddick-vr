@@ -103,8 +103,18 @@ suppressed ``SendInput``. The hook installs the intercept at attach time, before
 game process. ``ROUTE`` is ``keyboard`` (DirectInput ``DIK_RETURN``, the splash
 prompt), ``gamepad`` (XInput ``START|A``) or ``both``; tuning lives in
 ``--sim-confirm-max-taps``/``-period-ms``/``-hold-ms``. The report records the
-env it passed as ``sim_confirm``. The mechanism is in ADR-0468; its live
-validation is deploy-gated (the sim install runs a stale hook build).
+env it passed as ``sim_confirm``. The mechanism is in ADR-0468.
+
+GH #71 req 1 / #80 follow-up: the bridge also *reports what it observed*, so a
+run is decidable instead of inferred. Its log lines name every input proc the
+engine resolved through the swapped ``GetProcAddress`` (``owned`` by the bridge
+or merely ``observed``), count how often the engine polled the wrapped entry
+point, count the confirms the bridge fabricated, and record the real API's
+return code. The report carries the parsed result as ``input_bridge`` (a
+periodic ``summary`` timeline survives the harness's ``TerminateProcess`` of the
+game, which skips ``DLL_PROCESS_DETACH``); the run prints one summary line. A
+real return of ``1167`` (``ERROR_DEVICE_NOT_CONNECTED``) is the measurement that
+explains why a synthetic pad's *bytes* alone can be invisible to the engine.
 
 The gameplay-only dump window is *content-gated* (GH #72 requirement 2): even a
 gameplay-labelled frame is kept out while it is all-black (the GL<->D3D11 interop
@@ -338,6 +348,37 @@ VIEWMODEL_PROBE_RE = re.compile(
     r"(?: pushes=(\d+) translates=(\d+))?")
 VIEWMODEL_PROBE_MATRIX_RE = re.compile(r"ViewmodelProbe matrix:")
 _MATRIX_ROW_RE = re.compile(r"\[([-\d.eE ]+)\]")
+
+# GH #71 requirement 1 / GH #80 follow-up: the sim input bridge's observation
+# lines (src/hook/sim_input_bridge_win32.cpp). Every prior wake could only
+# *infer* which input path the engine took and whether the fabricated confirm is
+# ever read; these lines record it -- which of the input entry points the engine
+# resolved through the swapped GetProcAddress (owned or merely observed), how
+# often it polled the wrapped entry point, how many confirms the bridge
+# fabricated, and the real API's last return code (a never-connected XInput
+# device reports 1167 ERROR_DEVICE_NOT_CONNECTED, so the ORed bytes alone are
+# invisible to the engine). Absent on a non-sim run or a pre-#80 hook.
+INPUT_BRIDGE_GATE_RE = re.compile(
+    r"XRSIM input bridge: gate on route=(\w+) installed=(\w+) getProcCalls=(\d+) "
+    r"inputProcRequests=(\d+) createDevicePatched=(\d+) keyboardWrapped=(\d+)")
+INPUT_BRIDGE_PROC_RE = re.compile(
+    r"XRSIM input bridge: engine requested (\S+) \(owned=(yes|no)\)")
+INPUT_BRIDGE_RESOLVED_RE = re.compile(
+    r"XRSIM input bridge: input procs resolved so far: (.+)$")
+INPUT_BRIDGE_FIRSTPOLL_RE = re.compile(
+    r"XRSIM input bridge: XInputGetState first poll \(userIndex=(\d+) result=(\d+)\)")
+INPUT_BRIDGE_RESULT_CHANGE_RE = re.compile(
+    r"XRSIM input bridge: XInputGetState result changed -> (\d+) \(poll=(\d+)\)")
+INPUT_BRIDGE_KEYBOARD_POLL_RE = re.compile(
+    r"XRSIM input bridge: GetDeviceState (first poll|poll=(\d+))")
+INPUT_BRIDGE_SUMMARY_RE = re.compile(
+    r"XRSIM input bridge: summary route=(\w+) polls=(\d+) taps=(\d+) "
+    r"keyboardPolls=(\d+) keyboardTaps=(\d+) lastRealResult=(none|\d+) "
+    r"createDevicePatched=(\d+) keyboardWrapped=(\d+) getProcCalls=(\d+) "
+    r"inputProcRequests=(\d+) procs\[(.*?)\]")
+# XInput's ERROR_DEVICE_NOT_CONNECTED. The real call reporting this is why a
+# synthetic pad's *bytes* cannot be seen by an engine that checks the pad first.
+XINPUT_ERROR_DEVICE_NOT_CONNECTED = 1167
 # GH #69 requirement 4: `Logger::Initialize` (src/hook/logging.cpp) opens
 # riddick_vr.log with `std::ios::out | std::ios::trunc`, so every game launch
 # rewrites the file from offset 0. A byte offset sampled *before* launch (the old
@@ -1159,6 +1200,113 @@ def capture_gate_stats(gate_samples):
         "blank": sum(1 for g in gate_samples.values() if g["content"] == "blank"),
         "frozen": sum(1 for g in gate_samples.values() if g["content"] == "frozen"),
     }
+
+
+def parse_input_bridge(text):
+    """GH #71 req 1 / #80 follow-up: the sim input bridge's observed activity.
+
+    Collects the bridge's own log lines into a dict:
+
+    ``gate``     -- the attach/deferred-init report (route, installed, the
+                    GetProcAddress counters),
+    ``procs``    -- ``{name: owned}`` for every input proc the engine requested
+                    through the swapped GetProcAddress,
+    ``polls``    -- the highest XInputGetState poll count seen,
+    ``taps``     -- the number of fabricated XInput press edges,
+    ``keyboard_polls`` / ``keyboard_taps`` -- the DirectInput route's equivalents,
+    ``last_real_result`` -- the real XInput API's last return code (``1167``
+                    ERROR_DEVICE_NOT_CONNECTED means the engine sees no pad, so
+                    the ORed confirm bytes are never read),
+    ``result_changes`` -- ``[[result, poll], ...]`` transitions of that code,
+    ``summaries`` -- the parsed periodic ``summary`` records (a timeline),
+    ``present``  -- whether the bridge logged anything at all.
+
+    Empty (``present`` False) on a non-sim run, a pre-#80 hook, or an
+    ``--evaluate-only`` run with no hook log: the report key is then ``None``.
+    """
+    out = {"gate": None, "procs": {}, "polls": 0, "taps": 0, "keyboard_polls": 0,
+           "keyboard_taps": 0, "last_real_result": None, "result_changes": [],
+           "summaries": [], "present": False}
+    for line in (text or "").splitlines():
+        m = INPUT_BRIDGE_GATE_RE.search(line)
+        if m:
+            out["present"] = True
+            out["gate"] = {"route": m.group(1), "installed": m.group(2) == "yes",
+                           "get_proc_calls": int(m.group(3)),
+                           "input_proc_requests": int(m.group(4)),
+                           "create_device_patched": m.group(5) == "1",
+                           "keyboard_wrapped": m.group(6) == "1"}
+            continue
+        m = INPUT_BRIDGE_PROC_RE.search(line)
+        if m:
+            out["present"] = True
+            out["procs"][m.group(1)] = m.group(2) == "yes"
+            continue
+        m = INPUT_BRIDGE_RESOLVED_RE.search(line)
+        if m and m.group(1).strip() != "none":
+            out["present"] = True
+            for token in m.group(1).split(","):
+                token = token.strip()
+                if ":" in token:
+                    name, state = token.rsplit(":", 1)
+                    out["procs"][name] = state == "owned"
+            continue
+        m = INPUT_BRIDGE_FIRSTPOLL_RE.search(line)
+        if m:
+            out["present"] = True
+            out["polls"] = max(out["polls"], 1)
+            out["last_real_result"] = int(m.group(2))
+            continue
+        m = INPUT_BRIDGE_RESULT_CHANGE_RE.search(line)
+        if m:
+            out["present"] = True
+            out["result_changes"].append([int(m.group(1)), int(m.group(2))])
+            out["last_real_result"] = int(m.group(1))
+            continue
+        m = INPUT_BRIDGE_KEYBOARD_POLL_RE.search(line)
+        if m:
+            out["present"] = True
+            n = 1 if m.group(1) == "first poll" else int(m.group(2))
+            out["keyboard_polls"] = max(out["keyboard_polls"], n)
+            continue
+        m = INPUT_BRIDGE_SUMMARY_RE.search(line)
+        if m:
+            out["present"] = True
+            rec = {"route": m.group(1), "polls": int(m.group(2)), "taps": int(m.group(3)),
+                   "keyboard_polls": int(m.group(4)), "keyboard_taps": int(m.group(5)),
+                   "last_real_result": None if m.group(6) == "none" else int(m.group(6)),
+                   "create_device_patched": m.group(7) == "1",
+                   "keyboard_wrapped": m.group(8) == "1",
+                   "get_proc_calls": int(m.group(9)),
+                   "input_proc_requests": int(m.group(10)),
+                   "procs": [t for t in m.group(11).split(",") if t and t != "none"]}
+            out["summaries"].append(rec)
+            out["polls"] = max(out["polls"], rec["polls"])
+            out["taps"] = max(out["taps"], rec["taps"])
+            out["keyboard_polls"] = max(out["keyboard_polls"], rec["keyboard_polls"])
+            out["keyboard_taps"] = max(out["keyboard_taps"], rec["keyboard_taps"])
+            if rec["last_real_result"] is not None:
+                out["last_real_result"] = rec["last_real_result"]
+            for token in rec["procs"]:
+                if ":" in token:
+                    name, state = token.rsplit(":", 1)
+                    out["procs"][name] = state == "owned"
+    if not out["present"]:
+        return None
+    out["xinput_connected"] = (out["last_real_result"] == 0)
+    out["xinput_device_not_connected"] = (
+        out["last_real_result"] == XINPUT_ERROR_DEVICE_NOT_CONNECTED)
+    return out
+
+
+def input_bridge_stats(parsed):
+    """One-line summary of :func:`parse_input_bridge` for a run's stdout."""
+    if not parsed:
+        return "input bridge: not opted in (no --sim-confirm lines)"
+    procs = ",".join(sorted(parsed["procs"])) or "none"
+    return (f"input bridge: polls={parsed['polls']} taps={parsed['taps']} "
+            f"keyboard_polls={parsed['keyboard_polls']} keyboard_taps={parsed['keyboard_taps']} "
+            f"lastRealResult={parsed['last_real_result']} procs={procs}")
 
 
 def active_rect_fill(log_text):
@@ -2103,6 +2251,7 @@ def cmd_evaluate_only(args):
                         "comfort_vignette": parse_comfort(host_text),
                         "deployed_hook": deployed_hook_identity(
                             game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
+                        "input_bridge": parse_input_bridge(fresh),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -2263,6 +2412,7 @@ def main(argv=None):
     game_dir = Path(getattr(args, "game_dir", None) or GAME_DIR)
     log_file = game_dir / "riddick_vr.log"
     fresh = read_fresh_hook_log(log_file, log_mark)
+    print("[xrsim] " + input_bridge_stats(parse_input_bridge(fresh)))
     passed, checks = evaluate(args, artifacts, host_log, fresh)
     labels = read_display_branch_labels(artifacts)
     write_report(report, passed, checks,
@@ -2288,6 +2438,7 @@ def main(argv=None):
                             getattr(args, "sim_confirm_hold_ms", None)) or None,
                         "deployed_hook": deployed_hook_identity(
                             game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
+                        "input_bridge": parse_input_bridge(fresh),
                         "shadow": getattr(args, "shadow_manifest", None),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})

@@ -127,6 +127,67 @@ inline bool SimBridgeOwnsProcName(const char* procName, SimConfirmRoute route) {
 }
 
 // ---------------------------------------------------------------------------
+// Input-proc observability (GH #71 req 1 / #80 follow-up)
+// ---------------------------------------------------------------------------
+// The device entry points the engine can resolve *through* the swapped
+// ``GetProcAddress`` on MSystem.dll (ADR-0467). Kept as an exact-match closed
+// set so the interceptor can report which of them the engine actually asked for
+// -- and whether the bridge owned the answer -- which is the datum that
+// separates "the swap ran after the input context's ctor" from "the engine took
+// the other input path". ``GetProcAddress`` is case-sensitive, so a different
+// spelling or a near-miss name is deliberately *not* in the set.
+inline constexpr int kSimInputProcNameCount = 7;
+
+// The names, in a stable order (the interceptor indexes its per-name flags by
+// this order). A closed table, not a substring match: a name like
+// ``XInputGetStateEx`` must never be reported as one of ours.
+inline const char* SimInputProcNameAt(int index) {
+    static const char* const kNames[kSimInputProcNameCount] = {
+        "XInputGetState", "XInputSetState", "XInputGetCapabilities", "XInputEnable",
+        "DirectInputCreateA", "DirectInputCreateW", "DirectInput8Create",
+    };
+    return (index >= 0 && index < kSimInputProcNameCount) ? kNames[index] : nullptr;
+}
+
+// The table index of ``procName``, or -1 when it is not one of the input procs.
+inline int SimInputProcNameIndex(const char* procName) {
+    if (!procName) return -1;
+    for (int i = 0; i < kSimInputProcNameCount; ++i) {
+        if (std::strcmp(procName, SimInputProcNameAt(i)) == 0) return i;
+    }
+    return -1;
+}
+
+inline bool SimBridgeIsInputProcName(const char* procName) {
+    return SimInputProcNameIndex(procName) >= 0;
+}
+
+// ---------------------------------------------------------------------------
+// Poll-log cadence (GH #71 req 1 / #80 follow-up)
+// ---------------------------------------------------------------------------
+// A wrapper cannot log every poll of an uncapped poller, but it must not hide a
+// *small* poll count either: "the engine never read the device" and "the engine
+// read it 12 times and stopped" are different answers to the reach question.
+// So the first ``kSimPollLogPowerCap`` polls are logged on a doubling cadence
+// (1, 2, 4, ... -- two consecutive logged counts are never more than a factor
+// of two apart) and every ``kSimPollLogEvery`` after that. Bounded: at 250 Hz
+// that is 8 lines in the first half second and 2 lines/s afterwards, and the
+// blind spot can never hide more than a doubling of the real count. The
+// *absolute* count is also written once from the deferred-init report, which
+// runs after the logger exists, so a poll that happened before the logger (its
+// first-poll line dropped) is still reported by value.
+inline constexpr long kSimPollLogEvery = 120;
+inline constexpr long kSimPollLogPowerCap = 128;
+
+// Whether poll number ``polls`` (1-based, as returned by the counter's
+// post-increment) deserves a log line.
+inline bool SimShouldLogPoll(long polls) {
+    if (polls <= 0) return false;
+    if (polls <= kSimPollLogPowerCap && (polls & (polls - 1)) == 0) return true;
+    return (polls % kSimPollLogEvery) == 0;
+}
+
+// ---------------------------------------------------------------------------
 // Confirm cadence (GH #80 requirement 2)
 // ---------------------------------------------------------------------------
 // A menu confirm is an *edge*: the callers tap, never hold. One tap is a press

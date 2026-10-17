@@ -805,6 +805,46 @@ def main():
             "real program dir + the repo hook) and its `--shadow-install` route "
             "must exist, be unit-tested, and be recorded")
 
+    # GH #71 req 1 / #80 follow-up (wake 71): the input bridge must *report what
+    # it observed*, so the reach question is decidable from a run instead of
+    # inferred from prose. The bridge names every input proc the engine resolved
+    # through the swapped GetProcAddress (owned or merely observed), counts its
+    # polls and the confirms it fabricated, and records the real XInput API's
+    # return code; the harness parses those lines into the `input_bridge` report
+    # key and prints one summary line. A killed game (the harness's
+    # TerminateProcess) skips DLL_PROCESS_DETACH, so the summary is also emitted
+    # on a poll cadence from the wrappers themselves -- and once from the
+    # deferred-init report, so a poll whose own line preceded the logger is still
+    # reported by value (`SimShouldLogPoll` is the doubling cadence that keeps a
+    # small count visible).
+    require("SimInputProcNameIndex" in sim_bridge_hdr and
+            "SimBridgeIsInputProcName" in sim_bridge_hdr and
+            "SimInputProcNameAt" in sim_bridge_hdr and
+            "SimShouldLogPoll" in sim_bridge_hdr and
+            "SimShouldLogPoll" in sim_bridge_cpp and
+            "SimInputBridgeLogSummary" in
+            (ROOT / "src/hook/sim_input_bridge_win32.h").read_text(encoding="utf-8") and
+            "SimInputBridgeLogSummary" in sim_bridge_cpp and
+            "SimInputBridgeLogSummary();" in dllmain and
+            "engine requested" in sim_bridge_cpp and
+            "XInputGetState first poll" in sim_bridge_cpp and
+            "summary route=" in sim_bridge_cpp and
+            "def parse_input_bridge" in xrsim_tool and
+            "def input_bridge_stats" in xrsim_tool and
+            '"input_bridge"' in xrsim_tool and
+            "test_parse_input_bridge_is_none_without_lines" in _xrsim_tests and
+            "test_parse_input_bridge_reads_gate_procs_and_summary" in _xrsim_tests and
+            "test_input_bridge_report_key_written_by_evaluate_only" in _xrsim_tests and
+            "TestInputProcNames" in
+            (ROOT / "tests/sim_input_bridge_tests.cpp").read_text(encoding="utf-8") and
+            "TestPollLogCadence" in
+            (ROOT / "tests/sim_input_bridge_tests.cpp").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0472-sim-input-bridge-observability.md").exists(),
+            "GH #71 req 1 / #80: the sim input bridge must record the input procs "
+            "the engine resolved, its poll/tap counts and the real API's return "
+            "code, and the harness must parse them into the `input_bridge` report "
+            "key (the datum that makes the reach decidable)")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
           "#62, #64-68, #69, #71-73, #75-81)")
     return 0

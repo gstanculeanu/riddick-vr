@@ -46,6 +46,27 @@ volatile LONG g_inputProcRequests = 0;     // ...of which were one of ours
 volatile LONG g_createDevicePatched = 0;   // IDirectInputA::CreateDevice taken over
 volatile LONG g_keyboardDeviceWrapped = 0; // GUID_SysKeyboard::GetDeviceState taken over
 
+// GH #71 req 1 / #80 follow-up: observability. The engine's input path is only
+// decidable from *what it did*, so the bridge records which input procs the
+// engine resolved through the swapped GetProcAddress, how often it polled the
+// wrapped entry points, how many confirms the bridge fabricated, and the real
+// API's return code (an XINPUT device that was never connected reports 1167
+// ERROR_DEVICE_NOT_CONNECTED, which is why the synthetic pad's *bytes* alone
+// cannot be seen by the engine).
+volatile LONG g_inputProcSeen[kSimInputProcNameCount] = {};
+volatile LONG g_inputProcOwned[kSimInputProcNameCount] = {};
+volatile LONG g_xinputPolls = 0;
+volatile LONG g_xinputTaps = 0;          // fabricated XInput press edges
+volatile LONG g_xinputLastResult = -1;   // the real call's last return (-1 = unpolled)
+volatile LONG g_loggedXInputResult = -2; // the last one *logged* (-2 = none yet)
+volatile LONG g_keyboardPolls = 0;
+volatile LONG g_keyboardTaps = 0;        // DIK_RETURN presses injected
+
+// The log cadence is ``SimShouldLogPoll`` (pure core): a doubling cadence up to
+// 128 polls, then one line every ``kSimPollLogEvery``. It keeps the engine's
+// uncapped poller from flooding the log while still making a *small* poll count
+// visible -- see the note in sim_input_bridge.h.
+
 // --------------------------------------------------------------------------
 // Real functions (resolved lazily -- never in DllMain, never under loader lock)
 // --------------------------------------------------------------------------
@@ -96,6 +117,23 @@ const char* RouteName(SimConfirmRoute route) {
     }
 }
 
+// "<name>:owned|<name>:observed", comma-separated, or "none". Reads the per-name
+// flags the intercept records for every input proc the engine resolves.
+void FormatInputProcList(char* out, int outSize) {
+    if (!out || outSize <= 0) return;
+    out[0] = '\0';
+    int used = 0;
+    for (int i = 0; i < kSimInputProcNameCount; ++i) {
+        if (!g_inputProcSeen[i]) continue;
+        const char* state = g_inputProcOwned[i] ? "owned" : "observed";
+        const int n = _snprintf_s(out + used, outSize - used, _TRUNCATE, "%s%s:%s",
+                                  used ? "," : "", SimInputProcNameAt(i), state);
+        if (n < 0) break;  // truncated: keep what fit
+        used += n;
+    }
+    if (!used) _snprintf_s(out, outSize, _TRUNCATE, "none");
+}
+
 // --------------------------------------------------------------------------
 // XInput route: XInputGetState
 // --------------------------------------------------------------------------
@@ -111,6 +149,28 @@ unsigned long WINAPI Hook_XInputGetState(unsigned long userIndex, void* pState) 
     unsigned long result = g_realXInputGetState
         ? g_realXInputGetState(userIndex, pState)
         : 1167ul;  // ERROR_DEVICE_NOT_CONNECTED: a phantom pad must stay absent
+
+    // GH #71 req 1: record that the engine polled this entry point at all, and
+    // what the real API said. If the true result is 1167 the engine treats the
+    // pad as absent and the ORed confirm bytes below are never read -- the fact
+    // the previous wakes could only infer.
+    const LONG polls = InterlockedIncrement(&g_xinputPolls);
+    g_xinputLastResult = static_cast<LONG>(result);
+    if (polls == 1) {
+        VR_LOG_INFO("XRSIM input bridge: XInputGetState first poll (userIndex=%lu "
+                    "result=%lu)", userIndex, result);
+        g_loggedXInputResult = static_cast<LONG>(result);
+    } else if (SimShouldLogPoll(polls)) {
+        // The periodic summary carries polls/taps/the real result and the proc
+        // list, so a killed process still leaves a timeline in the log.
+        SimInputBridgeLogSummary();
+        g_loggedXInputResult = static_cast<LONG>(result);
+    } else if (static_cast<LONG>(result) != g_loggedXInputResult) {
+        VR_LOG_INFO("XRSIM input bridge: XInputGetState result changed -> %lu "
+                    "(poll=%ld)", result, static_cast<long>(polls));
+        g_loggedXInputResult = static_cast<LONG>(result);
+    }
+
     if (userIndex != 0 || !pState) return result;
 
     const bool pressed = SimConfirmTick(static_cast<unsigned long>(GetTickCount()),
@@ -118,6 +178,13 @@ unsigned long WINAPI Hook_XInputGetState(unsigned long userIndex, void* pState) 
     RawXInputState* state = static_cast<RawXInputState*>(pState);
     const bool changed = ApplySimConfirmToGamepad(&state->pad, pressed);
     state->packet = BumpSimPacketNumber(state->packet, changed);
+    if (changed && pressed) {
+        const LONG taps = InterlockedIncrement(&g_xinputTaps);
+        if (taps == 1) {
+            VR_LOG_INFO("XRSIM input bridge: XInputGetState first confirm tap "
+                        "(poll=%ld result=%lu)", static_cast<long>(polls), result);
+        }
+    }
     return result;
 }
 
@@ -130,12 +197,26 @@ long WINAPI Hook_GetDeviceState(void* self, unsigned long cbData, void* data) {
         : static_cast<long>(0x80004005L);  // E_FAIL
     if (hr < 0 || self != g_keyboardDevice || !data) return hr;
 
+    // GH #71 req 1: the keyboard route is only live if the engine created
+    // GUID_SysKeyboard *and* polls it; record the poll so a run can tell the
+    // difference between "never wrapped" and "wrapped but never read". The count
+    // is deliberately behind the wrap gate: it counts reads of *our* patched
+    // device, and 0 polls with createDevicePatched=0 means the engine never even
+    // called DirectInputCreateA (so no device exists to wrap).
+    const LONG polls = InterlockedIncrement(&g_keyboardPolls);
+    if (polls == 1) {
+        VR_LOG_INFO("XRSIM input bridge: GetDeviceState first poll");
+    } else if (SimShouldLogPoll(polls)) {
+        SimInputBridgeLogSummary();
+    }
+
     const bool pressed = SimConfirmTick(static_cast<unsigned long>(GetTickCount()),
                                         g_schedule, g_confirm);
     unsigned char* keys = static_cast<unsigned char*>(data);
     if (pressed) {
         if (SetDirectInputKey(keys, static_cast<unsigned int>(cbData), kDikReturn, true)) {
             g_keyboardInjected = true;
+            InterlockedIncrement(&g_keyboardTaps);
         }
     } else if (g_keyboardInjected) {
         // Only clear the byte we set: never stomp a real (non-sim) press.
@@ -191,8 +272,22 @@ FARPROC WINAPI Hook_GetProcAddress(HMODULE hModule, LPCSTR lpProcName) {
     InterlockedIncrement(&g_getProcCalls);
 
     // An ordinal (HIWORD == 0) is not a name and is never ours.
-    if (lpProcName && HIWORD(lpProcName) != 0 &&
-        SimBridgeOwnsProcName(lpProcName, g_route)) {
+    if (!lpProcName || HIWORD(lpProcName) == 0) return real(hModule, lpProcName);
+
+    // GH #71 req 1 / #80 follow-up: record *every* input proc the engine asks for
+    // here, owned or not. Which one it resolved -- and whether the swap was in
+    // place when it asked -- is the datum that tells a dead end from a live one.
+    const bool owned = SimBridgeOwnsProcName(lpProcName, g_route);
+    const int inputIndex = SimInputProcNameIndex(lpProcName);
+    if (inputIndex >= 0) {
+        if (owned) InterlockedExchange(&g_inputProcOwned[inputIndex], 1);
+        if (InterlockedExchange(&g_inputProcSeen[inputIndex], 1) == 0) {
+            VR_LOG_INFO("XRSIM input bridge: engine requested %s (owned=%s)",
+                        lpProcName, owned ? "yes" : "no");
+        }
+    }
+
+    if (owned) {
         FARPROC resolved = real(hModule, lpProcName);
         InterlockedIncrement(&g_inputProcRequests);
         if (resolved) {
@@ -290,6 +385,18 @@ void SimInputBridgeLogStartupReport() {
                 static_cast<long>(g_createDevicePatched),
                 static_cast<long>(g_keyboardDeviceWrapped));
 
+    // GH #71 req 1: the log is truncated on launch and this report runs after the
+    // logger exists, so the procs resolved *before* it still get named here.
+    char procs[256];
+    FormatInputProcList(procs, sizeof(procs));
+    VR_LOG_INFO("XRSIM input bridge: input procs resolved so far: %s", procs);
+
+    // ...and so do the *counters*: a poll whose own line was dropped because the
+    // logger did not exist yet is still visible here by value, which is what
+    // makes "the engine never read the device" a measurement rather than an
+    // inference. The wrappers keep emitting on the doubling cadence afterwards.
+    SimInputBridgeLogSummary();
+
     if (!g_installed) {
         VR_LOG_WARN("XRSIM input bridge: the intercept did not install; the sim "
                     "cannot fabricate a confirm this run");
@@ -302,6 +409,32 @@ void SimInputBridgeLogStartupReport() {
                     "CInputContext_DInput's ctor (0x1010b440) and the confirm "
                     "cannot be fabricated (ADR-0467 residual)");
     }
+}
+
+void SimInputBridgeLogSummary() {
+    if (!SimInputBridgeEnabled(g_gate) || g_route == SimConfirmRoute::None) {
+        return;
+    }
+    char procs[256];
+    FormatInputProcList(procs, sizeof(procs));
+    const long lastReal = g_xinputLastResult;
+    char realText[16];
+    if (lastReal < 0) {
+        _snprintf_s(realText, sizeof(realText), _TRUNCATE, "none");
+    } else {
+        _snprintf_s(realText, sizeof(realText), _TRUNCATE, "%ld", lastReal);
+    }
+    VR_LOG_INFO("XRSIM input bridge: summary route=%s polls=%ld taps=%ld "
+                "keyboardPolls=%ld keyboardTaps=%ld lastRealResult=%s "
+                "createDevicePatched=%ld keyboardWrapped=%ld getProcCalls=%ld "
+                "inputProcRequests=%ld procs[%s]",
+                RouteName(g_route), static_cast<long>(g_xinputPolls),
+                static_cast<long>(g_xinputTaps), static_cast<long>(g_keyboardPolls),
+                static_cast<long>(g_keyboardTaps), realText,
+                static_cast<long>(g_createDevicePatched),
+                static_cast<long>(g_keyboardDeviceWrapped),
+                static_cast<long>(g_getProcCalls),
+                static_cast<long>(g_inputProcRequests), procs);
 }
 
 }  // namespace RiddickVR

@@ -1586,6 +1586,87 @@ def test_hook_identity_flags_parse(td):
                            "--selftest"]) == 0
 
 
+# ------------------------- sim input bridge observability (GH #71 req 1 / #80)
+def _bridge_gate(route="both", installed="yes", get_proc="90", input_req="1",
+                 patched="0", wrapped="0"):
+    return (f"[INFO] XRSIM input bridge: gate on route={route} installed={installed} "
+            f"getProcCalls={get_proc} inputProcRequests={input_req} "
+            f"createDevicePatched={patched} keyboardWrapped={wrapped}")
+
+
+def _bridge_summary(route="both", polls=1000, taps=3, kpolls=0, ktaps=0,
+                    last_real="1167", proc_list="XInputGetState:owned"):
+    return (f"[INFO] XRSIM input bridge: summary route={route} polls={polls} taps={taps} "
+            f"keyboardPolls={kpolls} keyboardTaps={ktaps} lastRealResult={last_real} "
+            f"createDevicePatched=0 keyboardWrapped=0 getProcCalls=90 "
+            f"inputProcRequests=1 procs[{proc_list}]")
+
+
+def test_parse_input_bridge_is_none_without_lines(td):
+    assert xrsim.parse_input_bridge("") is None
+    assert xrsim.parse_input_bridge("[INFO] unrelated line\n") is None
+    assert "not opted in" in xrsim.input_bridge_stats(None)
+
+
+def test_parse_input_bridge_reads_gate_procs_and_summary(td):
+    text = "\n".join([
+        _bridge_gate(route="gamepad", input_req="2"),
+        "[INFO] XRSIM input bridge: engine requested XInputGetState (owned=yes)",
+        "[INFO] XRSIM input bridge: engine requested XInputGetCapabilities (owned=no)",
+        "[INFO] XRSIM input bridge: input procs resolved so far: "
+        "XInputGetState:owned,DirectInputCreateA:observed",
+        "[INFO] XRSIM input bridge: XInputGetState first poll (userIndex=0 result=1167)",
+        "[INFO] XRSIM input bridge: XInputGetState result changed -> 0 (poll=420)",
+        "[INFO] XRSIM input bridge: GetDeviceState first poll",
+        _bridge_summary(polls=1500, taps=7, kpolls=0, ktaps=0, last_real="1167",
+                        proc_list="XInputGetState:owned,DirectInputCreateA:observed"),
+    ])
+    b = xrsim.parse_input_bridge(text)
+    assert b["present"] is True
+    assert b["gate"]["route"] == "gamepad" and b["gate"]["installed"] is True
+    assert b["gate"]["input_proc_requests"] == 2
+    # "observed" then "owned" (the summary's list) -> both names recorded.
+    assert b["procs"] == {"XInputGetState": True, "XInputGetCapabilities": False,
+                          "DirectInputCreateA": False}
+    assert b["polls"] == 1500 and b["taps"] == 7
+    assert b["keyboard_polls"] == 1
+    assert b["result_changes"] == [[0, 420]]
+    assert b["last_real_result"] == 1167  # the periodic summary wins the timeline
+    assert b["xinput_device_not_connected"] is True and b["xinput_connected"] is False
+
+
+def test_input_bridge_stats_names_the_procs(td):
+    b = xrsim.parse_input_bridge(_bridge_summary(polls=60, taps=1, last_real="0",
+                                                 proc_list="XInputGetState:owned"))
+    line = xrsim.input_bridge_stats(b)
+    assert "polls=60" in line and "taps=1" in line and "lastRealResult=0" in line
+    assert "XInputGetState" in line
+
+
+def test_input_bridge_report_key_written_by_evaluate_only(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    log = Path(td) / "riddick_vr.log"
+    log.write_text(xrsim.RUN_HEADER + "\n" + _bridge_gate() + "\n" +
+                   _bridge_summary() + "\n", encoding="utf-8")
+    rep = Path(td) / "report.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                         "--hook-log", str(log), "--report-file", str(rep)])
+    assert rc == 0
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    assert payload["input_bridge"]["gate"]["route"] == "both"
+    assert payload["input_bridge"]["polls"] == 1000
+    # A run with no bridge lines records null, not an empty dict.
+    log.write_text(xrsim.RUN_HEADER + "\n[INFO] nothing here\n", encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                           "--hook-log", str(log), "--report-file", str(rep)]) == 0
+    assert json.loads(rep.read_text(encoding="utf-8"))["input_bridge"] is None
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -1677,6 +1758,10 @@ def main() -> int:
              test_deployed_hook_check_skips_by_default_and_grades_on_request,
              test_evaluate_records_hook_identity_and_grades_only_when_asked,
              test_hook_identity_flags_parse,
+             test_parse_input_bridge_is_none_without_lines,
+             test_parse_input_bridge_reads_gate_procs_and_summary,
+             test_input_bridge_stats_names_the_procs,
+             test_input_bridge_report_key_written_by_evaluate_only,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

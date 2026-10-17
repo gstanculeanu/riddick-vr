@@ -311,6 +311,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
         case DLL_PROCESS_DETACH: {
             VR_LOG_INFO("Riddick VR Hook DLL Detaching...");
+            // GH #71 req 1: a graceful exit gets a final bridge line. A harness
+            // run is killed (TerminateProcess), so the periodic lines emitted
+            // from the wrappers are the run's real evidence.
+            RiddickVR::SimInputBridgeLogSummary();
             RiddickVR::CameraHook::Instance().Shutdown();
             RiddickVR::StereoRenderer::Instance().Shutdown();
             RiddickVR::OpenGLProxy::Shutdown();
