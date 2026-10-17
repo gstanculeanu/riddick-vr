@@ -325,6 +325,27 @@ def main():
             "GH #71: XRSIM must reach live gameplay with an unlimited, wall-clock "
             "bounded run and assert the full-bleed BarScan signal")
 
+    # GH #71 requirement 1 (input-blocker diagnosis): in simulator mode the hook
+    # never injects desktop input, so nothing advances the game's startup
+    # splash/menu. The harness carries the *sim-safe* attempt -- a targeted
+    # window-message confirm tap to the game's own HWND (never OS-global input) --
+    # but it is OPT-IN because it was measured ineffective against this engine
+    # (MSystem.dll imports DirectInput, RndrGL.dll imports Raw Input, so posted
+    # messages are ignored; see docs/adr/0466). The schedule is pure/unit-tested
+    # and its outcome is recorded in the report as `menu_advance`.
+    require("class GameMenuAdvancer" in xrsim_tool and
+            "def post_confirm_to_game_windows" in xrsim_tool and
+            "def confirm_key_messages" in xrsim_tool and
+            "def gameplay_reached_from_sequence" in xrsim_tool and
+            '"--advance-menu"' in xrsim_tool and
+            "set_defaults(advance_menu=False)" in xrsim_tool and
+            '"menu_advance": menu_stats' in xrsim_tool and
+            "test_menu_advancer_fires_on_cadence_and_honours_max_taps" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8"),
+            "GH #71 req 1: XRSIM must carry the sim-safe (opt-in) menu-advance "
+            "attempt and record its outcome; the engine ignores posted window "
+            "messages, so it must stay off by default")
+
     # GH #72 requirement 2: the gameplay-only dump window must also be
     # *content-gated* -- a gameplay-labelled frame is skipped while it is
     # all-black (GL<->D3D11 interop warm-up) or byte-identical to the last

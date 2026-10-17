@@ -2,6 +2,72 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 63 — 2026-10-17 21:55 (scheduled loop)
+- **Unit:** GH **#71 requirement 1** — established the *decidable* root cause of the
+  XRSIM reach failure and encoded the sim-safe attempt + its negative result.
+  Harness + tests + docs; **no C++/asset change, no build, no deploy**.
+- **Why this unit:** #71/#68 is the top open item, every player-visible ladder
+  item is deploy-gated, and the reach failure makes the iteration vehicle useless
+  for live validation. Wake 62 proposed a hook-side fix ("let `camera_hook`
+  `SendKey` post before the `SimModeNoInput()` return, and wire
+  `SetGestureGameHwnd`"). This wake **tested that mechanism** (in the harness,
+  where the HWND problem does not exist) and found it **cannot work**.
+- **Decisive findings (measured, not inferred):**
+  1. `python tools/xrsim.py --reach-gameplay --duration 45 --advance-menu` (real
+     window messaging, no OS input): the game window was found
+     (`class='MOS Win32/OpenGL'`, title *The Chronicles of Riddick: Assault on
+     Dark Athena*, **visible and foreground**, pid match) and received **21
+     VK_RETURN taps** (each `WM_KEYDOWN`+`WM_CHAR`+`WM_KEYUP`) — the game stayed
+     on its splash; the log's only `DisplayMode` line is
+     `CINEMA screen ... (menuCursor=1)`.
+  2. A captured frame (`--dump-branch any`) renders the literal **"PRESS ENTER"**
+     title plate, unchanged across the run.
+  3. **Binary import scan (ASCII import names):** `MSystem.dll` imports
+     **DirectInput** (and XInput); `RndrGL.dll` imports **Raw Input**
+     (`RegisterRawInputDevices`, `GetRawInputData`) and `PeekMessage`; no module
+     imports `GetAsyncKeyState`/`GetKeyboardState`. Both DirectInput and Raw
+     Input are **device-sourced** — fed only by OS-level `SendInput`, exactly what
+     `RIDDICKVR_SIM=1` suppresses (the deployed hook logs
+     `XRSIM: RIDDICKVR_SIM=1 - desktop input injection disabled`).
+  4. No start-at-level route: `-map` in the engine DLLs is a `mip-map` /
+     `environment-mapping` false positive, and there is no savegame on the box.
+- **Change:**
+  - `tools/xrsim.py`: `post_confirm_to_game_windows(pid)` + `confirm_key_messages`
+    (the exact posted key triple, ctypes, no-op off Windows) and
+    `GameMenuAdvancer` (pure cadence/max-taps/stop, injected poster + clock, no
+    thread, no catch-up burst); `display_branch_sequence` /
+    `gameplay_reached_from_sequence` (stop signal = a full-bleed branch *after* a
+    cinema branch, because the splash is full-bleed-mislabelled per GH #72);
+    `--advance-menu` (**default OFF**) / `--advance-interval` /
+    `--advance-max-taps`; the outcome is recorded in the report as `menu_advance`.
+  - `tools/test_xrsim.py`: +7 tests (key-message lParam, cadence/max-taps, stop,
+    no-catch-up, the menu→gameplay transition rule, the pid-0 no-op, flag parse).
+  - `tools/verify_reported_fixes.py`: a GH #71 req-1 invariant (capability +
+    opt-in default + report key + test wired).
+  - `docs/adr/0466-engine-input-is-directinput-rawinput-so-the-sim-cannot-post-past-the-splash.md`
+    (new) + a `docs/vr-scenarios.md` caveat.
+- **Evidence (offline):** `python tools/test_xrsim.py` PASS (all cases incl. the 7
+  new); `python tools/xrsim.py --selftest` PASS; all 10 `tools/test_*.py` PASS;
+  `verify_test_artifacts` + `verify_hook_init` + `validate_addresses` +
+  `verify_reported_fixes` + `scenario_tests.py --check` PASS. **No C++ changed →
+  no `build-all.ps1`/CTest** (documented). Committed `tests/xrsim/report.json`
+  restored after the probe runs overwrote it (the committed wake-61 baseline is
+  unchanged).
+- **Blocker / honest limit (the loud one):** **GH #71 requirement 1 is not
+  achievable offline under the hard rules.** The engine ignores posted window
+  messages, and OS-level `SendInput` is forbidden (input safety). Viable routes,
+  both out of this wake's scope: (a) a hook-side, simulator-only **input bridge**
+  (hook `GetRawInputData` / `IDirectInputDevice8::GetDeviceState` and inject the
+  scripted confirm state) — deploy-gated REA work; (b) launch directly into a
+  level/savegame — no CLI switch and no save exist. Wake 62's proposed hook change
+  (posting window messages) would **not** have worked.
+- **Next:** the reach is the loop's biggest blocker; the highest-value item is
+  (a) — REA the engine's DirectInput/Raw-Input read path and bridge it in sim mode
+  (ADR-0466), which also finally lets the harness validate the deploy-gated
+  player-visible fixes (#67 step 3, #64/#61 passes, #76 step 1). Otherwise the
+  offline candidates stay thin (all ladder items are deploy-gated). `--advance-menu`
+  is landed off-by-default as the harness half of route (a).
+
 ## Wake 62 — 2026-10-17 21:29 (scheduled loop)
 - **Unit:** GH **#79 host half** (wake 61's stated Next) — the XRSIM capture now
   reads each shared eye texture **once**, as a back-to-back pair, and runs both

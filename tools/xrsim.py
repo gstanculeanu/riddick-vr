@@ -45,6 +45,30 @@ from the hook's ``BarScan`` active-rect fill (the splash is letterboxed; gamepla
 fills the window) -- a structural proof, since the ``cinemaMode`` bit mislabels
 the static splash pages as gameplay (GH #72).
 
+Real runs can *attempt* to advance the startup splash/menu with
+``--advance-menu`` (GH #71 requirement 1): ``RIDDICKVR_SIM=1`` suppresses the
+hook's ``SendInput``, so the mock host has no route to drive the game forward and
+a run stalls on the splash. The harness knows the game's PID and posts the confirm
+keystroke (VK_RETURN) as *targeted* window messages to the game's own HWND -- the
+sim-safe route ``src/hook/gesture_tap.cpp`` intends but never completes (it never
+learns the HWND). ``PostMessage`` touches only that window's queue, so it is not
+desktop input.
+
+**Measured ineffective (2026-10-17):** with ``--advance-menu`` the harness found
+the game window (class ``MOS Win32/OpenGL``, visible and *foreground*) and posted
+21 confirm taps over 45 s; the game stayed on its ``PRESS ENTER`` splash the whole
+time. The engine does not consume posted window messages: ``MSystem.dll`` imports
+**DirectInput** and ``RndrGL.dll`` imports **Raw Input**
+(``RegisterRawInputDevices``/``GetRawInputData``), both device-sourced and fed
+only by OS-level ``SendInput`` -- exactly what the simulator suppresses. So
+``--advance-menu`` is **off by default** and is kept only as the sim-safe harness
+half of a future hook-side bridge of the engine's input in simulator mode. The
+taps auto-stop once the hook's ``DisplayMode`` log shows the full-bleed branch
+*after* a cinema/menu branch (the splash is full-bleed-labelled, so the
+transition -- not a bare full-bleed -- is the signal). Tune with
+``--advance-interval``/``--advance-max-taps``; the report records it as
+``menu_advance``.
+
 The gameplay-only dump window is *content-gated* (GH #72 requirement 2): even a
 gameplay-labelled frame is kept out while it is all-black (the GL<->D3D11 interop
 warm-up) or byte-identical to the last dumped frame (a frozen static page), so the
@@ -1068,6 +1092,179 @@ def parse_budget(host_log: str, budget_ms: float):
     return rec["ok"], rec
 
 
+# ----------------------------------------------------- menu advance (GH #71)
+# The scripted run stalls on the game's startup splash/menu: the mock host
+# publishes controller state but *nothing reaches the game*, because (a)
+# camera_hook.cpp's SendKey returns at SimModeNoInput() *before* its PostMessage
+# and (b) gesture_tap.cpp's posting path needs s_gestureHwnd, which
+# SetGestureGameHwnd is never called to set. The only *sim-safe* input route is
+# the targeted window message gesture_tap.cpp already intends
+# ("STILL post the targeted window message to the game so the harness can
+#  advance menus without hijacking the user's desktop"): the hook never learns
+# the HWND, but the harness knows the game's PID, so it can post the same
+# messages itself. PostMessage only touches that window's queue -- it is NOT
+# desktop input injection, so it stays inside the #68 simulator exception.
+#
+# MEASURED INEFFECTIVE (ADR-0466): this engine reads input via DirectInput
+# (MSystem.dll) / Raw Input (RndrGL.dll), so it ignores posted window messages
+# (21 confirm taps to the visible, foreground `MOS Win32/OpenGL` game window left
+# it on its "PRESS ENTER" splash). The capability is therefore opt-in
+# (`--advance-menu`, default off) and kept only as the harness half of a future
+# hook-side bridge of the engine's input in simulator mode.
+VK_RETURN = 0x0D
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_CHAR = 0x0102
+
+
+def key_lparam(scan, is_down):
+    """Win32 lParam for a key message (scan code in bits 16-23, repeat=1;
+    key-up also sets the transition/previous-state bits)."""
+    lp = ((scan & 0xFF) << 16) | 1
+    if not is_down:
+        lp |= (1 << 30) | (1 << 31)
+    return lp
+
+
+def confirm_key_messages(vk=VK_RETURN, scan=0):
+    """The exact (message, wParam, lParam) sequence a confirm tap posts, in
+    order -- mirroring gesture_tap.cpp's SendKeyTap (keydown, WM_CHAR for the
+    text keys the engine routes, keyup)."""
+    return [(WM_KEYDOWN, vk, key_lparam(scan, True)),
+            (WM_CHAR, vk, key_lparam(scan, True)),
+            (WM_KEYUP, vk, key_lparam(scan, False))]
+
+
+def post_confirm_to_game_windows(pid, vk=VK_RETURN):
+    """Post a confirm tap to every visible top-level window owned by ``pid``.
+
+    Returns the number of windows reached (0 when none is found, or off
+    Windows). Dependency-free ctypes; guarded so a headless/non-Windows runner
+    degrades to a no-op instead of crashing.
+    """
+    if os.name != "nt" or not pid:
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return 0
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+    except Exception:
+        return 0
+
+    hwnds = []
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        wpid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value == int(pid) and user32.IsWindowVisible(hwnd):
+            hwnds.append(hwnd)
+        return True
+
+    try:
+        user32.EnumWindows(enum_proc(_cb), 0)
+    except Exception:
+        return 0
+
+    msgs = confirm_key_messages(vk)
+    reached = 0
+    for hwnd in hwnds:
+        ok = True
+        for msg, wp, lp in msgs:
+            if not user32.PostMessageW(hwnd, msg, wp, lp):
+                ok = False
+        if ok:
+            reached += 1
+    return reached
+
+
+class GameMenuAdvancer:
+    """Post a periodic confirm tap to the game window so a scripted run can
+    advance the startup splash/menu (GH #71 requirement 1).
+
+    Pure scheduling: it takes an injected ``poster`` callable (returning the
+    number of game windows reached) and clock, so cadence / max-taps / stop are
+    unit-testable without a Windows handle. There is no thread -- the
+    orchestration loop drives ``poll``; at most one tap fires per ``poll`` (no
+    catch-up burst after a stall), and ``poll`` reports whether it fired.
+    """
+
+    MIN_INTERVAL = 0.25
+
+    def __init__(self, poster, interval_s=2.0, max_taps=0, clock=time.monotonic,
+                 start=None):
+        self._poster = poster
+        self._clock = clock
+        self.interval_s = max(self.MIN_INTERVAL, float(interval_s))
+        self.max_taps = max(0, int(max_taps))
+        self.taps = 0
+        self.windows = 0
+        self._stopped = False
+        now = self._clock() if start is None else start
+        self._next = now + self.interval_s
+
+    @property
+    def stopped(self):
+        return self._stopped or (self.max_taps > 0 and self.taps >= self.max_taps)
+
+    def stop(self):
+        self._stopped = True
+
+    def poll(self, now=None):
+        """Fire one tap when due. Returns 1 if a tap was posted, else 0."""
+        if self.stopped:
+            return 0
+        now = self._clock() if now is None else now
+        if now < self._next:
+            return 0
+        try:
+            reached = int(self._poster() or 0)
+        except (TypeError, ValueError):
+            reached = 0
+        if reached > self.windows:
+            self.windows = reached
+        self.taps += 1
+        self._next = now + self.interval_s
+        return 1
+
+
+# GH #71 requirement 1 stop signal: once the game reaches live gameplay we must
+# stop confirming, or the confirm key would open the pause menu / act in-game.
+# The startup splash is full-bleed-labelled (GH #72), so a bare full-bleed
+# branch is not enough -- gameplay is the full-bleed branch that *follows* a
+# cinema (menu) branch.
+DISPLAY_MODE_RE = re.compile(r"DisplayMode:\s*(CINEMA|FULL-BLEED)")
+
+
+def display_branch_sequence(text):
+    """Ordered per-transition branch (True = cinema/menu, False = full-bleed)."""
+    return [m.group(1) == "CINEMA" for m in DISPLAY_MODE_RE.finditer(text or "")]
+
+
+def gameplay_reached_from_sequence(branch_seq):
+    """True once a full-bleed branch follows a cinema (menu) branch."""
+    seen_cinema = False
+    for cinema in branch_seq:
+        if cinema:
+            seen_cinema = True
+        elif seen_cinema:
+            return True
+    return False
+
+
 # ------------------------------------------------------------------ orchestration
 def build_host_cmd(args, artifacts: Path):
     """Build the mock-host command line for one scripted run.
@@ -1116,6 +1313,22 @@ def run_sim(args, artifacts: Path):
     print(f"[xrsim] game: {game_exe}")
     game = subprocess.Popen([str(game_exe)], cwd=str(game_dir), env=env)
 
+    # GH #71 requirement 1: post the confirm keystroke to the game's own window
+    # to *try* to advance the startup splash/menu. This is targeted window
+    # messaging (never OS-global input) and is the sim-safe completion of
+    # gesture_tap.cpp's intended route; it stops as soon as gameplay is reached.
+    # Measured ineffective against this engine (ADR-0466), so opt-in only.
+    advancer = None
+    menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False}
+    if getattr(args, "advance_menu", False):
+        menu_stats["enabled"] = True
+        advancer = GameMenuAdvancer(
+            lambda: post_confirm_to_game_windows(game.pid),
+            interval_s=float(getattr(args, "advance_interval", 2.0) or 2.0),
+            max_taps=int(getattr(args, "advance_max_taps", 0) or 0))
+        print(f"[xrsim] menu advance: confirm every {advancer.interval_s:.1f}s to "
+              f"pid {game.pid} (GH #71)")
+
     duration = getattr(args, "duration", None)
     host_log = []
     start = time.time()
@@ -1131,6 +1344,13 @@ def run_sim(args, artifacts: Path):
         if duration and elapsed > duration:
             print(f"[xrsim] reached --duration {duration:.0f}s")
             break
+        if advancer is not None and advancer.poll() and not advancer.stopped:
+            fresh_now = read_fresh_hook_log(log_file, log_mark)
+            if gameplay_reached_from_sequence(display_branch_sequence(fresh_now)):
+                advancer.stop()
+                menu_stats["reached"] = True
+                print(f"[xrsim] menu advance: stopped after {advancer.taps} tap(s) "
+                      "-- gameplay branch reached")
         line = host.stdout.readline()
         if line:
             host_log.append(line.rstrip())
@@ -1144,7 +1364,14 @@ def run_sim(args, artifacts: Path):
         except Exception:
             subprocess.run(["taskkill", "/F", "/IM", name], capture_output=True)
 
-    return "\n".join(host_log), log_mark
+    if advancer is not None:
+        menu_stats["taps"] = advancer.taps
+        menu_stats["windows"] = advancer.windows
+        reach = "reached" if menu_stats["reached"] else "not reached"
+        print(f"[xrsim] menu advance summary: taps={advancer.taps} "
+              f"windows_reached={advancer.windows} gameplay {reach}")
+
+    return "\n".join(host_log), log_mark, menu_stats
 
 
 def host_log_path(artifacts: Path) -> Path:
@@ -1529,6 +1756,21 @@ def main(argv=None):
     ap.add_argument("--duration", type=float, default=None,
                     help=f"wall-clock run cap in seconds (default {GAMEPLAY_DEFAULT_DURATION:.0f} "
                          "with --reach-gameplay)")
+    ap.add_argument("--advance-menu", dest="advance_menu", action="store_true",
+                    help="post the confirm keystroke to the game's own window to try "
+                         "to advance the startup splash/menu (GH #71 req 1): targeted "
+                         "window messages, never OS-global input. OFF by default -- "
+                         "measured INEFFECTIVE against this engine, which reads input "
+                         "via DirectInput (MSystem.dll) / Raw Input (RndrGL.dll), not "
+                         "posted window messages (see the module docstring)")
+    ap.add_argument("--no-advance-menu", dest="advance_menu", action="store_false",
+                    help="never post game-window input (the default; GH #71)")
+    ap.set_defaults(advance_menu=False)
+    ap.add_argument("--advance-interval", type=float, default=2.0,
+                    help="seconds between confirm taps while the splash/menu is up "
+                         "(default 2.0; only with --advance-menu)")
+    ap.add_argument("--advance-max-taps", type=int, default=0,
+                    help="stop confirming after N taps (0 = bounded only by the run)")
     ap.add_argument("--artifacts", help="capture directory (default tests/xrsim/artifacts)")
     ap.add_argument("--report-file", help="report path (default tests/xrsim/report.json)")
     ap.add_argument("--hook-log", help="hook log to scan for markers (default: game log)")
@@ -1566,7 +1808,7 @@ def main(argv=None):
 
     artifacts = Path(args.artifacts) if args.artifacts else DEFAULT_ARTIFACTS
     report = Path(args.report_file) if args.report_file else DEFAULT_REPORT
-    host_log, log_mark = run_sim(args, artifacts)
+    host_log, log_mark, menu_stats = run_sim(args, artifacts)
     persist_host_log(artifacts, host_log)  # GH #69: survive the run
 
     # GH #69 requirement 4: the hook truncates its log on launch, so recover the
@@ -1590,6 +1832,7 @@ def main(argv=None):
                         "vertical_disparity": vertical_disparity_stats(checks),
                         "stereo_kind": stereo_kind_stats(checks),
                         "comfort_vignette": parse_comfort(host_log),
+                        "menu_advance": menu_stats,
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

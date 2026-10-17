@@ -1255,6 +1255,83 @@ def test_truncated_capture_is_reported_not_crashed(td):
     assert unreadable and unreadable[0]["ok"] is False, payload["checks"]
 
 
+def test_confirm_key_messages_are_wellformed(td):
+    """GH #71 req 1: the posted confirm tap must be a well-formed Win32
+    keydown/WM_CHAR/keyup triple with a correct lParam (repeat bit + key-up
+    transition/previous-state bits)."""
+    msgs = xrsim.confirm_key_messages()
+    assert [m[0] for m in msgs] == [xrsim.WM_KEYDOWN, xrsim.WM_CHAR, xrsim.WM_KEYUP]
+    assert all(m[1] == xrsim.VK_RETURN for m in msgs), msgs
+    down, _char, up = msgs
+    assert down[2] == 1, msgs       # scan 0, repeat count 1
+    assert up[2] == 1 | (1 << 30) | (1 << 31), msgs
+    assert not (down[2] >> 30) & 1 and not (down[2] >> 31) & 1, down
+    assert (up[2] >> 30) & 1 and (up[2] >> 31) & 1, up
+    assert xrsim.key_lparam(0x1C, True) == (0x1C << 16) | 1
+
+
+def test_menu_advancer_fires_on_cadence_and_honours_max_taps(td):
+    t = {"now": 100.0}
+    adv = xrsim.GameMenuAdvancer(lambda: 2, interval_s=2.0, max_taps=3,
+                                 clock=lambda: t["now"])
+    assert adv.poll() == 0 and adv.taps == 0          # not due yet
+    t["now"] = 102.0
+    assert adv.poll() == 1 and adv.taps == 1 and adv.windows == 2
+    t["now"] = 103.0
+    assert adv.poll() == 0 and adv.taps == 1          # inside the interval
+    t["now"] = 104.0
+    assert adv.poll() == 1 and adv.taps == 2
+    t["now"] = 106.0
+    assert adv.poll() == 1 and adv.taps == 3 and adv.stopped
+    t["now"] = 108.0
+    assert adv.poll() == 0 and adv.taps == 3          # max_taps reached
+
+
+def test_menu_advancer_stop_is_honoured(td):
+    t = {"now": 0.0}
+    adv = xrsim.GameMenuAdvancer(lambda: 1, interval_s=1.0, clock=lambda: t["now"])
+    t["now"] = 1.0
+    assert adv.poll() == 1
+    adv.stop()
+    t["now"] = 9.0
+    assert adv.poll() == 0 and adv.taps == 1 and adv.stopped
+
+
+def test_menu_advancer_has_no_catchup_burst(td):
+    """A stall must not release a burst of taps (which would spam the game)."""
+    t = {"now": 0.0}
+    adv = xrsim.GameMenuAdvancer(lambda: 1, interval_s=1.0, clock=lambda: t["now"])
+    t["now"] = 60.0
+    assert adv.poll() == 1 and adv.taps == 1
+    assert adv.poll() == 0 and adv.taps == 1
+
+
+def test_gameplay_reached_requires_menu_then_gameplay(td):
+    """The startup splash is full-bleed-labelled (GH #72), so a bare full-bleed
+    branch must NOT read as gameplay -- only a full-bleed *after* a cinema does."""
+    text = ("DisplayMode: FULL-BLEED gameplay (3Dfresh=1 menuCursor=0)\n"
+            "DisplayMode: CINEMA screen (menus/cinematics) (3Dfresh=0 menuCursor=1)\n"
+            "DisplayMode: FULL-BLEED gameplay (3Dfresh=1 menuCursor=0)\n")
+    seq = xrsim.display_branch_sequence(text)
+    assert seq == [False, True, False], seq
+    assert xrsim.gameplay_reached_from_sequence(seq)
+    assert not xrsim.gameplay_reached_from_sequence([False])       # splash only
+    assert not xrsim.gameplay_reached_from_sequence([False, False])
+    assert not xrsim.gameplay_reached_from_sequence([True])        # still at menu
+    assert xrsim.gameplay_reached_from_sequence([True, False])
+    assert not xrsim.gameplay_reached_from_sequence([])
+
+
+def test_post_confirm_is_a_noop_without_a_pid(td):
+    assert xrsim.post_confirm_to_game_windows(0) == 0
+
+
+def test_advance_menu_flags_parse(td):
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.main(["--selftest"]) == 0
+        assert xrsim.main(["--no-advance-menu", "--selftest"]) == 0
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -1322,6 +1399,13 @@ def main() -> int:
              test_eye_view_scene_faithful_skips_synthetic,
              test_eye_view_scene_faithful_grades_runtime,
              test_eye_view_scene_faithful_grades_sim,
+             test_confirm_key_messages_are_wellformed,
+             test_menu_advancer_fires_on_cadence_and_honours_max_taps,
+             test_menu_advancer_stop_is_honoured,
+             test_menu_advancer_has_no_catchup_burst,
+             test_gameplay_reached_requires_menu_then_gameplay,
+             test_post_confirm_is_a_noop_without_a_pid,
+             test_advance_menu_flags_parse,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

@@ -99,6 +99,17 @@ scenario playback until gameplay is reached is follow-up work (#71/#72), and the
 `<= 0.75` — to cinema until the first full-bleed frame `>= 0.90` is ever
 measured; default off, needs one live A/B).
 
+**Caveat (GH #71 requirement 1, ADR-0466):** a mock run currently **stalls on the
+"PRESS ENTER" splash** and never reaches gameplay. `RIDDICKVR_SIM=1` suppresses
+the hook's `SendInput` (input safety), and the engine does not consume posted
+window messages — `MSystem.dll` uses **DirectInput** and `RndrGL.dll` uses **Raw
+Input**, both fed only by OS-level input. Measured: the harness found the game
+window (`MOS Win32/OpenGL`, visible, foreground) and posted 21 confirm taps over
+45 s with no effect. The harness carries the sim-safe attempt at
+`python tools/xrsim.py --reach-gameplay --advance-menu` (targeted window messages
+only), but it is **off by default** and measured ineffective; reaching gameplay
+needs a hook-side bridge of the engine's input or a start-at-level route.
+
 **Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
 (mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical
 registration **unmeasurable** — `best_dy` pins to the search edge and moves with
