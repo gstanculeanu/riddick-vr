@@ -65,6 +65,21 @@ def _shift_v(array, dy):
     return np.roll(array, dy, axis=0)
 
 
+def _disparity_ramp(array, dmin=2, dmax=18):
+    """A *depth-like* pair: a per-column horizontal disparity ramp (GH #76).
+
+    Real stereo has depth-dependent disparity; a single global shift cannot
+    align this, so the per-tile shifts differ -- the opposite of the shipped
+    monoscopic shift.
+    """
+    h, w = array.shape[:2]
+    out = np.empty_like(array)
+    for x in range(w):
+        d = int(round(dmin + (dmax - dmin) * x / max(1, w - 1)))
+        out[:, x] = array[:, (x - d) % w]
+    return out
+
+
 # ------------------------------------------------------------------- stereo
 def test_shifted_pair_registers(td):
     base = _content()
@@ -250,6 +265,121 @@ def test_interior_dy_on_a_low_contrast_frame_is_inconclusive(td):
 
 
 # ------------------------------------------------------------------ comfort
+# --------------------------------------- stereo structure (GH #76 / epic #57)
+def test_shift_only_pair_is_classified(td):
+    base = _content()
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", _shift_h(base, 6))
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["stereo_kind"] == "shift-only", m
+    assert m["dx_spread_px"] == 0, m
+    assert m["tiles_used"] >= xrsim.PARALLAX_TILE_MIN, m
+
+
+def test_parallax_pair_is_classified(td):
+    base = _content()
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", _disparity_ramp(base))
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["stereo_kind"] == "parallax", m
+    assert m["dx_spread_px"] >= xrsim.PARALLAX_MIN_SPREAD_PX, m
+
+
+def test_mono_duplicate_is_classified(td):
+    base = _content()
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", base)
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["stereo_kind"] == "mono", m
+
+
+def test_flat_pair_kind_is_unknown(td):
+    base = _dim()
+    _save(Path(td) / "test_frame_0001.bmp", base)
+    _save(Path(td) / "right_0001.bmp", _shift_h(base, 3))
+    m = xrsim.stereo_metrics(Path(td) / "test_frame_0001.bmp",
+                             Path(td) / "right_0001.bmp", search=24)
+    assert m["stereo_kind"] == "unknown", m
+    # a missing/forward-compatible metrics dict must never raise
+    assert xrsim.classify_stereo_kind({}) == "unknown"
+    assert xrsim.classify_stereo_kind({"best_dx": None}) == "unknown"
+
+
+def test_stereo_kind_stats_is_gameplay_authoritative(td):
+    checks = [
+        {"check": "x", "frame": 15, "branch": "gameplay",
+         "stereo_kind": "shift-only", "best_dx": -4, "dx_spread_px": 0},
+        {"check": "y", "frame": 15, "branch": "gameplay",
+         "stereo_kind": "shift-only", "best_dx": -4, "dx_spread_px": 0},
+        {"check": "z", "frame": 30, "branch": "cinema",
+         "stereo_kind": "mono", "best_dx": 0, "dx_spread_px": 0},
+        {"check": "w", "frame": 45, "branch": "gameplay",
+         "stereo_kind": "unknown", "best_dx": -4, "dx_spread_px": None},
+    ]
+    st = xrsim.stereo_kind_stats(checks)
+    assert st["kind"] == "shift-only", st
+    assert st["frames"] == 3 and st["gameplay_frames"] == 2, st
+    assert st["measurable_frames"] == 1, st
+    assert st["spread_px_max"] == 0, st
+    assert xrsim.stereo_kind_stats([])["kind"] == "unknown"
+    # all frames unmeasurable -> unknown, never a false verdict
+    unclear = [{"check": "u", "frame": 1, "branch": "gameplay",
+                "stereo_kind": "unknown", "dx_spread_px": None}]
+    assert xrsim.stereo_kind_stats(unclear)["kind"] == "unknown"
+
+
+def test_require_parallax_grades_shift_stereo(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 4))
+    # Default: the shifted pair still passes -- the interim blit is not graded.
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    assert passed, checks
+    assert not [c for c in checks if c["check"] == "stereo_parallax_present"]
+    # --require-parallax: it must fail, naming the shift (GH #76).
+    passed, checks = xrsim.evaluate(_args(require_parallax=True), art, "", "")
+    assert not passed, checks
+    gate = [c for c in checks if c["check"] == "stereo_parallax_present"]
+    assert gate and gate[0]["ok"] is False, checks
+    assert "shift" in gate[0]["detail"], gate[0]
+    # A genuine (depth-varying) pair satisfies the same gate.
+    _save(art / "right_0015.bmp", _disparity_ramp(base))
+    passed, checks = xrsim.evaluate(_args(require_parallax=True), art, "", "")
+    gate = [c for c in checks if c["check"] == "stereo_parallax_present"]
+    assert gate and gate[0]["ok"] is True, checks
+
+
+def test_scenario_can_require_parallax(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 4))
+    scen = Path(td) / "s.json"
+    scen.write_text(json.dumps({"require_parallax": True}), encoding="utf-8")
+    passed, checks = xrsim.evaluate(_args(scenario=str(scen)), art, "", "")
+    assert not passed, checks
+    assert [c for c in checks if c["check"] == "stereo_parallax_present"]
+
+
+def test_report_records_stereo_kind(td):
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 4))
+    rep = Path(td) / "report.json"
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = xrsim.main(["--evaluate-only", "--artifacts", str(art),
+                         "--report-file", str(rep)])
+    assert rc == 0
+    payload = json.loads(rep.read_text(encoding="utf-8"))
+    assert payload["stereo_kind"]["kind"] == "shift-only", payload["stereo_kind"]
+    assert payload["stereo_kind"]["per_frame"], payload["stereo_kind"]
+
+
 def test_comfort_flags_empty_frame(td):
     p = Path(td) / "test_frame_0001.bmp"
     _save(p, _black())
@@ -395,6 +525,7 @@ def _args(**kw):
         game_dir=kw.get("game_dir"), game_exe=kw.get("game_exe"),
         host_exe=kw.get("host_exe"),
         scenario_immediate=kw.get("scenario_immediate", False),
+        require_parallax=kw.get("require_parallax", False),
         evaluate_only=True, selftest=False)
 
 
@@ -979,6 +1110,11 @@ def main() -> int:
              test_low_contrast_vertical_shift_is_inconclusive,
              test_flat_dark_pair_is_inconclusive_at_boundary,
              test_vertical_disparity_summary_counts,
+             test_shift_only_pair_is_classified, test_parallax_pair_is_classified,
+             test_mono_duplicate_is_classified, test_flat_pair_kind_is_unknown,
+             test_stereo_kind_stats_is_gameplay_authoritative,
+             test_require_parallax_grades_shift_stereo,
+             test_scenario_can_require_parallax, test_report_records_stereo_kind,
              test_boundary_dy_on_a_textured_frame_is_inconclusive,
              test_interior_dy_on_a_textured_frame_fails,
              test_interior_dy_on_a_low_contrast_frame_is_inconclusive,

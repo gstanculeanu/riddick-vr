@@ -4,28 +4,574 @@
     {
       "check": "frame_budget",
       "ok": false,
-      "p50_ms": 96.22,
-      "p95_ms": 106.48,
-      "mean_ms": 55.86,
-      "max_ms": 140.77,
-      "over_budget": 174,
+      "p50_ms": 104.89,
+      "p95_ms": 179.0,
+      "mean_ms": 74.42,
+      "max_ms": 377.92,
+      "over_budget": 369,
       "budget_ms": 11.11111111111111,
-      "detail": "n=330 p50=96.22 p95=106.48 mean=55.86 max=140.77 over=174 budget=11.11",
+      "detail": "n=630 p50=104.89 p95=179.00 mean=74.42 max=377.92 over=369 budget=11.11",
       "group": "frame_budget"
     },
     {
       "check": "scene_advanced",
       "ok": true,
-      "detail": "6/6 distinct frames",
+      "detail": "10/10 distinct frames",
       "group": "capture"
     },
     {
       "check": "both_eyes_non_black",
       "ok": true,
-      "detail": "meanL=86.07 meanR=85.23 -23/0",
+      "detail": "meanL=33.86 meanR=33.86 -12/0",
+      "group": "stereo",
+      "frame": 120,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -12,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -12/0",
+      "group": "stereo",
+      "frame": 120,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -12,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 -12/0",
+      "group": "stereo",
+      "frame": 120,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -12,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-12 -12/0",
+      "group": "stereo",
+      "frame": 120,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -12,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -12/0",
+      "group": "stereo",
+      "frame": 120,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -12,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=81.04 meanR=80.63 -23/0",
+      "group": "stereo",
+      "frame": 240,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -23/0",
+      "group": "stereo",
+      "frame": 240,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 -23/0",
+      "group": "stereo",
+      "frame": 240,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-23 -23/0",
+      "group": "stereo",
+      "frame": 240,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -23/0",
+      "group": "stereo",
+      "frame": 240,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=92 meanR=91.37 -14/0",
+      "group": "stereo",
+      "frame": 300,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -14,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -14/0",
+      "group": "stereo",
+      "frame": 300,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -14,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 -14/0",
+      "group": "stereo",
+      "frame": 300,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -14,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-14 -14/0",
+      "group": "stereo",
+      "frame": 300,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -14,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -14/0",
+      "group": "stereo",
+      "frame": 300,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -14,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=41.72 meanR=41.02 -23/0",
+      "group": "stereo",
+      "frame": 360,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -23/0",
+      "group": "stereo",
+      "frame": 360,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 -23/0",
+      "group": "stereo",
+      "frame": 360,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-23 -23/0",
+      "group": "stereo",
+      "frame": 360,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -23/0",
+      "group": "stereo",
+      "frame": 360,
+      "branch": "gameplay",
+      "stereo_kind": "shift-only",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=4.933 meanR=5.321 -13/0",
+      "group": "stereo",
+      "frame": 420,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 8
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -13/0",
+      "group": "stereo",
+      "frame": 420,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 8
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 -13/0",
+      "group": "stereo",
+      "frame": 420,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 8
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-13 -13/0",
+      "group": "stereo",
+      "frame": 420,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 8
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -13/0",
+      "group": "stereo",
+      "frame": 420,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 8
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=20.73 meanR=20.9 -23/0",
+      "group": "stereo",
+      "frame": 480,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -23/0",
+      "group": "stereo",
+      "frame": 480,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 -23/0",
+      "group": "stereo",
+      "frame": 480,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-23 -23/0",
+      "group": "stereo",
+      "frame": 480,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -23/0",
+      "group": "stereo",
+      "frame": 480,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=29.31 meanR=46.3 -48/8",
+      "group": "stereo",
+      "frame": 540,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -48,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -48/8",
+      "group": "stereo",
+      "frame": 540,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -48,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "skip": true,
+      "detail": "inconclusive: dy=8 [search boundary] -> optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -48/8",
+      "group": "stereo",
+      "frame": 540,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -48,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-48 -48/8",
+      "group": "stereo",
+      "frame": 540,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -48,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -48/8",
+      "group": "stereo",
+      "frame": 540,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -48,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=12.15 meanR=9.767 -12/8",
+      "group": "stereo",
+      "frame": 600,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -12,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -12/8",
+      "group": "stereo",
+      "frame": 600,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -12,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "skip": true,
+      "detail": "inconclusive: dy=8 [search boundary] -> optimum pinned to the +/-8 search edge (offset not quantifiable); the vertical optimum is an estimator artefact (GH #72 req 3) -12/8",
+      "group": "stereo",
+      "frame": 600,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -12,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-12 -12/8",
+      "group": "stereo",
+      "frame": 600,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -12,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -12/8",
+      "group": "stereo",
+      "frame": 600,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -12,
+      "best_dy": 8,
+      "dx_spread_px": 16
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=12.22 meanR=12.22 -13/0",
+      "group": "stereo",
+      "frame": 660,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 4
+    },
+    {
+      "check": "same_eye_resolution",
+      "ok": true,
+      "detail": " -13/0",
+      "group": "stereo",
+      "frame": 660,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 4
+    },
+    {
+      "check": "no_vertical_disparity",
+      "ok": true,
+      "detail": "dy=0 -13/0",
+      "group": "stereo",
+      "frame": 660,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 4
+    },
+    {
+      "check": "horizontal_disparity_present",
+      "ok": true,
+      "detail": "dx=-13 -13/0",
+      "group": "stereo",
+      "frame": 660,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 4
+    },
+    {
+      "check": "not_mono_duplicate",
+      "ok": true,
+      "detail": "identical=False -13/0",
+      "group": "stereo",
+      "frame": 660,
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -13,
+      "best_dy": 0,
+      "dx_spread_px": 4
+    },
+    {
+      "check": "both_eyes_non_black",
+      "ok": true,
+      "detail": "meanL=6.877 meanR=6.846 -23/0",
       "group": "stereo",
       "frame": 720,
-      "branch": "gameplay"
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
     },
     {
       "check": "same_eye_resolution",
@@ -33,7 +579,11 @@
       "detail": " -23/0",
       "group": "stereo",
       "frame": 720,
-      "branch": "gameplay"
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
     },
     {
       "check": "no_vertical_disparity",
@@ -41,7 +591,11 @@
       "detail": "dy=0 -23/0",
       "group": "stereo",
       "frame": 720,
-      "branch": "gameplay"
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
     },
     {
       "check": "horizontal_disparity_present",
@@ -49,7 +603,11 @@
       "detail": "dx=-23 -23/0",
       "group": "stereo",
       "frame": 720,
-      "branch": "gameplay"
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
     },
     {
       "check": "not_mono_duplicate",
@@ -57,219 +615,23 @@
       "detail": "identical=False -23/0",
       "group": "stereo",
       "frame": 720,
-      "branch": "gameplay"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=99.34 meanR=98.73 -14/0",
-      "group": "stereo",
-      "frame": 780,
-      "branch": "gameplay"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -14/0",
-      "group": "stereo",
-      "frame": 780,
-      "branch": "gameplay"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 -14/0",
-      "group": "stereo",
-      "frame": 780,
-      "branch": "gameplay"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": true,
-      "detail": "dx=-14 -14/0",
-      "group": "stereo",
-      "frame": 780,
-      "branch": "gameplay"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": true,
-      "detail": "identical=False -14/0",
-      "group": "stereo",
-      "frame": 780,
-      "branch": "gameplay"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=85.69 meanR=84.82 -23/0",
-      "group": "stereo",
-      "frame": 840,
-      "branch": "gameplay"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -23/0",
-      "group": "stereo",
-      "frame": 840,
-      "branch": "gameplay"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 -23/0",
-      "group": "stereo",
-      "frame": 840,
-      "branch": "gameplay"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": true,
-      "detail": "dx=-23 -23/0",
-      "group": "stereo",
-      "frame": 840,
-      "branch": "gameplay"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": true,
-      "detail": "identical=False -23/0",
-      "group": "stereo",
-      "frame": 840,
-      "branch": "gameplay"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=99.53 meanR=98.92 -14/0",
-      "group": "stereo",
-      "frame": 900,
-      "branch": "gameplay"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -14/0",
-      "group": "stereo",
-      "frame": 900,
-      "branch": "gameplay"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 -14/0",
-      "group": "stereo",
-      "frame": 900,
-      "branch": "gameplay"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": true,
-      "detail": "dx=-14 -14/0",
-      "group": "stereo",
-      "frame": 900,
-      "branch": "gameplay"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": true,
-      "detail": "identical=False -14/0",
-      "group": "stereo",
-      "frame": 900,
-      "branch": "gameplay"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=85.71 meanR=84.86 -23/0",
-      "group": "stereo",
-      "frame": 960,
-      "branch": "gameplay"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -23/0",
-      "group": "stereo",
-      "frame": 960,
-      "branch": "gameplay"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 -23/0",
-      "group": "stereo",
-      "frame": 960,
-      "branch": "gameplay"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": true,
-      "detail": "dx=-23 -23/0",
-      "group": "stereo",
-      "frame": 960,
-      "branch": "gameplay"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": true,
-      "detail": "identical=False -23/0",
-      "group": "stereo",
-      "frame": 960,
-      "branch": "gameplay"
-    },
-    {
-      "check": "both_eyes_non_black",
-      "ok": true,
-      "detail": "meanL=99.47 meanR=98.85 -14/0",
-      "group": "stereo",
-      "frame": 1020,
-      "branch": "gameplay"
-    },
-    {
-      "check": "same_eye_resolution",
-      "ok": true,
-      "detail": " -14/0",
-      "group": "stereo",
-      "frame": 1020,
-      "branch": "gameplay"
-    },
-    {
-      "check": "no_vertical_disparity",
-      "ok": true,
-      "detail": "dy=0 -14/0",
-      "group": "stereo",
-      "frame": 1020,
-      "branch": "gameplay"
-    },
-    {
-      "check": "horizontal_disparity_present",
-      "ok": true,
-      "detail": "dx=-14 -14/0",
-      "group": "stereo",
-      "frame": 1020,
-      "branch": "gameplay"
-    },
-    {
-      "check": "not_mono_duplicate",
-      "ok": true,
-      "detail": "identical=False -14/0",
-      "group": "stereo",
-      "frame": 1020,
-      "branch": "gameplay"
+      "branch": "gameplay",
+      "stereo_kind": "unknown",
+      "best_dx": -23,
+      "best_dy": 0,
+      "dx_spread_px": 0
     },
     {
       "group": "stereo",
       "check": "gameplay_captures_present",
       "ok": true,
-      "detail": "6 gameplay / 0 cinema / 0 unknown of 6"
+      "detail": "10 gameplay / 0 cinema / 0 unknown of 10"
     },
     {
       "group": "capture",
       "check": "gameplay_window_has_content",
       "ok": true,
-      "detail": "0 blank of 6 gameplay frame(s)"
+      "detail": "0 blank of 10 gameplay frame(s)"
     },
     {
       "group": "capture",
@@ -281,7 +643,7 @@
       "group": "capture",
       "check": "capture_metadata_present",
       "ok": true,
-      "detail": "6 frame(s) with camera transform, 6 distinct; HMD yaw span 36.308 deg"
+      "detail": "10 frame(s) with camera transform, 10 distinct; HMD yaw span 39.058 deg"
     },
     {
       "group": "viewmodel",
@@ -293,19 +655,19 @@
     {
       "check": "comfort_vignette_applied",
       "ok": true,
-      "detail": "max=1.000 while moving (threshold 0.050); 989/1050 frame(s) above, 989 locomotion frame(s)",
+      "detail": "max=1.000 while moving (threshold 0.050); 659/720 frame(s) above, 659 locomotion frame(s)",
       "group": "comfort"
     },
     {
       "check": "no_green_chroma_glitch",
       "ok": true,
-      "detail": "0 green px (frame test_frame_1020.bmp)",
+      "detail": "0 green px (frame test_frame_0720.bmp)",
       "group": "comfort"
     },
     {
       "check": "has_content",
       "ok": true,
-      "detail": "rows=2688 cols=2468 (frame test_frame_1020.bmp)",
+      "detail": "rows=2182 cols=1624 (frame test_frame_0720.bmp)",
       "group": "comfort"
     }
   ],
@@ -315,15 +677,15 @@
   "hook_log_scope": "current-run section",
   "markers": {},
   "live_gameplay": {
-    "gameplay": 6,
+    "gameplay": 10,
     "cinema": 0,
     "unknown": 0,
     "blank_gameplay": 0,
-    "distinct_gameplay": 6
+    "distinct_gameplay": 10
   },
   "content_gate": {
     "blank_skipped": 0,
-    "frozen_skipped": 0
+    "frozen_skipped": 1
   },
   "viewmodel_probe": {
     "lines": [],
@@ -332,31 +694,115 @@
     "translates": 0
   },
   "eye_frames": {
-    "count": 6,
-    "distinct": 6,
-    "yaw_span_deg": 36.308
+    "count": 10,
+    "distinct": 10,
+    "yaw_span_deg": 39.058
   },
   "vertical_disparity": {
-    "ok": 6,
-    "inconclusive": 0,
+    "ok": 8,
+    "inconclusive": 2,
     "failed": 0
   },
+  "stereo_kind": {
+    "kind": "shift-only",
+    "frames": 10,
+    "gameplay_frames": 10,
+    "measurable_frames": 4,
+    "tiles_grid": 4,
+    "spread_px_max": 0,
+    "per_frame": [
+      {
+        "frame": 120,
+        "branch": "gameplay",
+        "kind": "shift-only",
+        "dx": -12,
+        "spread_px": 0
+      },
+      {
+        "frame": 240,
+        "branch": "gameplay",
+        "kind": "shift-only",
+        "dx": -23,
+        "spread_px": 0
+      },
+      {
+        "frame": 300,
+        "branch": "gameplay",
+        "kind": "shift-only",
+        "dx": -14,
+        "spread_px": 0
+      },
+      {
+        "frame": 360,
+        "branch": "gameplay",
+        "kind": "shift-only",
+        "dx": -23,
+        "spread_px": 0
+      },
+      {
+        "frame": 420,
+        "branch": "gameplay",
+        "kind": "unknown",
+        "dx": -13,
+        "spread_px": 8
+      },
+      {
+        "frame": 480,
+        "branch": "gameplay",
+        "kind": "unknown",
+        "dx": -23,
+        "spread_px": 0
+      },
+      {
+        "frame": 540,
+        "branch": "gameplay",
+        "kind": "unknown",
+        "dx": -48,
+        "spread_px": 16
+      },
+      {
+        "frame": 600,
+        "branch": "gameplay",
+        "kind": "unknown",
+        "dx": -12,
+        "spread_px": 16
+      },
+      {
+        "frame": 660,
+        "branch": "gameplay",
+        "kind": "unknown",
+        "dx": -13,
+        "spread_px": 4
+      },
+      {
+        "frame": 720,
+        "branch": "gameplay",
+        "kind": "unknown",
+        "dx": -23,
+        "spread_px": 0
+      }
+    ]
+  },
   "comfort_vignette": {
-    "samples": 1050,
+    "samples": 720,
     "max": 1.0,
-    "mean": 0.678,
-    "above": 989,
-    "locomotion": 989,
+    "mean": 0.662,
+    "above": 659,
+    "locomotion": 659,
     "max_locomotion": 1.0,
     "threshold": 0.05
   },
   "host_log": "C:\\Users\\GigelCastel\\riddick-vr\\tests\\xrsim\\artifacts\\host.log",
   "display_branch": {
-    "720": false,
-    "780": false,
-    "840": false,
-    "900": false,
-    "960": false,
-    "1020": false
+    "120": false,
+    "240": false,
+    "300": false,
+    "360": false,
+    "420": false,
+    "480": false,
+    "540": false,
+    "600": false,
+    "660": false,
+    "720": false
   }
 }

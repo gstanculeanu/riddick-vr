@@ -7,6 +7,10 @@ headset), captures BOTH eyes, and asserts:
   * frame-time budget   (host FrameBudget lines),
   * stereo correctness   (left/right eye diff: non-identical, horizontal
                           disparity present, no vertical disparity),
+  * stereo structure     (GH #76: is the disparity one global shift of a
+                          monoscopic capture, or does it vary with depth? The
+                          run is labelled ``stereo_kind`` and
+                          ``--require-parallax`` grades it),
   * display branch       (per-frame cinema-vs-gameplay label: identical eyes are
                           correct on a cinema screen and only a defect when the
                           frame is 3D gameplay -- GH #69),
@@ -231,6 +235,154 @@ MIN_DY_CONTRAST = 25.0
 # landscape just runs to the edge (and is reported inconclusive).
 DY_SEARCH_BOUND = 8
 
+# ------------------------------------------------- shift-only (synthetic) stereo
+# GH #76 (epic #57): the mod's stereo is a *monoscopic* capture blitted to both
+# eyes with a single half-IPD source-rect shift -- `stereo_renderer.cpp` says so
+# verbatim ("monoscopic capture has no IPD parallax"; the only per-eye difference
+# is `+/-halfIpdPx` on the blit source rect). One global horizontal shift
+# therefore explains *every* region of the pair, so the disparity map is flat:
+# there is no depth-dependent parallax to see. The existing stereo gates only
+# assert that a horizontal disparity exists and that the eyes are not
+# byte-identical, which a pure shift satisfies -- so "stereo correct" was never
+# actually tested. The measurement below tests the *structure* of the
+# disparity:
+#   * tile the interior and re-align each tile locally around the global best dx;
+#   * a shift-only pair has ~zero spread across the tiles (measured on the
+#     shipped gameplay capture: 12/12 tiles agree exactly, spread 0 px, on every
+#     retained frame);
+#   * a genuine per-eye view has depth-dependent disparity, so the per-tile
+#     shifts differ.
+# Verified against the committed `tests/xrsim/artifacts` pair, not inferred.
+PARALLAX_TILE_GRID = 4          # 4x4 interior tiles
+PARALLAX_TILE_MIN_STD = 3.0     # skip flat tiles (no texture to align on)
+PARALLAX_TILE_SEARCH_PX = 8     # local search either side of the global dx (full-res px)
+PARALLAX_TILE_MIN = 6           # fewer textured tiles than this => inconclusive
+SHIFT_ONLY_SPREAD_PX = 2        # <= this much spread => one global shift (no parallax)
+PARALLAX_MIN_SPREAD_PX = 6      # >= this much spread => depth-dependent disparity
+
+
+def tile_disparities(L, R, best_dx, downscale=1, grid=PARALLAX_TILE_GRID,
+                     search_px=PARALLAX_TILE_SEARCH_PX):
+    """Per-tile best horizontal shift around the global alignment.
+
+    ``L``/``R`` are the (already downsampled) luminance arrays, ``best_dx`` the
+    global best shift in downsampled pixels. Returns ``(tiles, skipped)`` where
+    ``tiles`` is the list of per-tile shifts in **full-resolution** pixels and
+    ``skipped`` counts the flat tiles excluded for lack of texture. A shift-only
+    pair returns near-identical entries; a genuine stereo pair does not.
+    """
+    np, _ = image_deps()
+    ds = max(1, int(downscale))
+    h, w = L.shape
+    s = max(1, int(round(search_px / ds)))
+    # Inset the grid by the local search radius so every candidate shift stays in
+    # bounds for every tile (a tile flush against an edge can only search one
+    # way, which would fake a disparity spread).
+    y_lo, y_hi = s, h - s
+    x_lo, x_hi = s, w - s
+    th, tw = (y_hi - y_lo) // grid, (x_hi - x_lo) // grid
+    if th < 8 or tw < 8:
+        return [], 0
+    gdx = int(round(best_dx))
+    tiles, skipped = [], 0
+    for gy in range(grid):
+        for gx in range(grid):
+            y0 = y_lo + gy * th
+            y1 = y0 + th
+            x0 = x_lo + gx * tw
+            x1 = x0 + tw
+            ref = L[y0:y1, x0:x1]
+            if float(ref.std()) < PARALLAX_TILE_MIN_STD:
+                skipped += 1
+                continue
+            best, best_mse = None, float("inf")
+            for dx in range(gdx - s, gdx + s + 1):
+                rx0, rx1 = x0 + dx, x1 + dx
+                if rx0 < 0 or rx1 > w:
+                    continue
+                mse = float(np.mean((ref - R[y0:y1, rx0:rx1]) ** 2))
+                if mse < best_mse:
+                    best, best_mse = dx, mse
+            if best is not None:
+                tiles.append(best * ds)
+    return tiles, skipped
+
+
+def classify_stereo_kind(metrics):
+    """Classify one eye pair as ``parallax`` / ``shift-only`` / ``mono`` / ``unknown``.
+
+    Pure (reads only the ``stereo_metrics`` dict) so it is testable without
+    numpy/Pillow. ``shift-only`` means a single global horizontal shift explains
+    the whole pair -- the current monoscopic-blit implementation -- while
+    ``parallax`` means the per-tile disparity actually varies with depth.
+    """
+    if not metrics or metrics.get("read_error"):
+        return "unknown"
+    if metrics.get("identical"):
+        return "mono"
+    if metrics.get("best_dx") is None or metrics.get("best_dy") is None:
+        return "unknown"
+    if metrics.get("dy_at_boundary"):
+        return "unknown"
+    # GH #72 req 3's confidence rule, reused: a flat frame has no texture to
+    # align on, so its per-tile shifts are estimator noise, not a measurement.
+    contrast = metrics.get("contrast")
+    if contrast is not None and contrast < MIN_DY_CONTRAST:
+        return "unknown"
+    tiles = metrics.get("tiles_used") or 0
+    spread = metrics.get("dx_spread_px")
+    if tiles < PARALLAX_TILE_MIN or spread is None:
+        return "unknown"
+    if spread <= SHIFT_ONLY_SPREAD_PX:
+        return "shift-only"
+    if spread >= PARALLAX_MIN_SPREAD_PX:
+        return "parallax"
+    return "unknown"
+
+
+def stereo_kind_stats(checks):
+    """Aggregate the per-frame ``stereo_kind`` labels into a run-level verdict.
+
+    Reads the ``stereo_kind`` the stereo checks carry (attached in
+    :func:`evaluate`). Gameplay frames are authoritative: a cinema frame is
+    *deliberately* a flat, shift-free blit (GH #69), so it is counted but not
+    used to call the run. Unmeasurable frames (``unknown``: too dark/flat,
+    unaligned) are recorded but excluded from the verdict, so a dark stretch
+    cannot turn a shift-only run into a false "mixed". The result is reported but
+    never changes the verdict by itself -- `--require-parallax` turns it into a
+    graded check.
+    """
+    frames = []
+    seen = set()
+    for c in checks:
+        k = c.get("stereo_kind")
+        if k is None:
+            continue
+        frame = c.get("frame")
+        if frame in seen:
+            continue
+        seen.add(frame)
+        frames.append({"frame": frame, "branch": c.get("branch"),
+                       "kind": k, "dx": c.get("best_dx"),
+                       "spread_px": c.get("dx_spread_px")})
+    gameplay = [f for f in frames if f["branch"] == "gameplay"]
+    used = gameplay or frames
+    usable = [f for f in used if f["kind"] != "unknown"]
+    kinds = [f["kind"] for f in usable]
+    if not kinds:
+        run_kind = "unknown"
+    elif all(k == "parallax" for k in kinds):
+        run_kind = "parallax"
+    elif all(k in ("shift-only", "mono") for k in kinds):
+        run_kind = "shift-only"
+    else:
+        run_kind = "mixed"
+    spreads = [f["spread_px"] for f in usable if f["spread_px"] is not None]
+    return {"kind": run_kind, "frames": len(frames), "gameplay_frames": len(gameplay),
+            "measurable_frames": len(kinds), "tiles_grid": PARALLAX_TILE_GRID,
+            "spread_px_max": (max(spreads) if spreads else None),
+            "per_frame": frames}
+
 
 def _best_align(L, R, y0, y1, x0, x1, search):
     """Best ``(dx, dy, mse)`` aligning the ``L`` crop ``[y0:y1, x0:x1]`` into ``R``.
@@ -264,6 +416,12 @@ def stereo_metrics(left_path: Path, right_path: Path, search=48, downscale=1):
     stddev) and ``dy_at_boundary`` (whether the vertical optimum sits on the
     search edge, i.e. cannot be quantified). The mod is a monoscopic blit with an
     IPD shift, so a correct frame has a small horizontal dx and ~zero dy.
+
+    GH #76: also measures the *structure* of the disparity -- ``local_dx``
+    (per-tile best shifts, full-res px), ``tiles_used``/``tiles_skipped`` and
+    ``dx_spread_px`` (max-min of ``local_dx``). A single global shift (the
+    current monoscopic blit) gives a flat map; a per-eye render does not. See
+    :func:`classify_stereo_kind`.
 
     ``downscale`` (integer >= 1) block-subsamples both images before the search
     so multi-megapixel eye buffers can be analysed quickly; dx/dy are then in
@@ -309,6 +467,13 @@ def stereo_metrics(left_path: Path, right_path: Path, search=48, downscale=1):
     out["dy_at_boundary"] = abs(best[1]) == DY_SEARCH_BOUND
     # "Identical" = zero shift with a tiny residual (mono duplication).
     out["identical"] = (best[0] == 0 and best[1] == 0 and best[2] < 0.5)
+    # GH #76: is the disparity a single global shift, or does it vary with depth?
+    tiles, skipped = tile_disparities(L, R, best[0], downscale=ds)
+    out["local_dx"] = tiles
+    out["tiles_used"] = len(tiles)
+    out["tiles_skipped"] = skipped
+    out["dx_spread_px"] = (max(tiles) - min(tiles)) if tiles else None
+    out["stereo_kind"] = classify_stereo_kind(out)
     return out
 
 
@@ -920,6 +1085,9 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
             _, sub = assert_stereo(m, require_disparity=args.require_disparity)
             for c in sub:
                 rec = {**c, "group": "stereo", "frame": n, "branch": branch_name,
+                       "stereo_kind": m.get("stereo_kind"),
+                       "best_dx": m.get("best_dx"), "best_dy": m.get("best_dy"),
+                       "dx_spread_px": m.get("dx_spread_px"),
                        "detail": f"{c['detail']} {m.get('best_dx')}/{m.get('best_dy')}"}
                 # GH #69: on a cinema screen the renderer deliberately blits the
                 # same source rect to both eyes ("flat screen: no IPD shift"), so
@@ -955,6 +1123,33 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
                            "ok": True, "skip": True,
                            "detail": (f"no {DISPLAY_LABEL_FILE}: per-frame display "
                                       "branch unknown (legacy capture or pre-label host)")})
+    # GH #76 (epic #57): the mod's gameplay stereo is a monoscopic capture
+    # blitted with ONE global horizontal shift, so the per-tile disparity spread
+    # is zero -- no parallax (measured: 12/12 tiles agree on every retained
+    # frame). The default run reports the structure as `stereo_kind` but does not
+    # fail on it (the shift *is* the current, documented interim design).
+    # `--require-parallax` (or a scenario's `"require_parallax": true`) makes it a
+    # graded requirement -- the acceptance instrument for GH #76.
+    require_parallax = bool(getattr(args, "require_parallax", False))
+    if (not require_parallax) and args.scenario and Path(args.scenario).is_file():
+        try:
+            require_parallax = bool(json.loads(
+                Path(args.scenario).read_text(encoding="utf-8")).get("require_parallax"))
+        except (ValueError, OSError):
+            require_parallax = False
+    if require_parallax:
+        kinds = stereo_kind_stats(checks)
+        ok_parallax = kinds["kind"] == "parallax"
+        checks.append({"group": "stereo", "check": "stereo_parallax_present",
+                       "ok": ok_parallax,
+                       "detail": (f"stereo_kind={kinds['kind']} "
+                                  f"(gameplay frames={kinds['gameplay_frames']}, "
+                                  f"max per-tile disparity spread="
+                                  f"{kinds['spread_px_max']}); shifted-only eyes "
+                                  "have no parallax (GH #76)")
+                       if not ok_parallax else
+                       (f"stereo_kind=parallax (per-tile disparity spread "
+                        f"{kinds['spread_px_max']})")})
     # GH #71 requirement 1: a `--reach-gameplay` run asserts it actually reached a
     # full-bleed 3D scene. The *structural* proof is the hook's BarScan active
     # rect (the letterboxed startup splash is ~0.36 of the window; gameplay fills
@@ -1063,7 +1258,8 @@ def cmd_selftest(require_image_deps=False):
 
     skipped = []
     if not have_image_deps():
-        skipped = ["shifted_pair_passes", "identical_pair_fails"]
+        skipped = ["shifted_pair_passes", "identical_pair_fails",
+                   "shift_only_pair_classified", "parallax_pair_classified"]
     else:
         np, Image = image_deps()
         import tempfile
@@ -1081,6 +1277,18 @@ def cmd_selftest(require_image_deps=False):
         ok_dup, _ = assert_stereo(m2, require_disparity=True)
         results["shifted_pair_passes"] = ok_shift
         results["identical_pair_fails"] = (not ok_dup)
+        # GH #76: a single global shift is `shift-only`; a per-column disparity
+        # ramp (depth-varying) is `parallax`.
+        results["shift_only_pair_classified"] = (m.get("stereo_kind") == "shift-only")
+        h, w = base.shape[:2]
+        ramp = np.empty_like(base)
+        for x in range(w):
+            d = int(round(2 + 16.0 * x / max(1, w - 1)))
+            ramp[:, x] = base[:, (x - d) % w]
+        Image.fromarray(ramp).save(tmp / "right_0003.bmp")
+        Image.fromarray(base).save(tmp / "test_frame_0003.bmp")
+        m3 = stereo_metrics(tmp / "test_frame_0003.bmp", tmp / "right_0003.bmp", search=24)
+        results["parallax_pair_classified"] = (m3.get("stereo_kind") == "parallax")
 
     allok = all(results.values())
     for k, v in results.items():
@@ -1126,6 +1334,7 @@ def cmd_evaluate_only(args):
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
+                        "stereo_kind": stereo_kind_stats(checks),
                         "comfort_vignette": parse_comfort(host_text),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
@@ -1145,6 +1354,11 @@ def main(argv=None):
                          "against it (max/drops are still reported; GH #68/ADR-0455)")
     ap.add_argument("--no-require-disparity", dest="require_disparity",
                     action="store_false")
+    ap.add_argument("--require-parallax", action="store_true",
+                    help="grade the stereo structure: the eyes must be a real "
+                         "per-eye render (depth-varying disparity), not one global "
+                         "shift of a monoscopic capture (GH #76); a scenario may "
+                         "set \"require_parallax\": true instead")
     ap.add_argument("--downscale", type=int, default=1,
                     help="block-subsample eye images by this factor (speed)")
     ap.add_argument("--dump-branch", choices=("gameplay", "any"), default="gameplay",
@@ -1217,6 +1431,7 @@ def main(argv=None):
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
+                        "stereo_kind": stereo_kind_stats(checks),
                         "comfort_vignette": parse_comfort(host_log),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})

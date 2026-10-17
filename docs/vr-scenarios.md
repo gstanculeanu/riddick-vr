@@ -119,6 +119,23 @@ rate, so a one-off level-load hitch (~760 ms) dominates `max_ms`/`mean_ms`
 without being a sustained 90 Hz regression (ADR-0455). `max_ms` and the drop
 count are still *reported* so a real stall stays visible.
 
+**Stereo structure (GH #76, ADR-0461):** the gameplay stereo is *not* native. The
+hook captures **one** backbuffer and blits it to both eyes with a single
+`±(halfIpdPx + comfortPx)` source-rect shift (`src/hook/stereo_renderer.cpp:932-960`,
+verbatim *"monoscopic capture has no IPD parallax"*), so the two eyes are related
+by **one global horizontal translation** and the scene has no depth-dependent
+parallax. The old gates (`horizontal_disparity_present`, `not_mono_duplicate`)
+pass on such a pair, which is why the gap was invisible. `tools/xrsim.py` now
+re-aligns a `4x4` interior grid of tiles locally and reports the disparity
+*structure* as the `stereo_kind` report key (`parallax` / `shift-only` / `mono` /
+`unknown`, with `spread_px_max` and `per_frame`). Measured on the shipped build:
+**every textured tile agrees (spread 0 px)** on every bright gameplay frame, so
+the run is labelled `shift-only`. `--require-parallax` (or a scenario's
+`"require_parallax": true`) turns that into the graded check
+`stereo_parallax_present` — it fails on a globally-shifted pair and is the
+acceptance instrument for GH #76. It is **off by default** (the shift is the
+current documented interim), so a default run's verdict is unchanged.
+
 **Comfort (GH #68 requirement 5, ADR-0456):** the mock host reads the
 hook-published locomotion comfort level (`comfortVignette`) back every frame and
 prints a `[Mock Host] ComfortVignette ...` summary carrying the max level reached

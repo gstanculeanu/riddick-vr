@@ -504,8 +504,34 @@ def main():
             "GH #73: XRSIM eye captures must stay untracked, guarded by "
             "tools/verify_test_artifacts.py and run in the CI lane")
 
+    # GH #76 (epic #57 definition-of-done item 1): the mod's gameplay stereo is a
+    # *monoscopic* capture blitted to both eyes with one global horizontal shift
+    # (stereo_renderer.cpp: "monoscopic capture has no IPD parallax"), so there is
+    # no depth-dependent parallax -- yet the old gates only asserted *a* disparity
+    # exists and the eyes are not byte-identical, both of which a pure shift
+    # satisfies. The harness now measures the *structure* (per-tile disparity
+    # spread): `stereo_kind` labels every run and `--require-parallax` grades it.
+    # Without this the gap is invisible and "stereo correct" can be claimed for a
+    # flat, shifted pair.
+    require("def tile_disparities" in xrsim_tool and
+            "def classify_stereo_kind" in xrsim_tool and
+            "def stereo_kind_stats" in xrsim_tool and
+            "PARALLAX_MIN_SPREAD_PX" in xrsim_tool and
+            "SHIFT_ONLY_SPREAD_PX" in xrsim_tool and
+            "stereo_parallax_present" in xrsim_tool and
+            '"--require-parallax"' in xrsim_tool and
+            '"stereo_kind"' in xrsim_tool and
+            "require_parallax" in xrsim_tool and
+            "test_shift_only_pair_is_classified" in _xrsim_tests and
+            "test_parallax_pair_is_classified" in _xrsim_tests and
+            "test_require_parallax_grades_shift_stereo" in _xrsim_tests and
+            "test_scenario_can_require_parallax" in _xrsim_tests,
+            "GH #76: XRSIM must measure whether the stereo disparity is one "
+            "global shift (monoscopic blit) or depth-varying parallax, report it "
+            "as stereo_kind, and grade it with --require-parallax")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75)")
+          "#62, #64-68, #69, #71-73, #75-76)")
     return 0
 
 
