@@ -59,13 +59,18 @@ Durable, human-readable state written by each scheduled wake. Newest at top.
   current build is exercised (`deployed_hook_matches_build` PASS, 9 gameplay
   frames, `comfort_vignette_applied` PASS `max=1.000` on 230/240 moving frames,
   `eye_views_scene_faithful` PASS) but its `input_bridge` key was empty because
-  its hook log never appeared (see the blocker). **Tightened build, 53 s,
-  isolated `--shadow-dir`:** the deferred-init report printed the summary itself
-  — `summary route=both polls=0 taps=0 keyboardPolls=0 keyboardTaps=0
-  lastRealResult=none createDevicePatched=0 keyboardWrapped=0 getProcCalls=90
-  inputProcRequests=2 procs[XInputGetState:owned,DirectInputCreateA:owned]` — so
-  `polls=0` is now a *reported value*, not an absent line (the blind spot a fixed
-  cadence would have had).
+  its hook log never appeared (see the blocker). **Tightened build, isolated
+  `--shadow-dir`, 120 s, `--require-fresh-hook`: XRSIM RESULT PASS** (1058 checks,
+  0 FAIL; 209 gameplay captures, `gameplay_full_bleed_reached` PASS fill 1.00,
+  `comfort_vignette_applied` PASS `max=1.000` on 27749/27810 moving frames,
+  `capture_gate_matches_saved` PASS 209/209, `eye_views_scene_faithful` PASS;
+  hook `sha256 49643de93128` = the repo build). Its deferred-init report printed
+  the summary itself — `summary route=both polls=0 taps=0 keyboardPolls=0
+  keyboardTaps=0 lastRealResult=none createDevicePatched=0 keyboardWrapped=0
+  getProcCalls=90 inputProcRequests=2 procs[XInputGetState:owned,
+  DirectInputCreateA:owned]` — so `polls=0` is now a *reported value*, not an
+  absent line (the blind spot a fixed cadence would have had), and the run that
+  says "never polled" is also the run that reaches the live 3D state.
 - **Decisive finding:** fabricating the confirm on the engine's DirectInput/XInput
   read path cannot advance the splash — this session's engine **resolves those
   procs and never polls them**. The reach must therefore come from another
