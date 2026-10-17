@@ -2,6 +2,56 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 57 — 2026-10-17 19:49 (scheduled loop)
+- **Unit:** GH **#73 requirement 3** — add a guard so the large XRSIM eye-capture
+  BMPs cannot be silently re-added to git, and record the decision in an ADR.
+  Tooling + docs only; **no C++/asset change, no build, no deploy**.
+- **Why this unit:** #73 was the newest open item whose remaining requirements
+  were all offline/loop-safe (no deploy). Requirement 1 (`git rm --cached`,
+  `20b6995`) and requirement 2 (`report.json` regenerated from a live
+  `--reach-gameplay` run during the #74 reconciliation, wakes 52–53) are already
+  on `main`; only req 3 remained. It is also the top-of-list #68/#73 harness
+  hygiene work that the standing ladder names when no deploy is possible.
+- **Change:**
+  - `tools/verify_test_artifacts.py` (new, dependency-free, headless): FAILS
+    (exit 1) unless (a) `git ls-files tests/xrsim/artifacts` is empty — no
+    capture tracked, any extension; (b) `.gitignore` still excludes
+    `tests/xrsim/artifacts/`; (c) `tests/xrsim/report.json` exists and is valid
+    JSON (the diffable live baseline). SKIPs with exit 0 when git is absent or
+    the tree is not a work tree, so a lean runner is never broken.
+  - `.github/workflows/vr-worker.yml`: new CI step "XRSIM eye captures stay
+    untracked (GH #73)" running the guard, right after the GH #68 XRSIM step.
+  - `tools/verify_reported_fixes.py`: a GH #73 invariant (guard exists + consults
+    `git ls-files`; `.gitignore` rule present; CI lane invokes it), and the
+    summary line now reads `#71-73`.
+  - `docs/adr/0460-xrsim-eye-captures-untracked.md` (new): context (26 BMPs /
+    665 MB / **3 unique blobs** committed by `b97c4a8` before the ignore rule),
+    decision (captures are evidence, only `report.json` is committed; a guard +
+    invariant make a re-add loud), consequences.
+  - `docs/vr-scenarios.md`: an "Artifacts (GH #73, ADR-0460)" note in the XRSIM
+    section.
+- **Evidence:** `python tools/verify_test_artifacts.py` → exit 0 at HEAD.
+  **Positive control:** `git add -f tests/xrsim/artifacts/right_0720.bmp` then the
+  guard → **exit 1** naming the path (then `git rm --cached` restored; tree
+  clean). `verify_reported_fixes.py` (with the new invariant) PASS;
+  `scenario_tests.py --check` → `manifest valid (8 test cases, 12 scripted
+  profiles, 1 observation-only)` exit 0; `verify_hook_init` + `validate_addresses`
+  PASS; all 10 `tools/test_*.py` PASS; `xrsim.py --selftest` PASS. Confirmed the
+  committed `tests/xrsim/report.json` is the live union baseline (`mode=run`, 40
+  checks, single FAIL = the known sim-install `frame_budget` at ~10 FPS), i.e.
+  #73 req 2 is satisfied. Commit `176f4fe` (guard + wiring + ADR) then this
+  state commit.
+- **Blocker / honest limit:** none for this unit. The loop-wide deploy gate is
+  unchanged (#67 step 3, #72 req 1 A/B, #68 req 5 `comfort_vignette_applied`
+  snap-turn/recenter + HUD-clipping all still need one interactive hook deploy,
+  which this loop must not perform).
+- **Next:** with #73 req 1/2/3 all landed, #73 is code-complete (can be closed
+  once the ADR-0460 decision is accepted). Remaining offline candidates: a fresh
+  #68 slice needs hook signals (snap-turn/recenter, gross HUD clipping) so it is
+  deploy-gated; otherwise the top deploy-gated item is #67 step 3
+  (`DriveEngineViewmodel=1` + `ViewmodelObserve=1`). #64/#61 native-hand passes
+  also want a headset.
+
 ## Wake 56 — 2026-10-17 19:34 (scheduled loop)
 - **Unit:** GH **#72 requirement 1** — the published display branch
   (`cinemaMode`) labelled the engine's **static 2D startup pages** (legal/ESRB)
