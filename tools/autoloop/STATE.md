@@ -2,6 +2,74 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 56 — 2026-10-17 19:34 (scheduled loop)
+- **Unit:** GH **#72 requirement 1** — the published display branch
+  (`cinemaMode`) labelled the engine's **static 2D startup pages** (legal/ESRB)
+  as `FULL-BLEED gameplay`, so the XRSIM gameplay-only dump gate and the
+  per-frame stereo skip graded a frozen splash. Implemented the fix shape the
+  issue itself records (ADR-0458-era note): a **cold-start full-bleed latch**
+  driven by the hook's own `BarScan` active-rect fill, behind a **default-off**
+  INI knob. Hook C++ + config + tests/tools/docs; **no deploy, no game/asset
+  change**.
+- **Why this unit:** it is the *last open requirement* of #72 and #48 called it
+  "the top remaining item" of the #68 iteration vehicle; the standing prompt
+  ranks #68 (iteration vehicle) above the player-visible hand items, and
+  #67 step 3 / #64 / #61 / #65 / #62 / #63 are all hook changes whose live
+  validation needs one interactive deploy this loop must not perform. The
+  ladder is now: #72.1 (this) → the same deploy.
+- **Change:**
+  - `src/hook/display_branch.h` (new, pure/dependency-free):
+    `ComputeDisplayBranch(has3d, menuCursor, activeFill, haveFill, cfg, state)`.
+    Decisive thresholds `fullBleedFill=0.90` / `letterboxFill=0.75` with a *hold
+    band* between them (the smoothed scan cannot flicker the branch). The
+    `fullBleedSeen` latch is set only by a **3D, non-menu** full-bleed frame and
+    is never reset, so the demotion fires only *cold-start* — GH #44 (real
+    gameplay with engine-baked bars) is unaffected after the first gameplay
+    frame. Legacy signals (`!Has3DThisFrame`, sustained menu cursor) unchanged.
+  - `src/hook/stereo_renderer.cpp`: the branch decision is now
+    `ComputeDisplayBranch(...)`. With the latch **on** the BarScan rect is
+    measured *before* the decision and in *every* frame (otherwise a demoted
+    page would stop scanning and latch forever — the reason the naive fix would
+    hang); with it **off** the scan stays exactly where it was (gameplay branch
+    only) and the verdict is byte-for-byte the legacy one. The `DisplayMode`
+    line gains `latch= fill= fullBleed=` for the live A/B.
+  - `vr_config.{h,cpp}` + `riddick_vr.ini` + `tools/riddick_vr.ini.example`:
+    `DisplayBranchColdStartLatch` (default 0) parsed/logged/documented.
+  - `tests/display_branch_tests.cpp` (new) + CTest
+    `display_branch_cold_start_latch` (x86 **and** x64): latch-off legacy;
+    no-fill legacy; splash demoted; splash never sets the latch; first
+    full-bleed latches and later bars stay gameplay (#44); hold band; in-between
+    fill does not demote without a prior verdict; non-3D/menu never latch.
+  - `tools/verify_reported_fixes.py`: the #43 invariant updated to the helper
+    call, plus a new GH #72 req-1 invariant (helper + knob + shipped INI +
+    test wired).
+  - `docs/adr/0459-display-branch-cold-start-latch.md` (new); `src/hook/README.md`
+    section; `docs/vr-scenarios.md` #72 note annotated as **addressed**.
+- **Evidence (offline):** `build-all.ps1 -Config Release` OK (x64 host + x86
+  `opengl32.dll`; **no `-Deploy`**); CTest **20/20 PASS on x64 AND x86** (new
+  `display_branch_cold_start_latch`); all 10 `tools/test_*.py` PASS;
+  `xrsim.py --selftest` PASS; `validate_addresses` + `verify_hook_init` +
+  `verify_reported_fixes` + `scenario_tests.py --check` (8 test cases, 12
+  scripted profiles, 1 observation-only) PASS. Commit `8f4d824`.
+- **Blocker / honest limit:** the change is **hook-side and off by default**, so
+  it cannot be live-validated by this loop (the sim install's hook is the 12:47
+  build; deploying is a hard rule). No live run was attempted *because* it would
+  exercise the stale hook, not this code. The one live A/B owed: set
+  `DisplayBranchColdStartLatch=1`, run
+  `python tools/xrsim.py --reach-gameplay --duration 60`, and confirm from
+  `display_branch.log` + `DisplayMode: ... latch=1 fill=.. fullBleed=..` that the
+  splash pages are cinema and every retained frame is full-bleed gameplay, and
+  whether a pre-gameplay full-bleed page sets the latch early (the documented
+  failure mode). Thresholds 0.90/0.75 are empirical (splash 0.31-0.36 vs
+  gameplay 1.00).
+- **Next:** #72 is now code-complete (req 2 + req 3 landed earlier, req 1 here)
+  pending that deploy. Remaining deploy-gated ladder, in priority order:
+  #67 steps 3-4 (`DriveEngineViewmodel=1` + `ViewmodelObserve=1`), #64/#61
+  headset passes, #65/#62 threshold validation, `comfort_vignette_applied`. If
+  no deploy is possible, the next offline candidates are #73 req 3 (guard the
+  XRSIM BMPs against re-tracking + ADR) or a fresh #68 slice (snap-turn/recenter
+  + gross HUD clipping need hook signals).
+
 ## Wake 55 — 2026-10-17 19:22 (scheduled loop)
 - **Unit:** GH **#75** — `python tools/scenario_tests.py --check` (the CI scenario
   lane *and* the loop's own validation step) was **red on `main`**: `hands_view.json`
