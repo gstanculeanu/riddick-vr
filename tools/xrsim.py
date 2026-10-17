@@ -176,6 +176,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2168,6 +2169,16 @@ def main(argv=None):
                          "hook-side sim bridge")
     ap.add_argument("--host-exe", default=None,
                     help="riddickvr-host.exe (env RIDDICKVR_HOST_EXE)")
+    ap.add_argument("--shadow-install", default=None, metavar="SOURCE_ROOT",
+                    help="run against a read-only *shadow* of a real install so the "
+                         "loader picks the repo-built hook (GH #81): Content*/System "
+                         "GL+Sound are directory junctions to SOURCE_ROOT, the program "
+                         "dir is real copies with the built hook in the hook slot. "
+                         "Nothing is written to the install. Sets --game-dir, so "
+                         "--require-fresh-hook can finally grade a live run")
+    ap.add_argument("--shadow-dir", default=None,
+                    help="scratch directory for --shadow-install "
+                         "(default %%TEMP%%\\riddickvr-shadow)")
     ap.add_argument("--built-hook", default=None,
                     help="path to the repo-built hook compared against the "
                          "deployed one (default dist\\opengl32.dll; env "
@@ -2222,6 +2233,25 @@ def main(argv=None):
               "(pip install numpy pillow)", file=sys.stderr)
         return 2
 
+    # GH #81: an opt-in read-only shadow install. The loader resolves
+    # `opengl32.dll` from the executable's directory, so mirroring the install
+    # with junctions + a real program dir (and the repo build in the hook slot)
+    # makes a live run exercise *current source* without writing to the install.
+    if args.shadow_install:
+        import shadow_install
+        shadow_dest = (Path(args.shadow_dir) if args.shadow_dir
+                       else Path(tempfile.gettempdir()) / "riddickvr-shadow")
+        built = Path(args.built_hook) if args.built_hook else BUILT_HOOK
+        manifest = shadow_install.build_shadow(args.shadow_install, shadow_dest, built)
+        args.shadow_manifest = manifest
+        args.game_dir = manifest["game_dir"]
+        if not args.game_exe:
+            args.game_exe = manifest["game_exe"]
+        print("[xrsim] " + shadow_install.format_shadow(manifest))
+        if not manifest["fresh"]:
+            print("[xrsim] WARNING: the shadow's hook does not match the build "
+                  "-- --require-fresh-hook will fail", file=sys.stderr)
+
     artifacts = Path(args.artifacts) if args.artifacts else DEFAULT_ARTIFACTS
     report = Path(args.report_file) if args.report_file else DEFAULT_REPORT
     host_log, log_mark, menu_stats = run_sim(args, artifacts)
@@ -2258,6 +2288,7 @@ def main(argv=None):
                             getattr(args, "sim_confirm_hold_ms", None)) or None,
                         "deployed_hook": deployed_hook_identity(
                             game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
+                        "shadow": getattr(args, "shadow_manifest", None),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

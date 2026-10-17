@@ -244,6 +244,21 @@ on the deploy-gated ladder (#71/#72/#76/#79/#80). Measured 2026-10-18: the
 deployed hook was `479232 B sha256 8514d35a…` vs the build
 `488448 B sha256 14867cf3…`, i.e. a run grades a ~11 h older hook.
 
+**Shadow install (GH #81, ADR-0471):** `--shadow-install <install-root>` mirrors a
+real install **read-only** into a scratch tree — `Content*` and
+`System\GL|Sound` are directory **junctions** (no admin, cross-volume), the
+program directory `System\Win32_x86` becomes **real copies**, and the repo-built
+`dist\opengl32.dll` is dropped into the hook slot. Because the loader resolves
+`opengl32.dll` from the executable's directory, the game then runs the **current**
+hook while every asset still resolves through the junction to the untouched
+install. `--shadow-dir` overrides the scratch location (default
+`%TEMP%\riddickvr-shadow`) and the report carries a `shadow` key. This makes
+`--require-fresh-hook` satisfiable without the forbidden deploy: measured
+2026-10-18, `--shadow-install … --require-fresh-hook` **PASSED**, and the
+previously deploy-gated `comfort_vignette_applied` went **PASS** (`max=1.000`)
+where the stale-hook baseline was `max=0.000`; the install hashed byte-identical
+before and after four runs.
+
 **Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
 `tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and
 stay untracked — `.gitignore` excludes the directory and only the small,

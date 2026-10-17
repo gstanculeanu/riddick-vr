@@ -62,6 +62,8 @@ jobs:
           python -m pip install --quiet --disable-pip-version-check numpy pillow
           python tools/test_xrsim.py
           python tools/xrsim.py --selftest
+      - name: Shadow-install tests (GH #81, run current hook read-only)
+        run: python tools/test_shadow_install.py
       - name: XRSIM eye captures stay untracked (GH #73)
         run: python tools/verify_test_artifacts.py
       - name: Hook-init regression test (GH #42)

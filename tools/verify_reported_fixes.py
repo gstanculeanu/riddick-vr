@@ -778,6 +778,33 @@ def main():
             "the opt-in `--require-fresh-hook` gate so a deploy-gated result "
             "cannot be attributed to the wrong build")
 
+    # GH #81 follow-up (wake 70): identifying the hook is not enough -- the loop
+    # still could not make a live run exercise current source without the
+    # forbidden deploy. The read-only *shadow install* mirrors a real install
+    # (junctions for the bulk, real copies for the program directory) and drops
+    # the repo build into the hook slot, so `--require-fresh-hook` is now
+    # satisfiable offline and nothing is written to the install.
+    shadow_tool = (ROOT / "tools/shadow_install.py").read_text(encoding="utf-8")
+    shadow_tests = (ROOT / "tools/test_shadow_install.py").read_text(encoding="utf-8")
+    require("def shadow_plan" in shadow_tool and
+            "def build_shadow" in shadow_tool and
+            "def shadow_manifest" in shadow_tool and
+            "def format_shadow" in shadow_tool and
+            "mklink" in shadow_tool and
+            "opengl32.dll" in shadow_tool and
+            "--shadow-install" in xrsim_tool and
+            "--shadow-dir" in xrsim_tool and
+            '"shadow"' in xrsim_tool and
+            "test_build_shadow_routes_hook_and_mirrors_assets" in shadow_tests and
+            "test_build_is_idempotent_and_never_writes_the_source" in shadow_tests and
+            "test_manifest_flags_a_stale_hook" in shadow_tests and
+            (ROOT / "docs/adr/0471-xrsim-shadow-install-read-only-hook-"
+                    "validation.md").exists(),
+            "GH #81: a live XRSIM run must be able to exercise the current hook "
+            "build without deploying -- the read-only shadow install (junctions + "
+            "real program dir + the repo hook) and its `--shadow-install` route "
+            "must exist, be unit-tested, and be recorded")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
           "#62, #64-68, #69, #71-73, #75-81)")
     return 0

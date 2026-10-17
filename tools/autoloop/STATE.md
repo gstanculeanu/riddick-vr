@@ -2,6 +2,73 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 70 — 2026-10-18 00:39 (scheduled loop)
+- **Unit:** GH **#81 follow-up — BROKE THE DEPLOY GATE**: a live XRSIM run can now
+  exercise the **current** hook build with **zero writes to the game install**, via
+  a read-only *shadow install* (`tools/shadow_install.py` + `xrsim.py
+  --shadow-install`). This is the unlock the whole deploy-gated ladder was waiting
+  for: every prior wake could only add offline scaffolding around a claim it could
+  not test live.
+- **Why this unit:** wakes 62–69 all recorded the same wall ("the sim install runs
+  the stale 12:47 hook; deploying is forbidden"), and #81 only *identified* the
+  stale hook. The loader resolves `opengl32.dll` from the **executable's
+  directory**, so controlling a scratch copy of the program directory is enough to
+  run current source without a deploy.
+- **Change (new tool):** `tools/shadow_install.py` — `shadow_plan` (pure; every
+  directory → a **directory junction**, every file → a copy, with `System` /
+  `System\Win32_x86` materialised as real files and the deployed hook + stale log
+  skipped), `build_shadow` (idempotent; `mklink /J`; copies the repo-built
+  `dist\opengl32.dll` into the hook slot; **never writes the source**),
+  `shadow_manifest` (source/dest/game-dir/exe + hook & built-hook sha256 + `fresh`)
+  and `format_shadow`; plus `tools/test_shadow_install.py` (7 headless cases,
+  incl. "a rebuild leaves the source byte-identical").
+- **Change (harness):** `tools/xrsim.py` `--shadow-install SOURCE_ROOT` /
+  `--shadow-dir` (default `%TEMP%\riddickvr-shadow`): builds the shadow, sets
+  `--game-dir`, prints one line, and records a `shadow` report key. Also:
+  ADR-0471, a `docs/vr-scenarios.md` note, a CI step, and a GH #81 invariant in
+  `verify_reported_fixes.py` (shadow tool + `--shadow-install` + tests + ADR).
+- **Evidence (offline):** `test_shadow_install.py` + `test_xrsim.py` +
+  `xrsim --selftest` PASS; `verify_reported_fixes` (#40..#81, invariant extended),
+  `scenario_tests.py --check`, `verify_test_artifacts`, `verify_hook_init`,
+  `validate_addresses` PASS. **No C++ changed → no `build-all`/CTest** (documented).
+- **Evidence (live, `RIDDICKVR_SIM=1`, NO deploy, 4 runs):** the shadow's hook is
+  `488448 B sha256 14867cf370f0` = the repo build (the real install stays
+  `479232 B 8514d35a…`). `--shadow-install … --require-fresh-hook` →
+  `deployed_hook_matches_build` **PASS** (first time this check has ever been
+  gradeable). The previously deploy-gated **`comfort_vignette_applied` went PASS**
+  (`max=1.000 while moving`, 569/630 frames) where the stale-hook baseline was
+  `max=0.000` — i.e. the #68-req-5 hook half works in current source. Stereo /
+  `capture_gate_matches_saved` / `eye_views_scene_faithful` also PASS. The install's
+  `System\Win32_x86` hashed **byte-identical before/after all four runs** (and its
+  `riddick_vr.log` was untouched — the hook logs into the shadow).
+- **First live GH #80 datum (new, from the shadow):** `XRSIM input bridge: gate on
+  route=keyboard installed=yes getProcCalls=90 inputProcRequests=1
+  createDevicePatched=0 keyboardWrapped=0`. Reading: the engine resolved **exactly
+  one** of the bridge's procs *through* the DllMain-swapped `GetProcAddress`, i.e.
+  the swap **beats** `CInputContext_DInput`'s ctor (the ADR-0467 residual is
+  settled **yes**); and it was **`XInputGetState`, not `DirectInputCreateA`**
+  (`createDevicePatched=0`), so the `keyboard` route had **nothing to wrap** — the
+  gamepad route is the one that can fabricate. `--sim-confirm gamepad` was then
+  tried (40 s): still no advancement off the letterboxed page
+  (`gameplay_full_bleed_reached` FAIL, fill 0.40), so the reach question stands.
+- **Blocker / honest limit:** this makes the *hook* attributable; it does not by
+  itself make the run reach live gameplay (#71). `--require-fresh-hook` + shadow is
+  now the correct pre-assertion for every deploy-gated item, and the remaining #71
+  work (keyboard route is inert → why does XInput START|A not advance the splash?)
+  can now be iterated **live** each wake.
+- **Also measured (pre-existing, NOT from this wake):** `tools/test_xmd_pose.py`
+  (`NODES size 228 != 19 * 34`) and `tools/test_xmd_fk.py` (`--inventory --check`
+  CLI) are **red on `main`** — both read the `test_mos_xmd` synthetic builders, so
+  a recent fixture/format change left them stale. No file this wake touched is
+  involved (`git status` shows only the six shadow/identity files). Filed for the
+  next wake.
+- **Next:** (1) use `--shadow-install` as the default live route and re-run the
+  ladder against current source — top: why `--sim-confirm gamepad` does not advance
+  the splash (the bridge fabricates on the resolved `XInputGetState`; add a tap
+  counter to the report line, then check the engine's pad-connect/packet handling);
+  (2) fix the two red `test_xmd_*` failures; (3) #72 req 1 latch A/B now possible
+  live; #67 step 3, #76 step 1, #79 hook half.
+
 ## Wake 69 — 2026-10-18 00:19 (scheduled loop)
 - **Unit:** filed + landed **GH #81** — every live XRSIM run now **identifies the
   hook build it actually exercised**, and an opt-in gate (`--require-fresh-hook`)
