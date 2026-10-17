@@ -1294,13 +1294,15 @@ def game_command(game_exe, extra_args=None):
     """The game's argv: the exe plus any harness-supplied arguments.
 
     GH #71 requirement 1: the engine's console is id-style (``bind``/``exec``/
-    ``echo``/``history``/``commands``; ``MSystem.dll``) and it registers the
-    game-side commands ``loadgame``/``savegame``/``checkpoint`` and
-    ``cg_loadlastvalidprofile`` (``GameClasses_Win32_x86.dll``). Passing a
-    ``+<command> <arg>`` sequence therefore *may* drive the title to a live
-    scene without any input at all -- the one route that stays inside the
-    simulator's input-safety rule. ``--game-arg`` is repeatable so each token
-    (``+loadgame``, ``checkpoint``) is passed verbatim, with no shell quoting.
+    ``echo``/``history``/``commands``; ``MSystem.dll``) and the game DLLs register
+    ``loadgame``/``savegame``/``checkpoint``/``changemap``/``cg_newgame``/
+    ``cg_loadlastvalidprofile`` (``GameClasses_Win32_x86.dll``,
+    ``GameWorld_Win32_x86.dll``). Measured (ADR-0466 wake-64 addendum), the engine
+    does **not** execute ``+``-prefixed console commands from its command line, so
+    this pass-through alone cannot reach gameplay; it is kept as the exact handle
+    the hook-side sim input bridge (GH #80) will use. ``--game-arg`` is repeatable
+    so each token (``+loadgame``, ``checkpoint``) is passed verbatim, with no shell
+    quoting.
     """
     cmd = [str(game_exe)]
     for a in (extra_args or []):
