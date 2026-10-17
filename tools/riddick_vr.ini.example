@@ -155,3 +155,9 @@ ViewmodelAnchorZ=-0.38
 ViewmodelDriveYaw=0
 ViewmodelDrivePitch=0
 ViewmodelDriveRoll=0
+; GH #72 requirement 1: 1 = demote a clearly letterboxed frame (BarScan active
+; rect <= 0.75 of the window) to the cinema branch until the first full-bleed
+; frame (>= 0.90) is measured, so the static 2D startup splash is not published
+; as 3D gameplay. Once the latch is set it never fires again (GH #44 safe).
+; Default 0: provisional thresholds, needs one live A/B.
+DisplayBranchColdStartLatch=0

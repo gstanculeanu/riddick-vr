@@ -56,6 +56,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/viewmodel_suppressor.h
         src/hook/viewmodel_drive.h
         src/hook/gl_matrix_tracker.h
+        src/hook/display_branch.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/vr_config.cpp
@@ -234,4 +235,16 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/host
     )
     add_test(NAME comfort_vignette_summary COMMAND riddick_vr_comfort_vignette_tests)
+
+    # GH #72 (requirement 1): the published display branch must not label the
+    # static 2D startup splash as 3D gameplay. The hook's own BarScan active-rect
+    # fill (splash ~0.31-0.36 vs gameplay 1.00) gates a *cold-start* latch
+    # (src/hook/display_branch.h): a clearly letterboxed frame is cinema until
+    # the first full-bleed frame is ever measured. Pure helper, unit-tested;
+    # default off (provisional thresholds, needs one live A/B).
+    add_executable(riddick_vr_display_branch_tests tests/display_branch_tests.cpp)
+    target_include_directories(riddick_vr_display_branch_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME display_branch_cold_start_latch COMMAND riddick_vr_display_branch_tests)
 endif()

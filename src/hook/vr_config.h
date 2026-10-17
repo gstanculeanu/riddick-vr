@@ -140,6 +140,14 @@ struct VRConfig {
     float viewmodelDriveYaw = 0.0f;
     float viewmodelDrivePitch = 0.0f;
     float viewmodelDriveRoll = 0.0f;
+    // GH #72 req 1: demote a *letterboxed* frame to the cinema branch until the
+    // first full-bleed frame is ever seen, so the static 2D startup splash is
+    // not published as 3D gameplay (the `cinemaMode` bit the XRSIM dump gate and
+    // the per-frame stereo skip trust). Default OFF: the BarScan fill thresholds
+    // (0.90 full-bleed / 0.75 letterboxed) are provisional and the "a
+    // full-bleed page appears before gameplay" case needs one live A/B
+    // (ADR-0459).
+    int displayBranchColdStartLatch = 0;
 };
 
 extern VRConfig g_vrConfig;

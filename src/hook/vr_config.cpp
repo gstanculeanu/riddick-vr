@@ -178,6 +178,10 @@ void LoadVRConfig() {
             cfg.viewmodelWindowOpener, cfg.viewmodelNearRatio, cfg.viewmodelUnitsPerMeter,
             cfg.viewmodelAnchorX, cfg.viewmodelAnchorY, cfg.viewmodelAnchorZ,
             cfg.viewmodelDriveYaw, cfg.viewmodelDrivePitch, cfg.viewmodelDriveRoll);
+        // GH #72 req 1: cold-start full-bleed latch for the published display
+        // branch (default off; provisional thresholds, needs one live A/B).
+        cfg.displayBranchColdStartLatch = ReadInt(iniPath, "DisplayBranchColdStartLatch", cfg.displayBranchColdStartLatch) ? 1 : 0;
+        VR_LOG_INFO("Display branch config: cold_start_latch=%d", cfg.displayBranchColdStartLatch);
         VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,

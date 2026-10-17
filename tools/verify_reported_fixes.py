@@ -30,7 +30,8 @@ def main():
     require("vrState.cinemaMode = false" not in camera,
             "camera update must not override the renderer's cinema decision")
     require("m_sharedState.cinemaMode = isCinema;" in renderer and
-            "bool isCinema = !OpenGLProxy::Has3DThisFrame() || s_cursorMenu;" in renderer,
+            "ComputeDisplayBranch(" in renderer and
+            "OpenGLProxy::Has3DThisFrame(), s_cursorMenu" in renderer,
             "renderer must select cinema for non-3D frames/menu cursor")
     require("if (isCinema)" in renderer and "ScanActiveRegion(srcX, srcY, srcW, srcH);" in renderer,
             "cinema fit and gameplay active-region crop branches must remain")
@@ -351,6 +352,33 @@ def main():
             "gameplay_window_has_content" in xrsim_tool,
             "GH #72: the XRSIM gameplay window must be content-gated (blank "
             "interop warm-up / frozen repeats excluded) and report why")
+
+    # GH #72 requirement 1: the published display branch (`cinemaMode`, which the
+    # XRSIM gameplay-only dump gate and the per-frame stereo skip trust) must not
+    # label a letterboxed *static 2D* startup page as 3D gameplay -- the legacy
+    # verdict is `Has3DThisFrame() || menuCursor`, and the splash loads a
+    # perspective projection. The hook's own BarScan active-rect fill is the
+    # structural input (splash ~0.31-0.36 vs gameplay 1.00); a *cold-start* latch
+    # demotes a clearly letterboxed frame until the first full-bleed frame has
+    # ever been seen (so gameplay with engine-baked bars is unaffected, GH #44).
+    # Opt-in: the thresholds are provisional and need one live A/B.
+    display_branch = (ROOT / "src/hook/display_branch.h").read_text(encoding="utf-8")
+    config_header = (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8")
+    config_source = (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    require("ComputeDisplayBranch" in display_branch and
+            "DisplayBranchConfig" in display_branch and
+            "coldStartLatch" in display_branch and
+            "fullBleedSeen" in display_branch and
+            "ComputeDisplayBranch(" in renderer and
+            "displayBranchColdStartLatch" in config_header and
+            'ReadInt(iniPath, "DisplayBranchColdStartLatch"' in config_source and
+            "DisplayBranchColdStartLatch=0" in
+            (ROOT / "riddick_vr.ini").read_text(encoding="utf-8") and
+            "tests/display_branch_tests.cpp" in cmake and
+            "display_branch_cold_start_latch" in cmake,
+            "GH #72: the display branch must demote a letterboxed startup page "
+            "behind an opt-in cold-start latch driven by the BarScan fill")
 
     # GH #68 requirement 1: every dumped frame must record the head/eye transform
     # and projection it was rendered with, so a capture is self-describing in 3D

@@ -2,6 +2,7 @@
 #include "camera_hook.h"
 #include "vr_hand_renderer.h"
 #include "vr_config.h" // GH #9: ComfortEnabled / ComfortMaxDim gate
+#include "display_branch.h" // GH #72 req 1: cold-start full-bleed latch
 #include "logging.h"
 #include <tlhelp32.h>
 #include <algorithm>
@@ -846,7 +847,35 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             if (!s_cursorMenu && s_cursorVisibleFrames >= 45) s_cursorMenu = true;
             if (s_cursorMenu && s_cursorHiddenFrames >= 60) s_cursorMenu = false;
 
-            bool isCinema = !OpenGLProxy::Has3DThisFrame() || s_cursorMenu;
+            // GH #72 req 1: cold-start full-bleed latch. Opt-in
+            // (DisplayBranchColdStartLatch): while it is on the BarScan rect is
+            // measured *before* the branch decision and in every frame, so a
+            // demoted startup page can still clear the latch once gameplay is
+            // reached (the scan is otherwise gameplay-branch only, which would
+            // leave a demoted page unable to ever re-measure).
+            const bool branchLatch = g_vrConfig.displayBranchColdStartLatch != 0;
+            if (branchLatch) {
+                OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+                if (OpenGLProxy::glReadBuffer) {
+                    OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+                }
+                ScanActiveRegion(srcX, srcY, srcW, srcH);
+            }
+
+            DisplayBranchConfig branchCfg;
+            branchCfg.coldStartLatch = branchLatch;
+            bool haveFill = false;
+            float activeFill = 0.0f;
+            if (branchLatch && m_hasActiveRect && srcW > 0 && srcH > 0) {
+                const float aw = static_cast<float>(m_activeX1 - m_activeX0);
+                const float ah = static_cast<float>(m_activeY1 - m_activeY0);
+                activeFill = (aw * ah) / (static_cast<float>(srcW) * static_cast<float>(srcH));
+                haveFill = true;
+            }
+            static DisplayBranchState s_branchState;
+            const bool isCinema = ComputeDisplayBranch(
+                OpenGLProxy::Has3DThisFrame(), s_cursorMenu, activeFill, haveFill,
+                branchCfg, s_branchState);
             m_sharedState.cinemaMode = isCinema;
             {
                 static bool s_lastCinema = false;
@@ -854,9 +883,11 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 if (isCinema != s_lastCinema || !s_cinemaLogged) {
                     s_lastCinema = isCinema;
                     s_cinemaLogged = true;
-                    VR_LOG_INFO("DisplayMode: %s (3Dfresh=%d menuCursor=%d)",
+                    VR_LOG_INFO("DisplayMode: %s (3Dfresh=%d menuCursor=%d latch=%d fill=%.2f fullBleed=%d)",
                         isCinema ? "CINEMA screen (menus/cinematics)" : "FULL-BLEED gameplay",
-                        (int)OpenGLProxy::Has3DThisFrame(), (int)OpenGLProxy::HasMenuCursor());
+                        (int)OpenGLProxy::Has3DThisFrame(), (int)OpenGLProxy::HasMenuCursor(),
+                        (int)branchLatch, haveFill ? activeFill : -1.0f,
+                        (int)s_branchState.fullBleedSeen);
                 }
             }
 
@@ -889,6 +920,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 VRHandRenderer::Instance().RenderHands(m_sharedState, false, m_eyeWidth, m_eyeHeight);
             } else {
                 // GH #44: full-bleed gameplay; crop baked letterbox/pillarbox out.
+                // GH #72: with the cold-start latch on the rect was already
+                // measured above in this same swap; this call is then a no-op
+                // (the scan is throttled).
                 ScanActiveRegion(srcX, srcY, srcW, srcH);
                 GLint ax0 = m_hasActiveRect ? m_activeX0 : srcX;
                 GLint ay0 = m_hasActiveRect ? m_activeY0 : srcY;

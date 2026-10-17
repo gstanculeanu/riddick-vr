@@ -145,5 +145,22 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   re-publishes `s_lastView`. Unit-tested by `gl_matrix_tracker`
   (`tests/gl_matrix_tracker_tests.cpp`). See ADR-0451.
 
+## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
+- The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:
+  `!Has3DThisFrame() || menuCursor`. GH #44 keeps real gameplay full-bleed even
+  when the engine bakes letterbox/pillarbox bars (they are cropped from the blit
+  using the `BarScan` active rect).
+- **GH #72 requirement 1.** A *static 2D* startup page (legal/attribution, ESRB)
+  loads a perspective projection, so it was published as `FULL-BLEED gameplay`
+  even though `BarScan` measures it at ~0.31-0.36 of the window (gameplay is
+  1.00) — the XRSIM dump gate and the per-frame stereo skip then graded the
+  frozen splash. `display_branch.h` (pure, unit-tested by
+  `display_branch_cold_start_latch`) adds a *cold-start* latch: while
+  `DisplayBranchColdStartLatch=1`, a fill `<= 0.75` is cinema until the first
+  full-bleed fill `>= 0.90` is ever measured; after that the demotion can never
+  fire again, so GH #44 is unaffected. **Off by default** (provisional
+  thresholds; needs one live A/B). The `DisplayMode` line now carries
+  `latch=.. fill=.. fullBleed=..`. See ADR-0459.
+
 
 

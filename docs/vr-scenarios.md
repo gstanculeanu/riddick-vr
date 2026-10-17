@@ -94,7 +94,10 @@ active-rect fill (the splash is letterboxed to ≈0.36 of the window). Because t
 frame-indexed scenario keyframes then play far faster than 90 Hz, deferring
 scenario playback until gameplay is reached is follow-up work (#71/#72), and the
 `cinemaMode` branch bit still mislabels the static 2D splash pages as gameplay
-(#72).
+(**addressed** by GH #72 requirement 1 / ADR-0459: an opt-in
+`DisplayBranchColdStartLatch` demotes a clearly letterboxed frame — BarScan fill
+`<= 0.75` — to cinema until the first full-bleed frame `>= 0.90` is ever
+measured; default off, needs one live A/B).
 
 **Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
 (mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical
