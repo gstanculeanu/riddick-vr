@@ -1006,28 +1006,34 @@ def _rot3(q):
 
 
 def _mat(rot=None, tx=0.0):
-    """A column-major 16-float view token with an optional row-major rotation."""
+    """A column-major 16-float *view* token for a world rotation ``rot``.
+
+    The host stores ``R_head^T`` (world -> eye) in the view's rotation block, so
+    this helper transposes ``rot`` to match -- a faithful view then has
+    ``R_view == R_head^T`` (what ``_view_head_rotation_deviation_deg`` expects).
+    """
     r = rot or [[1.0 if i == j else 0.0 for j in range(3)] for i in range(3)]
     m = [0.0] * 16
     for c in range(3):
         for row in range(3):
-            m[c * 4 + row] = r[row][c]
+            m[c * 4 + row] = r[c][row]
     m[12] = tx
     m[15] = 1.0
     return "[" + " ".join(f"{v:.4f}" for v in m) + "]"
 
 
-def _eye_frames_file(art, frames, source=None, faithful=False):
+def _eye_frames_file(art, frames, source=None, faithful=False, half_ipd=0.0325):
     """Write an ``eye_frames.log`` in the host's wire format.
 
     ``frames`` is a list of ``(frame, yaw_deg)``; the head pose is a pure yaw
     rotation so the recorded yaw span is easy to assert. ``source`` appends the
     GH #77 ``eye=`` token (omitted when None = a legacy line). When ``faithful``
-    the view rotation is built from the head pose (a real runtime view); otherwise
-    it is the host's identity-rotation synthetic baseline.
+    the view rotation is built from the head pose (a runtime view / the mock
+    reconstruction); otherwise it is the host's identity-rotation baseline.
+    ``half_ipd`` is the per-eye translation magnitude (0 m breaks the eye pair).
     """
     lines = ["# frame=NNNN hmdpos=x,y,z hmdquat=x,y,z,w "
-             "viewL=[16] viewR=[16] projL=[16] projR=[16] eye=<runtime|synthetic>"]
+             "viewL=[16] viewR=[16] projL=[16] projR=[16] eye=<runtime|sim|synthetic>"]
     for frame, yaw in frames:
         half = math.radians(yaw) / 2.0
         qx, qy, qz, qw = 0.0, math.sin(half), 0.0, math.cos(half)
@@ -1035,7 +1041,7 @@ def _eye_frames_file(art, frames, source=None, faithful=False):
         tok = f" eye={source}" if source else ""
         lines.append(f"frame={frame} hmdpos=0.0000,1.7000,0.0000 "
                      f"hmdquat={qx:.4f},{qy:.4f},{qz:.4f},{qw:.4f} "
-                     f"viewL={_mat(rot, -0.0325)} viewR={_mat(rot, 0.0325)} "
+                     f"viewL={_mat(rot, -half_ipd)} viewR={_mat(rot, half_ipd)} "
                      f"projL={_mat()} projR={_mat()}{tok}")
     (art / xrsim.EYE_FRAMES_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1059,7 +1065,7 @@ def test_eye_frame_log_parsed(td):
     assert xrsim.eye_frame_stats(Path(td) / "nope") == {
         "count": 0, "distinct": 0, "yaw_span_deg": None,
         "source": None, "view_head_rotation_deviation_deg": None,
-        "proj_lr_identical": None}
+        "view_lr_ipd_m": None, "proj_lr_identical": None}
 
 
 def test_eye_frame_provenance_parsed(td):
@@ -1074,12 +1080,23 @@ def test_eye_frame_provenance_parsed(td):
     assert syn["proj_lr_identical"] is True, syn
     # Identity views vs a 30 deg head pose -> a large, measured deviation.
     assert syn["view_head_rotation_deviation_deg"] > 20.0, syn
+    # The baseline still carries a nominal 65 mm eye separation.
+    assert abs(syn["view_lr_ipd_m"] - 0.065) < 0.002, syn
 
     art2 = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
     _eye_frames_file(art2, [(15, -30.0), (30, 30.0)], source="runtime", faithful=True)
     rt = xrsim.eye_frame_stats(art2)
     assert rt["source"] == "runtime", rt
     assert rt["view_head_rotation_deviation_deg"] < 1.0, rt
+    assert abs(rt["view_lr_ipd_m"] - 0.065) < 0.002, rt
+
+    # GH #77 / ADR-0463: the mock host's reconstruction is tagged `sim` and is
+    # scene-faithful in exactly the same way.
+    art3 = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _eye_frames_file(art3, [(15, -30.0), (30, 30.0)], source="sim", faithful=True)
+    sim = xrsim.eye_frame_stats(art3)
+    assert sim["source"] == "sim", sim
+    assert sim["view_head_rotation_deviation_deg"] < 1.0, sim
 
 
 def test_eye_frame_check_skipped_without_file(td):
@@ -1143,6 +1160,60 @@ def test_eye_view_scene_faithful_grades_runtime(td):
     _, checks2 = xrsim.evaluate(_args(), art2, "", "")
     rec2 = [c for c in checks2 if c["check"] == "eye_views_scene_faithful"][0]
     assert rec2["ok"] is False and not rec2.get("skip"), rec2
+
+
+def test_eye_view_scene_faithful_grades_sim(td):
+    """GH #77 / ADR-0463: the mock host's reconstructed views (`eye=sim`) let a
+    sim run exercise the *pass* branch -- the check grades them like a runtime
+    capture instead of always skipping -- and catches an inconsistent or
+    eye-collapsed (wrong IPD) reconstruction."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    _eye_frames_file(art, [(15, 25.0)], source="sim", faithful=True)
+    _, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "eye_views_scene_faithful"][0]
+    assert rec["ok"] is True and not rec.get("skip"), rec
+    assert "separation" in rec["detail"], rec
+
+    # Views rotated with the head but collapsed onto one origin (no IPD).
+    art2 = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art2 / "test_frame_0015.bmp", base)
+    _save(art2 / "right_0015.bmp", _shift_h(base, 3))
+    _eye_frames_file(art2, [(15, 25.0)], source="sim", faithful=True, half_ipd=0.0)
+    _, checks2 = xrsim.evaluate(_args(), art2, "", "")
+    rec2 = [c for c in checks2 if c["check"] == "eye_views_scene_faithful"][0]
+    assert rec2["ok"] is False and not rec2.get("skip"), rec2
+
+    # Views left at the identity baseline but labelled sim: rotation deviates.
+    art3 = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    _save(art3 / "test_frame_0015.bmp", base)
+    _save(art3 / "right_0015.bmp", _shift_h(base, 3))
+    _eye_frames_file(art3, [(15, 25.0)], source="sim", faithful=False)
+    _, checks3 = xrsim.evaluate(_args(), art3, "", "")
+    rec3 = [c for c in checks3 if c["check"] == "eye_views_scene_faithful"][0]
+    assert rec3["ok"] is False and not rec3.get("skip"), rec3
+
+
+def test_view_head_deviation_uses_transpose_convention(td):
+    """GH #77: the host stores the *world->eye* rotation (R_head^T) in a view, so
+    the deviation must compare R_view against R_head^T -- not R_head. A view that
+    stores R_head directly (the transposed/wrong convention) must be flagged, and
+    the host-convention view must read ~0."""
+    q = (0.0, math.sin(math.radians(20.0) / 2.0), 0.0, math.cos(math.radians(20.0) / 2.0))
+    r = xrsim._rot3_from_quat(q)
+    r_t = [[r[i][j] for i in range(3)] for j in range(3)]
+
+    def floats(tok):
+        return [float(v) for v in tok.strip("[]").split()]
+
+    # _mat(rot) stores transpose(rot): _mat(r) == R_head^T (host convention).
+    good = xrsim._view_head_rotation_deviation_deg(floats(_mat(r)), q)
+    # Passing the transpose stores R_head itself -- the wrong convention.
+    bad = xrsim._view_head_rotation_deviation_deg(floats(_mat(r_t)), q)
+    assert good is not None and good < 1.0, good
+    assert bad is not None and bad > 30.0, bad
 
 
 def test_eye_frame_report_key_records_yaw_span(td):
@@ -1247,8 +1318,10 @@ def main() -> int:
              test_eye_frame_check_present_with_file,
              test_eye_frame_report_key_records_yaw_span,
              test_eye_frame_provenance_parsed,
+             test_view_head_deviation_uses_transpose_convention,
              test_eye_view_scene_faithful_skips_synthetic,
              test_eye_view_scene_faithful_grades_runtime,
+             test_eye_view_scene_faithful_grades_sim,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

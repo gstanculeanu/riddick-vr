@@ -45,50 +45,13 @@ static RiddickVRMatrix4x4 CreateProjectionFromFov(const XrFovf& fov, float nearZ
 }
 
 static RiddickVRMatrix4x4 CreateViewFromPose(const XrPosef& pose) {
+    // ADR-0463: the maths is the pure, unit-testable `ViewMatrixFromPose`
+    // helper (also used to reconstruct the mock host's per-eye views).
+    const float pos[3] = { pose.position.x, pose.position.y, pose.position.z };
+    const float quat[4] = { pose.orientation.x, pose.orientation.y,
+                            pose.orientation.z, pose.orientation.w };
     RiddickVRMatrix4x4 result{};
-    const float qx = pose.orientation.x;
-    const float qy = pose.orientation.y;
-    const float qz = pose.orientation.z;
-    const float qw = pose.orientation.w;
-
-    // Rotation matrix from quaternion (R)
-    const float r00 = 1.0f - 2.0f * (qy * qy + qz * qz);
-    const float r01 = 2.0f * (qx * qy - qz * qw);
-    const float r02 = 2.0f * (qx * qz + qy * qw);
-
-    const float r10 = 2.0f * (qx * qy + qz * qw);
-    const float r11 = 1.0f - 2.0f * (qx * qx + qz * qz);
-    const float r12 = 2.0f * (qy * qz - qx * qw);
-
-    const float r20 = 2.0f * (qx * qz - qy * qw);
-    const float r21 = 2.0f * (qy * qz + qx * qw);
-    const float r22 = 1.0f - 2.0f * (qx * qx + qy * qy);
-
-    const float px = pose.position.x;
-    const float py = pose.position.y;
-    const float pz = pose.position.z;
-
-    // Invert rigid transform: R^T and -R^T * p
-    result.m[0] = r00;
-    result.m[1] = r01;
-    result.m[2] = r02;
-    result.m[3] = 0.0f;
-
-    result.m[4] = r10;
-    result.m[5] = r11;
-    result.m[6] = r12;
-    result.m[7] = 0.0f;
-
-    result.m[8] = r20;
-    result.m[9] = r21;
-    result.m[10] = r22;
-    result.m[11] = 0.0f;
-
-    result.m[12] = -(r00 * px + r10 * py + r20 * pz);
-    result.m[13] = -(r01 * px + r11 * py + r21 * pz);
-    result.m[14] = -(r02 * px + r12 * py + r22 * pz);
-    result.m[15] = 1.0f;
-
+    ViewMatrixFromPose(pos, quat, result.m);
     return result;
 }
 
@@ -1996,13 +1959,28 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                     sample.hmdQuat[1] = state.hmdPose.orientation.y;
                     sample.hmdQuat[2] = state.hmdPose.orientation.z;
                     sample.hmdQuat[3] = state.hmdPose.orientation.w;
-                    // GH #77: record where the eye matrices came from so a
-                    // consumer never treats the mock's synthetic baseline as a
-                    // scene-faithful per-eye view.
-                    sample.viewsFromRuntime = m_eyeViewsFromRuntime;
+                    // GH #77 / ADR-0463: record where the eye matrices came
+                    // from. With a real runtime they are what `xrLocateViews`
+                    // returned. In mock/sim there is no runtime, so the host
+                    // *reconstructs* the per-eye views a runtime would return for
+                    // this frame's scripted head pose (`ComputeEyeViewFromHeadPose`),
+                    // tagged `eye=sim` -- the placeholder baseline the hook
+                    // actually consumes is published in the shared state, not
+                    // written here.
+                    if (m_eyeViewsFromRuntime) {
+                        sample.viewSource = EyeViewSource::Runtime;
+                        for (int i = 0; i < 16; ++i) {
+                            sample.viewL[i] = state.leftEyeView.m[i];
+                            sample.viewR[i] = state.rightEyeView.m[i];
+                        }
+                    } else {
+                        sample.viewSource = EyeViewSource::Simulated;
+                        ComputeEyeViewFromHeadPose(sample.hmdPos, sample.hmdQuat,
+                                                   kHalfIpdMeters, false, sample.viewL);
+                        ComputeEyeViewFromHeadPose(sample.hmdPos, sample.hmdQuat,
+                                                   kHalfIpdMeters, true, sample.viewR);
+                    }
                     for (int i = 0; i < 16; ++i) {
-                        sample.viewL[i] = state.leftEyeView.m[i];
-                        sample.viewR[i] = state.rightEyeView.m[i];
                         sample.projL[i] = state.leftEyeProjection.m[i];
                         sample.projR[i] = state.rightEyeProjection.m[i];
                     }
@@ -2037,12 +2015,12 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                                 static_cast<double>(state.hmdPose.position.z),
                                 static_cast<double>(state.hmdPose.orientation.x), static_cast<double>(state.hmdPose.orientation.y),
                                 static_cast<double>(state.hmdPose.orientation.z), static_cast<double>(state.hmdPose.orientation.w));
-                        writeMat("leftEyeView", state.leftEyeView.m, false);
-                        writeMat("rightEyeView", state.rightEyeView.m, false);
+                        writeMat("leftEyeView", sample.viewL, false);
+                        writeMat("rightEyeView", sample.viewR, false);
                         writeMat("leftEyeProjection", state.leftEyeProjection.m, false);
                         writeMat("rightEyeProjection", state.rightEyeProjection.m, false);
                         fprintf(meta, "  \"eyeViews\": \"%s\"\n",
-                                m_eyeViewsFromRuntime ? "runtime" : "synthetic");
+                                EyeViewSourceToken(sample.viewSource));
                         fprintf(meta, "}\n");
                         fclose(meta);
                     }

@@ -4,6 +4,14 @@
 **Accepted** — GH #77 (filed by this wake; epic #57 DoD *"all claims backed by captured evidence"*).
 Host + harness + docs; nothing deployed, no game file touched.
 
+> **Amendment (ADR-0463).** Decision point 1's token set grew from
+> `runtime|synthetic` to `runtime|sim|synthetic` and the "Consequences" limit
+> below ("the sim can only prove the skip") no longer holds: the mock host now
+> reconstructs the per-eye views a runtime would return for the frame's scripted
+> head pose (`ComputeEyeViewFromHeadPose`) and tags them `eye=sim`, so a sim run
+> exercises the graded **pass** branch. The `synthetic` placeholder remains what
+> the hook actually consumes in mock mode; only the *record* is reconstructed.
+
 ## Context
 GH #68 requirement 1 added `eye_frames.log`: the host writes one line per dumped
 frame with the head pose and the per-eye view/projection matrices so a capture is

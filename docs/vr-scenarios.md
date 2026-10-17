@@ -136,16 +136,20 @@ the run is labelled `shift-only`. `--require-parallax` (or a scenario's
 acceptance instrument for GH #76. It is **off by default** (the shift is the
 current documented interim), so a default run's verdict is unchanged.
 
-**Eye-view provenance (GH #77, ADR-0462):** the `eye_frames.log` per-eye
-view/projection matrices are **not** the frame's real eye views in a mock/sim run.
-Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`), so
-the host writes a constant synthetic baseline (identity rotation, `±halfIpd`,
+**Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
+view/projection matrices are **not** the matrices the hook consumes in a mock/sim
+run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),
+so the hook receives a constant synthetic baseline (identity rotation, `±halfIpd`,
 `projL == projR`) that carries **no head rotation**. Each record now ends with
-`eye=runtime|synthetic`; `tools/xrsim.py` reports `eye_frames.source` and the max
-angular deviation of the recorded view rotation from the head pose, and grades
-`eye_views_scene_faithful` — passing a real-headset capture that tracks the head
-pose and **skipping** (with the deviation as evidence) a synthetic one. GH #67
-step 3 must use the recorded head pose (`hmdpos`/`hmdquat`), not these matrices.
+`eye=runtime` (real runtime), `eye=sim` (the host reconstructed the per-eye views
+a runtime would return for the frame's scripted head pose, since it has no runtime
+to ask) or `eye=synthetic` (the placeholder the hook actually consumed).
+`tools/xrsim.py` reports `eye_frames.source`, the max angular deviation of the
+recorded view rotation from the head pose and the left/right eye separation, and
+grades `eye_views_scene_faithful` -- passing a `runtime` **or** `sim` capture that
+tracks the head pose with a plausible IPD, and **skipping** (with the deviation as
+evidence) a `synthetic`/legacy one. GH #67 step 3 must use the recorded head pose
+(`hmdpos`/`hmdquat`) as the authoritative camera input.
 
 **Comfort (GH #68 requirement 5, ADR-0456):** the mock host reads the
 hook-published locomotion comfort level (`comfortVignette`) back every frame and

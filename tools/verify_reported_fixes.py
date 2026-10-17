@@ -535,27 +535,36 @@ def main():
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never
     # calls xrLocateViews) as "the per-eye view/projection that produced the
     # dumped frame". That is false in every mock/sim run and would let GH #67
-    # step 3 be built on matrices that carry no head rotation. The host now tags
-    # each record's provenance (`eye=runtime|synthetic`) and XRSIM measures the
-    # view/head rotation deviation, grading a real capture and *skipping* a mock
-    # one instead of reading the placeholder as a real per-eye view.
-    require("viewsFromRuntime" in (ROOT / "src/host/eye_frame.h").read_text(encoding="utf-8") and
-            "eye=\" << (s.viewsFromRuntime ? \"runtime\" : \"synthetic\")"
-            in (ROOT / "src/host/eye_frame.h").read_text(encoding="utf-8") and
+    # step 3 be built on matrices that carry no head rotation. The host tags each
+    # record's provenance (`eye=runtime|sim|synthetic`) and, in mock/sim,
+    # reconstructs the per-eye views a runtime would return for the frame's
+    # scripted head pose (ADR-0463); XRSIM measures the view/head rotation
+    # deviation and the eye separation, grading a runtime/sim capture and
+    # *skipping* a placeholder one.
+    eye_frame_h = (ROOT / "src/host/eye_frame.h").read_text(encoding="utf-8")
+    openxr_cpp = (ROOT / "src/host/openxr_manager.cpp").read_text(encoding="utf-8")
+    require("EyeViewSourceToken" in eye_frame_h and
+            "ComputeEyeViewFromHeadPose" in eye_frame_h and
+            'return "sim";' in eye_frame_h and
             "m_eyeViewsFromRuntime" in (ROOT / "src/host/openxr_manager.h").read_text(encoding="utf-8") and
-            "m_eyeViewsFromRuntime = true;" in (ROOT / "src/host/openxr_manager.cpp").read_text(encoding="utf-8") and
-            "m_eyeViewsFromRuntime = false;" in (ROOT / "src/host/openxr_manager.cpp").read_text(encoding="utf-8") and
+            "m_eyeViewsFromRuntime = true;" in openxr_cpp and
+            "EyeViewSource::Simulated" in openxr_cpp and
+            "ComputeEyeViewFromHeadPose(sample.hmdPos" in openxr_cpp and
             "def _view_head_rotation_deviation_deg" in xrsim_tool and
             "EYE_VIEW_ROTATION_TOL_DEG" in xrsim_tool and
+            "EYE_SCENE_FAITHFUL_SOURCES" in xrsim_tool and
+            "runtime|sim|synthetic" in xrsim_tool and
             '"eye_views_scene_faithful"' in xrsim_tool and
-            "eye=runtime|synthetic" in xrsim_tool and
             "test_eye_frame_provenance_parsed" in _xrsim_tests and
             "test_eye_view_scene_faithful_skips_synthetic" in _xrsim_tests and
-            "test_eye_view_scene_faithful_grades_runtime" in _xrsim_tests,
+            "test_eye_view_scene_faithful_grades_runtime" in _xrsim_tests and
+            "test_eye_view_scene_faithful_grades_sim" in _xrsim_tests and
+            "ComputeEyeViewFromHeadPose" in
+            (ROOT / "tests/eye_frame_tests.cpp").read_text(encoding="utf-8"),
             "GH #77: the XRSIM eye-frame record must tag its provenance "
-            "(eye=runtime|synthetic) and XRSIM must grade/skip the eye-view "
-            "scene-faithfulness check rather than treat the synthetic baseline as "
-            "the frame's real per-eye view")
+            "(eye=runtime|sim|synthetic), reconstruct scene-faithful views in "
+            "mock/sim, and XRSIM must grade/skip the eye-view scene-faithfulness "
+            "check rather than treat the placeholder baseline as a real eye view")
 
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
           "#62, #64-68, #69, #71-73, #75-77)")

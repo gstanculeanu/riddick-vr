@@ -2,6 +2,66 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 60 — 2026-10-17 21:05 (scheduled loop)
+- **Unit:** GH **#77 capstone** (wake 59's stated Next) — the mock/sim host now
+  **reconstructs** the per-eye views a runtime *would* return for each dumped
+  frame's scripted head pose and tags them `eye=sim`, so a headless run produces
+  scene-faithful eye data and the `eye_views_scene_faithful` graded branch finally
+  runs (it previously only ever skipped). Host + harness + tests + docs; **no
+  asset change, no deploy, shared state untouched**.
+- **Why this unit:** every player-visible ladder item is code-complete and
+  deploy-gated, #68 is the top open item, and the wake-59 record was honest but
+  left the graded branch reachable only on a headset.
+- **Change:**
+  - `src/host/eye_frame.h`: new pure helpers `QuatToRowMajor3x3`,
+    `ViewMatrixFromPose` (the rigid inverse; `CreateViewFromPose` now forwards to
+    it) and `ComputeEyeViewFromHeadPose(headPos, headQuat, halfIpd, rightEye)`;
+    `EyeFrameSample.viewsFromRuntime` (bool) → `viewSource ∈ {Runtime, Simulated,
+    Synthetic}`; the wire token is now `eye=runtime|sim|synthetic`.
+  - `src/host/openxr_manager.cpp`: the mock dump writes `eye=sim` and reconstructs
+    `viewL/viewR` from the frame's own `state.hmdPose`; `frame_####.json`
+    `leftEyeView/rightEyeView/"eyeViews"` follow. **The published shared-state
+    eye views are unchanged** — the hook still consumes the placeholder baseline,
+    so the sim's rendering / procedural-hand overlay do not move.
+  - `tools/xrsim.py`: `EYE_SCENE_FAITHFUL_SOURCES = ("runtime","sim")`; the
+    `eye_frames` key gains `view_lr_ipd_m`; the check grades rotation deviation
+    (≤ 1°) **and** eye separation (0.03–0.10 m) so a broken reconstruction fails
+    instead of passing vacuously; `synthetic`/legacy still skips.
+  - **Found + fixed two latent ADR-0462 numerical bugs** (first time the check ran
+    against host-convention views):
+    1. the deviation used `R_view * R_head^T` (= `R_head^-2`) — the host stores
+       `R_head^T`, so it must be `R_view * R_head`; the old unit-test fixture
+       stored `R_head` (transposed) and hid it. Fixed + a convention-pinning test.
+    2. `acos((trace-1)/2)` is ill-conditioned near identity, so the 4-decimal wire
+       rounding read as **0.436 deg**; replaced with the `atan2(‖skew‖/2, …)` form
+       → **0.009 deg** live, so the now-graded sim check cannot flake at 1°.
+  - Tests: `tests/eye_frame_tests.cpp` (source tokens + reconstruction
+    rotation/translation/IPD), `tools/test_xrsim.py` (+`test_eye_view_scene_faithful_grades_sim`,
+    +`test_view_head_deviation_uses_transpose_convention`, fixture now stores the
+    host convention), `tools/verify_reported_fixes.py` #77 invariant rewritten;
+    `docs/adr/0463-simulated-eye-views-in-the-record.md` (new) + ADR-0462 amended +
+    `src/host/README.md` + `docs/vr-scenarios.md`.
+- **Evidence:** `build-all.ps1 -Config Release` OK (**no `-Deploy`**); CTest
+  **20/20 on x64 AND x86**. All 10 `tools/test_*.py` + `xrsim.py --selftest` +
+  `verify_test_artifacts` + `verify_hook_init` + `validate_addresses` +
+  `verify_reported_fixes` + `scenario_tests.py --check` (8 test cases, 12 scripted,
+  1 observation-only) PASS. **Live** (`RIDDICKVR_SIM=1`,
+  `--reach-gameplay --duration 90 --interval 30 --downscale 4`): 27 gameplay
+  frames, 0 cinema/blank, all stereo PASS, `capture_metadata_present` … `eye
+  views=sim`, and `eye_views_scene_faithful` **PASS** (`deviation 0.009 deg, tol
+  1.0; L/R separation 0.065 m`). The run's only FAIL is the known sim-install
+  `frame_budget` (p95 104.8 ms at the sim's ~10 FPS) — not this change. Did **not**
+  commit a regenerated `report.json` (the committed wake-58 baseline is untouched;
+  the captures stay in the gitignored artifacts dir).
+- **Blocker / honest limit:** `eye=sim` is a reconstruction, so the pass proves the
+  harness path + the reconstruction's structure, **not** that the sim rendered a
+  head-relative stereo pair (GH #76's hook work). `eye=runtime` still needs a
+  headset; `synthetic` is now only the real-session `xrLocateViews` fallback.
+- **Next:** same deploy gate (#67 step 3 `ViewmodelObserve=1`, #72 req 1 A/B,
+  #68 req 5 snap-turn/HUD, GH #76 per-eye rendering). With the eye record now
+  faithful in sim, the offline candidates are thin; #76 step 1 (per-eye
+  view/projection) remains the highest-value hook item.
+
 ## Wake 59 — 2026-10-17 20:35 (scheduled loop)
 - **Unit:** filed **GH #77** and landed its first slice — the XRSIM eye-frame
   record (`eye_frames.log`, #68 req 1) presented the host's **synthetic** eye

@@ -36,7 +36,15 @@ The Host component is an independent 64-bit (x64) application responsible for al
   self-describing in 3D: the harness reports it as `eye_frames` and the
   `capture_metadata_present` check confirms it, and it is the camera transform
   GH #67 step 3 needs to re-express the engine's first-person viewmodel in
-  head/controller space.
+  head/controller space. Each line ends with a provenance token (GH #77,
+  ADR-0462/0463): `eye=runtime` (a real `xrLocateViews` call), `eye=sim` (the
+  mock host reconstructed the per-eye views a runtime would return for the
+  frame's scripted head pose via `ComputeEyeViewFromHeadPose`, because it has no
+  runtime to ask) or `eye=synthetic` (the constant placeholder the hook actually
+  consumes in mock mode). `tools/xrsim.py` measures the view/head rotation
+  deviation and the left/right eye separation, grades `eye_views_scene_faithful`
+  for `runtime`/`sim`, and skips a `synthetic`/legacy record -- so a sim run now
+  exercises the pass branch instead of always skipping.
 - In mock mode, the host prints a parseable **frame-time summary** every 30
   frames (`[Mock Host] FrameBudget samples=.. mean_ms=.. max_ms=..
   over_budget=.. budget_ms=.. p50_ms=.. p95_ms=..`; GH #68 requirement 2). The

@@ -13,6 +13,8 @@
 #include <vector>
 
 using RiddickVR::EyeFrameSample;
+using RiddickVR::EyeViewSource;
+using RiddickVR::ComputeEyeViewFromHeadPose;
 using RiddickVR::FormatEyeFrameLine;
 
 static int g_failures = 0;
@@ -95,7 +97,7 @@ int main() {
     s.projR[0] = 1.0f; s.projR[5] = 1.0f; s.projR[10] = -1.0001f;
     s.projR[11] = -1.0f; s.projR[14] = -0.1f;
     // GH #77: provenance token -- real runtime views.
-    s.viewsFromRuntime = true;
+    s.viewSource = EyeViewSource::Runtime;
 
     const std::string line = FormatEyeFrameLine(300, s);
 
@@ -116,13 +118,18 @@ int main() {
         Check(StartsWith(fields[7], "eye="), "the last field must be the eye= token");
     }
 
-    // GH #77: the provenance token reflects `viewsFromRuntime` (a sample left at
-    // its default is the host's synthetic baseline, never claimed as runtime).
+    // GH #77 / ADR-0463: the provenance token reflects `viewSource` (a sample
+    // left at its default is the host's placeholder baseline, never claimed as a
+    // scene-faithful view).
     EyeFrameSample synthetic{};
     Check(FormatEyeFrameLine(300, synthetic).find(" eye=synthetic") != std::string::npos,
           "a default sample must report eye=synthetic");
     Check(FormatEyeFrameLine(300, s).find(" eye=synthetic") == std::string::npos,
           "a runtime sample must not report eye=synthetic");
+    EyeFrameSample simulated{};
+    simulated.viewSource = EyeViewSource::Simulated;
+    Check(FormatEyeFrameLine(300, simulated).find(" eye=sim") != std::string::npos,
+          "a reconstructed sample must report eye=sim");
 
     // The pose tokens are exactly 3 / 4 comma-separated numbers.
     Check(CountChar(fields[0], ',') == 0, "frame token has no commas");
@@ -153,6 +160,56 @@ int main() {
           "viewL must be a full column-major matrix");
     Check(std::fabs(s.viewL[12] - s.viewR[12]) > 1e-6f,
           "test fixture must carry a non-zero IPD split");
+
+    // GH #77 / ADR-0463: the pure reconstruction the mock host uses to produce a
+    // scene-faithful per-eye view from the frame's scripted head pose.
+    {
+        const float headPos[3] = {0.0f, 1.70f, 0.0f};
+        const float headQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float vL[16] = {}, vR[16] = {};
+        ComputeEyeViewFromHeadPose(headPos, headQuat, 0.0325f, false, vL);
+        ComputeEyeViewFromHeadPose(headPos, headQuat, 0.0325f, true, vR);
+        Check(std::fabs(vL[0] - 1.0f) < 1e-5f && std::fabs(vL[5] - 1.0f) < 1e-5f &&
+              std::fabs(vL[10] - 1.0f) < 1e-5f,
+              "identity head -> identity view rotation");
+        Check(std::fabs(vL[12] - 0.0325f) < 1e-5f && std::fabs(vL[13] + 1.70f) < 1e-5f,
+              "left eye view translation must be the inverse eye origin");
+        Check(std::fabs(vR[12] + 0.0325f) < 1e-5f,
+              "right eye view translation must mirror the left");
+        Check(std::fabs(std::fabs(vL[12] - vR[12]) - 0.065f) < 1e-5f,
+              "eye separation must equal the 65 mm IPD");
+    }
+    {
+        // A yawed head: the view rotation must equal the head's own rotation
+        // (that is exactly what makes the harness's view/head deviation ~0) and
+        // the eye origins must rotate with the head, keeping the IPD.
+        const float yaw = 30.0f * 3.14159265358979f / 180.0f;
+        const float headPos[3] = {0.10f, 1.60f, -0.20f};
+        const float headQuat[4] = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
+        float vL[16] = {}, vR[16] = {};
+        ComputeEyeViewFromHeadPose(headPos, headQuat, 0.0325f, false, vL);
+        ComputeEyeViewFromHeadPose(headPos, headQuat, 0.0325f, true, vR);
+        float r[9];
+        RiddickVR::QuatToRowMajor3x3(headQuat, r);
+        for (int rr = 0; rr < 3; ++rr) {
+            for (int cc = 0; cc < 3; ++cc) {
+                // The host's view stores the world->eye rotation R^T, so the
+                // column-major element M(rr,cc) = vL[cc*4+rr] must equal
+                // R^T(rr,cc) = R(cc,rr) = r[cc*3+rr].
+                const float viewRot = vL[cc * 4 + rr];
+                if (std::fabs(viewRot - r[cc * 3 + rr]) > 1e-4f) {
+                    std::fprintf(stderr,
+                                 "eye frame test failed: view rotation [%d][%d] = %.5f, "
+                                 "expected R_head^T %.5f\n",
+                                 rr, cc, viewRot, r[cc * 3 + rr]);
+                    ++g_failures;
+                }
+            }
+        }
+        const float dx = vL[12] - vR[12], dy = vL[13] - vR[13], dz = vL[14] - vR[14];
+        Check(std::fabs(std::sqrt(dx * dx + dy * dy + dz * dz) - 0.065f) < 1e-4f,
+              "yawed eye separation must stay the IPD");
+    }
 
     // Determinism: same sample -> same line.
     Check(FormatEyeFrameLine(300, s) == line, "formatting must be deterministic");
