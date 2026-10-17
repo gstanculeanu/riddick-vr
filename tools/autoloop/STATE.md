@@ -2,6 +2,53 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 55 — 2026-10-17 19:22 (scheduled loop)
+- **Unit:** GH **#75** — `python tools/scenario_tests.py --check` (the CI scenario
+  lane *and* the loop's own validation step) was **red on `main`**: `hands_view.json`
+  is an idle inspection pose with no interactive gesture, so it has no hook marker,
+  yet the validator required non-empty `markers`/`markers_any`. Tooling + docs only;
+  **no C++/asset change, no build, no deploy**.
+- **Why this unit:** #75 is the newest open item, it blocks a mandatory step of every
+  wake's validation, and it is deploy-free (unlike #67 step 3 / #72 req 1, which
+  need a hook deploy the loop is forbidden to do).
+- **Change (opt-out, option 1 in the issue):**
+  - `tools/scenario_tests.py`: a new optional boolean `"observe"` (non-bool →
+    hard error) skips **only** the non-empty-markers requirement; every other check
+    still runs (name/stem, keys, required fields, increasing frames, marker fields,
+    declared markers present in `camera_hook.cpp`, scripted profile exists) and a
+    profile with neither markers nor the opt-out is still rejected. `--check` now
+    prints the observation-only count.
+  - `tools/scenarios/hands_view.json`: `"observe": true` (keeps its empty `markers`).
+  - `tools/test_scenario_tests.py` (new, headless): synthetic workspace covering the
+    opt-out pass, markerless-without-opt-out rejection, non-bool `observe`,
+    marker-absent-from-hook-source, missing scripted profile, non-increasing
+    keyframes — plus a final case that runs the **shipped** `--check` (the #75 guard).
+  - `tools/verify_reported_fixes.py`: a GH #75 invariant (opt-out handler + flag +
+    new test exist).
+  - `.github/workflows/vr-worker.yml`: the CI lane now runs `test_scenario_tests.py`
+    before `scenario_tests.py --check`.
+  - `docs/adr/0458-observation-only-scenario-profiles.md` (new); `docs/vr-scenarios.md`
+    section; ADR-0457's red note annotated as resolved.
+- **Evidence:** `scenario_tests.py --check` → **`manifest valid (8 test cases, 12
+  scripted profiles, 1 observation-only)`** exit 0. `tools/test_scenario_tests.py`
+  8/8 PASS; all 8 other `tools/test_*.py` exit 0; `test_xrsim.py` + `xrsim.py
+  --selftest` PASS; `validate_addresses` + `verify_hook_init` +
+  `verify_reported_fixes` (with the new invariant) PASS. Commit `d3dabf0`.
+- **Also checked (#74, no change needed):** the wake 52–54 union is intact at HEAD —
+  `tools/xrsim.py`/`src/host/openxr_manager.cpp`/`tools/verify_reported_fixes.py`
+  contain `--reach-gameplay`, `display_branch`, `eye_frames`, `p50_ms`,
+  `comfort_vignette` (xrsim) and `eye_frames.log` (host) and the #68/#71/#72
+  invariants, so #74's code requirement is met; the only remaining #74/"#67" item is
+  the deploy-gated live probe (#67 step 3).
+- **Blocker:** none for this unit. The standing loop-wide limit is unchanged: #67
+  step 3 / #72 req 1 / #68 req 5 (`comfort_vignette_applied`) still need one
+  interactive hook deploy, which the loop must not perform.
+- **Next:** now that `--check` is green, the top player-visible work is GH **#67**
+  step 3 (needs a deploy) — otherwise advance #64 (`NativeHand: LEFT/RIGHT DRAWN`
+  one-time per-hand draw log is in) or #61 (native hand `.xtc` diffuse), both of
+  which can be extended and unit-tested without a deploy. #74 can be closed after one
+  interactive deploy confirms the restored hook probe live.
+
 ## Wake 54 — 2026-10-17 19:14 (scheduled loop)
 - **Unit:** GH **#74**, the remaining **hook half** (wake 53's stated Next) — finish
   the union so the GH #67 step-1/step-2 viewmodel machinery is restored *beside*
