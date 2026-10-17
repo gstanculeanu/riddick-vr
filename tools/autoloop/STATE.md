@@ -2,6 +2,75 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 65 — 2026-10-17 23:22 (scheduled loop)
+- **Unit:** GH **#80 requirement 1** — decided *where* the simulator-only input
+  bridge can legally install the `GetProcAddress` intercept, and landed the
+  bridge's pure, unit-tested core (requirement 2 + the gate half of 3). Harness/
+  hook-header + tests + ADR; **no deploy, no live behavior change**.
+- **Why this unit:** #80 is the only remaining route to #71 req 1 (the reach that
+  makes the #68 iteration vehicle useful), it is the explicit "Next" of wake 64,
+  and the naive implementation (install from the hook's deferred init) was an
+  unmeasured assumption that could waste future wakes.
+- **Decisive finding (read-only RE of the shipped sim install, Ghidra 12.1.4 via
+  `rea`; ADR-0467):** the engine resolves its input entry points **once, in a
+  constructor** — `CInputContext_DInput::CInputContext_DInput` (MSystem.dll VA
+  `0x1010b440`, body `0x1010b440–0x1010b52a`) does `LoadLibraryA("xinput1_3.dll")`
+  + `"XInputGetState"` (strings VA `0x102fc7cc`/`0x102fc7bc`) and
+  `LoadLibraryA("dinput.dll")` + `GetProcAddress("DirectInputCreateA")` (strings
+  VA `0x102fc7b0`/`0x102fc79c`). The constructor is reached only through the
+  input factory `FUN_1010b7f0` (no direct callers — indirect subsystem/factory
+  registration), device creation is tied to `CSS_MSG_WIN32_NEWMAINWINDOW`
+  (VA `0x102fc952`), and the renderer (hence this hook) is loaded as a *display
+  context* (`CSystemWin32::DC_InitList` VA `0x100f69c0` registers `RndrGL.DLL`,
+  string used at `0x100f6a4e`; RndrGL imports `OPENGL32.dll`, 96 thunks; the
+  deployed hook's log shows its IAT installs landing in RndrGL's image).
+  `DarkAthena.exe` statically imports `MSystem.dll`/`MCCDyn.dll`/`dvm.dll` but
+  **not** `opengl32`/`RndrGL`, so `MSystem.dll` is mapped before any hook code.
+- **Consequence (the correction):** the bridge must **not** install from the
+  hook's deferred init (GH #27, first `wglCreateContext`) — a GL context needs a
+  window HDC and the input context is part of the same window bring-up, so that
+  seam can run *after* the procs were already resolved. Install from
+  `DllMain(DLL_PROCESS_ATTACH)` as a loader-lock-safe, IO-free IAT swap on
+  `MSystem.dll`'s `GetProcAddress` (or a thread started there whose only job is
+  the swap), and *report* whether the install beat the constructor rather than
+  assume it.
+- **Change:**
+  - `src/hook/sim_input_bridge.h` (new, pure, no Win32): two-token enable gate
+    (`RIDDICKVR_SIM` + `RIDDICKVR_SIM_CONFIRM`, requirement 3), bounded tap
+    cadence (`SimConfirmTick`/`SimConfirmPeriod`, edge-triggered, `maxTaps`),
+    DirectInput keyboard encoding (`kDirectInputKeyboardBytes` 256,
+    one byte per scan code `0x80`, `DIK_RETURN` 0x1C), `GUID_SysKeyboard`
+    byte-match helper, XInput gamepad encoding
+    (`ApplySimConfirmToGamepad` ORs START|A, `BumpSimPacketNumber`), and the two
+    interceptor predicates (`SimBridgeOwnsProcName`, `SimBridgeIsKeyboardGuid`).
+  - `tests/sim_input_bridge_tests.cpp` (new) + `CMakeLists.txt`
+    (`sim_input_bridge_pure_core`, header added to the proxy target).
+  - `docs/adr/0467-sim-input-bridge-install-point.md` (new) — the findings, the
+    install-point decision, and the residual ordering risk.
+  - `tools/verify_reported_fixes.py` — a GH #80 invariant (module + tests + ADR
+    wired).
+- **Evidence (offline):** `tools/build-all.ps1` Release, **no `-Deploy`** OK
+  (x86 proxy + x64 host; `dist/opengl32.dll` byte-unchanged — no hook source
+  changed); **CTest 22/22 on x86 AND x64** (incl. the new test); all 10
+  `tools/test_*.py` PASS; `xrsim --selftest` PASS; `verify_reported_fixes` PASS
+  (`#40..#80`), `verify_hook_init` PASS, `validate_addresses` PASS,
+  `verify_test_artifacts` PASS, `scenario_tests.py --check` PASS. **No live
+  sim run**: the pattern in this wake is a pure header + tests (byte-identical
+  hook artifact), so a run would exercise nothing new; the live validation is
+  the deploy-gated interception.
+- **Blocker / honest limit:** live validation of the bridge remains deploy-gated
+  (the sim install runs the stale 12:47 hook). Also still open: whether
+  `CInputContext_DInput`'s constructor precedes the hook's `DllMain` on a real
+  run — static xrefs cannot settle the indirect factory construction, so the
+  interceptor must log its install outcome. Fallback if it is too late: the
+  wake-64 in-process console route (`loadgame Checkpoint`), which needs no early
+  install.
+- **Next:** GH #80 req 1 — implement `SimInputBridge` (early install + the
+  `XInputGetState` wrapper and/or `DirectInputCreateA`→`CreateDevice` vtable
+  wrap → `GetDeviceState` for `GUID_SysKeyboard`), consuming the pure core;
+  validate with the one interactive deploy. Otherwise the deploy-gated ladder is
+  unchanged (#67 step 3, #72 req 1 A/B, #68 req 5, #79 hook half, #76 step 1).
+
 ## Wake 64 — 2026-10-17 22:24 (scheduled loop)
 - **Unit:** GH **#71 requirement 1** (the top blocker — the reach makes the #68
   iteration vehicle useless for live validation) — tested the *second* input-free

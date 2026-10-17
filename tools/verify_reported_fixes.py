@@ -657,8 +657,40 @@ def main():
             "and sample/save from that private copy, not re-read the shared "
             "textures (the hook half is deploy-gated)")
 
+    # GH #80: the simulator-only input bridge. Both input-free routes to a live
+    # scene are measured dead (posted window messages -- ADR-0466; the engine's
+    # command line -- its wake-64 addendum), so the sim confirm must be
+    # fabricated in-process on the engine's own device read path. The install
+    # point is *not* the hook's deferred init: MSystem.dll resolves
+    # XInputGetState / DirectInputCreateA once, inside
+    # CInputContext_DInput's constructor (0x1010b440), so the intercept must
+    # precede that constructor (ADR-0467). This lands the pure core -- the
+    # two-token enable gate, the bounded tap cadence, and the DirectInput /
+    # XInput state encodings -- with headless tests; the interception is next.
+    sim_bridge_hdr = (ROOT / "src/hook/sim_input_bridge.h").read_text(encoding="utf-8")
+    require("SimInputBridgeEnabled" in sim_bridge_hdr and
+            "SimConfirmRoute" in sim_bridge_hdr and
+            "SimConfirmTick" in sim_bridge_hdr and
+            "SimConfirmPeriod" in sim_bridge_hdr and
+            "SimBridgeOwnsProcName" in sim_bridge_hdr and
+            "kDirectInputKeyboardBytes" in sim_bridge_hdr and
+            "SetDirectInputKey" in sim_bridge_hdr and
+            "SimBridgeIsKeyboardGuid" in sim_bridge_hdr and
+            "ApplySimConfirmToGamepad" in sim_bridge_hdr and
+            "BumpSimPacketNumber" in sim_bridge_hdr and
+            "RIDDICKVR_SIM_CONFIRM" in sim_bridge_hdr and
+            "tests/sim_input_bridge_tests.cpp" in cmake and
+            "sim_input_bridge_pure_core" in cmake and
+            "0x1010b440" in
+            (ROOT / "docs/adr/0467-sim-input-bridge-install-point.md").read_text(encoding="utf-8"),
+            "GH #80: the simulator-only input bridge's pure core (two-token "
+            "enable gate, bounded tap cadence, DirectInput/XInput state "
+            "encodings) must exist, be unit-tested, and its install point must "
+            "be recorded as the input context's constructor (0x1010b440), not "
+            "the hook's deferred init")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-79)")
+          "#62, #64-68, #69, #71-73, #75-80)")
     return 0
 
 

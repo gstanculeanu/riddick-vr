@@ -57,6 +57,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/viewmodel_drive.h
         src/hook/gl_matrix_tracker.h
         src/hook/display_branch.h
+        src/hook/sim_input_bridge.h
         src/hook/camera_hook.cpp
         src/hook/camera_hook.h
         src/hook/vr_config.cpp
@@ -258,4 +259,19 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/host
     )
     add_test(NAME eye_capture_helpers COMMAND riddick_vr_eye_capture_tests)
+
+    # GH #80: the simulator-only input bridge. Both input-free routes to a live
+    # scene are measured dead (posted messages -- ADR-0466; the engine's command
+    # line -- its wake-64 addendum), so the sim confirm must be fabricated
+    # in-process on the engine's own device read path. The install point is not
+    # the hook's deferred init: MSystem.dll resolves XInputGetState /
+    # DirectInputCreateA once, in CInputContext_DInput's constructor (0x1010b440),
+    # so the intercept must precede it (ADR-0467). This pins the pure core --
+    # enable gate, tap cadence, and the DirectInput/XInput state encodings
+    # (src/hook/sim_input_bridge.h) -- which is headless-testable.
+    add_executable(riddick_vr_sim_input_bridge_tests tests/sim_input_bridge_tests.cpp)
+    target_include_directories(riddick_vr_sim_input_bridge_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME sim_input_bridge_pure_core COMMAND riddick_vr_sim_input_bridge_tests)
 endif()
