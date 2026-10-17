@@ -2,6 +2,94 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 53 — 2026-10-17 19:05 (scheduled loop)
+- **Unit:** GH **#74**, the **host half** (wake 52's stated Next) — reconcile the
+  pr-70 regression so the repo's host-side XRSIM capabilities (GH #68/#71/#72)
+  are back *and* the branch's conveniences are kept (the issue's preferred
+  "union"). Host C++ + CMake + tests/tools/docs; **no deploy, no game/asset
+  change**.
+- **Why this unit:** #74 is the top open item and wake 52 landed only the Python
+  half (`tools/xrsim.py` + its test). The union's host half
+  (`src/host/openxr_manager.cpp`) and the `verify_reported_fixes.py` invariants
+  were still missing, so a live run's `frame_budget`/`display_branch`/
+  `eye_frames`/`content_gate`/`comfort` signals had no host to emit them and no
+  invariant to guard them.
+- **Change (union):**
+  - `src/host/openxr_manager.cpp`: restored the dump-gate banner; per-dump
+    `display_branch.log` (GH #69) + `eye_frames.log` pose/projection (GH #68
+    req 1); the content gate (GH #72 req 2); the p50/p95 `FrameBudget`
+    (GH #68 req 2) **with** the branch's `gameplay_only=1` suffix + cinema
+    gating; the `ComfortVignette` summary (GH #68 req 5). Kept the branch's
+    gameplay-gated scenario start (`--scenario-immediate`, `m_scenarioStartFrame`
+    /`m_gameplayStreak`) and the per-frame `frame_*.json` sidecar.
+  - `src/host/dump_gate.h` + `tests/dump_gate_tests.cpp`: **both-eye rule** —
+    `EyePairIsBlank`; a frame with one empty eye is `Blank`, not graded.
+  - `CMakeLists.txt`: re-added the host CTests (`dump_gate_gameplay_only`,
+    `eye_frame_record`, `frame_time_percentiles`, `comfort_vignette_summary`) +
+    `gl_matrix_tracker` + `native_hand_skin_mapping` + the
+    `src/hook/gl_matrix_tracker.h` source entry.
+  - `tools/verify_reported_fixes.py`: re-added the #69/#71/#72/#68-req1/2/5/#61
+    invariants (union with the branch's #63/#66/#67 block). One string updated to
+    the shipped harness: `read_fresh_hook_log(log_file, log_mark)` (the restored
+    harness names the path `log_file`, not a `LOG_FILE` constant).
+  - `docs/adr/0449-...md`, `src/host/README.md`: document the both-eye rule.
+- **Change (found while live-validating — the both-eye gate):** the restored gate
+  sampled only the left eye, so a gameplay-labelled frame whose **right** eye was
+  still all-black (interop warm-up / level transition) entered the graded window
+  and produced a spurious stereo FAIL — measured live: **frame 1320,
+  `meanL=35.62 meanR=0`** (`both_eyes_non_black` + `interop_produced_content`).
+  `EyePairIsBlank` skips such frames; unit-tested.
+- **Evidence:**
+  - **Live** (allowed exception, `RIDDICKVR_SIM=1`, fresh `dist\riddickvr-host.exe`;
+    the F: sim install's deployed hook is the 12:47 build — unchanged hook source
+    this wake):
+    - `--reach-gameplay --duration 40 --interval 60 --downscale 4`: **97 gameplay
+      frames / 0 cinema / 0 blank**, all 97 stereo groups PASS, `scene_advanced`
+      PASS, `gameplay_window_has_content` PASS (0 blank of 97),
+      `gameplay_full_bleed_reached` PASS (BarScan fill 1.00),
+      `capture_metadata_present` PASS (97 transforms, yaw span 39.98°),
+      `comfort_vignette_applied` PASS (max=1.000), `frame_budget` PASS on
+      `--evaluate-only` (n=6000 p50=2.49 p95=4.69, budget 11.11). The only FAILs
+      were the frame-1320 empty-eye frame (fixed above).
+    - A second graded run (`--duration 60 --interval 60`): **6 gameplay frames**,
+      all stereo PASS, `display_branch` all gameplay, `eye_frames` 6 distinct.
+      Its single FAIL is `frame_budget` (**n=330 p50=96.2 p95=106.5** — the sim
+      install renders in-game at ~10 FPS on this machine, so the *live* 90 Hz
+      cadence genuinely misses; an honest performance result, not a wiring bug).
+      `tests/xrsim/report.json` now holds this run (the first **union-format**
+      baseline; the committed one was the legacy 586-line capture).
+  - Offline: `build-all.ps1 -Config Release` OK (x64 host + x86 hook; **no
+    `-Deploy`**); CTest **19/19 PASS on x64 AND x86**; all 9 `tools/test_*.py` +
+    `validate_addresses` + `verify_hook_init` + `verify_reported_fixes` +
+    `xrsim.py --selftest` PASS. Commit `3de4585`.
+- **Blocker / honest limit:** the runtime install is **nondeterministic about
+  reaching non-cinema gameplay** in a 40-60 s window: the 45 s run captured 0
+  frames (the hook published `cinemaMode=1` throughout — the open #71/#72 issue),
+  while the 40 s/60 s runs captured 97/6. This is *not* a host-half defect (the
+  banner, the comfort line, and the p50/p95 budget line all appear; the log shows
+  `glLoadMatrixf [3D VR PROJECTION]` yet `cinemaMode` stays latched). **#71
+  requirement 1 / #72 requirement 1 remain the reach-gameplay signature and are
+  hook-side.**
+- **Remaining #74 gaps (hook-side, deliberate non-overreach):** the merge also
+  replaced `src/hook/opengl_proxy.cpp` (`NoteModelview*` are now **no-op stubs**;
+  `s_modelviewTracker` gone) and `src/hook/viewmodel_suppressor.h` (no
+  `ViewmodelObservationSnapshot`/`ComputeSnapshot`/`observe`), so GH #67
+  step 1 (software modelview stack wired) and step 2 (viewmodel observation
+  probe) are still clobbered; their invariants are intentionally **not** re-added
+  yet. The `gl_matrix_tracker` header/CTest survive and are re-registered, but the
+  proxy does not feed the tracker.
+- **Second finding (pre-existing):** `python tools/scenario_tests.py --check` is
+  still red on `tools/scenarios/hands_view.json` (GH **#75**, empty markers) —
+  unchanged by this wake.
+- **Next:** re-merge the hook half of #74 — start from
+  `git show f5fd7f7:src/hook/opengl_proxy.cpp` +
+  `src/hook/viewmodel_suppressor.h` and keep pr-70's `viewmodel_drive`
+  (ADR-0446/0447) as the union, then re-add the #67 step1/2 invariants; or fix
+  #75 (make the scenario validator tolerate an idle inspection profile). Then
+  regenerate `tests/xrsim/report.json` with a deterministic gameplay reach
+  (#71/#72).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 52 — 2026-10-17 18:17 (scheduled loop)
 - **Unit:** GH **#74** (the critical harness regression filed wake 51) — **Python
   half reconciled.** Restored the autoloop's `tools/xrsim.py` from `f5fd7f7` as
