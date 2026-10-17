@@ -2,6 +2,74 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 59 — 2026-10-17 20:35 (scheduled loop)
+- **Unit:** filed **GH #77** and landed its first slice — the XRSIM eye-frame
+  record (`eye_frames.log`, #68 req 1) presented the host's **synthetic** eye
+  baseline as "the per-eye view/projection that produced the dumped frame"; the
+  harness now tags each record's provenance and stops treating a placeholder as a
+  real eye view. Host + harness + docs + tests; **no asset change, no deploy**.
+- **Why this unit:** every ladder item (#67 step 3, #64, #61, #65, #62, #63) is
+  code-complete and deploy-gated, and #68 is the top open item — the prompt says
+  to *extend it to cover whatever you are fixing*. Auditing #68 req 1 found the
+  record's central claim is false in every mock run.
+- **Decisive finding (read-only + live, not inferred):** in mock mode the host
+  never calls `xrLocateViews`. `Initialize()` returns early
+  (`openxr_manager.cpp:623-628`), so `UpdateTracking`'s real branch (`:823`,
+  `:1007`) never runs; the mock `RunLoop` fills `left/rightEyeView` +
+  `left/rightEyeProjection` with a **constant synthetic baseline**
+  (`:1679-1697`: identity rotation, `m[12] = -/+ 0.0325`, `projL == projR`), and
+  writes those verbatim to `eye_frames.log` (`:1993-1996`) / `frame_####.json`
+  (`:2028-2030`). Observed file: `viewL`/`viewR` rotation = identity on every
+  line while `hmdquat` changes with the scripted keyframe → the "eye view" has
+  **no head rotation** and is independent of the head. `eye_frame.h:3-13` and the
+  `xrsim.py` docstring overstated it.
+- **Change:**
+  - `src/host/eye_frame.h`: `EyeFrameSample.viewsFromRuntime`; every line now ends
+    `eye=runtime|synthetic` (`FormatEyeFrameLine`), header comment corrected.
+  - `src/host/openxr_manager.{h,cpp}`: `m_eyeViewsFromRuntime` set `true` only in
+    the `xrLocateViews` success branch (`:1013-1017`), `false` in the fallback
+    (`:1030`); the dump site records it in the log and as `"eyeViews"` in
+    `frame_####.json` (+ the missing `rightEyeProjection`).
+  - `tools/xrsim.py`: parse the optional token (`source`, default `unknown`);
+    `eye_frame_stats` reports `source`, `view_head_rotation_deviation_deg`
+    (`_view_head_rotation_deviation_deg`: angle between `viewL`'s rotation and the
+    head pose — ~0 faithful, the head's own rotation for the identity baseline),
+    `proj_lr_identical`; `capture_metadata_present` detail now says
+    `eye views=<source>`; new graded check `eye_views_scene_faithful` — **passes**
+    a `runtime` capture whose views track the head pose (tol 1°), **fails** a
+    `runtime`-labelled but inconsistent one, **skips** (with the deviation as
+    detail) a `synthetic`/`unknown` one. No default-run verdict change.
+  - `tests/eye_frame_tests.cpp`: 8 fields, `eye=` token, both values, determinism.
+  - `tools/test_xrsim.py`: +3 tests (provenance parse + deviation; skip-synthetic;
+    grade-runtime incl. the fail case); 2 existing eye-frame tests extended.
+  - `tools/verify_reported_fixes.py`: GH #77 invariant; summary now `#75-77`.
+  - `docs/adr/0462-eye-frame-view-provenance.md` (new) + a `docs/vr-scenarios.md`
+    note.
+- **Evidence:** `build-all.ps1` (no deploy) OK; CTest **20/20 on x86 AND x64**.
+  All 10 `tools/test_*.py` + `xrsim.py --selftest` + `verify_test_artifacts` +
+  `verify_hook_init` + `validate_addresses` + `verify_reported_fixes` +
+  `scenario_tests.py --check` (8 test cases / 12 scripted / 1 observation-only)
+  PASS. **Live:** `python tools/xrsim.py --reach-gameplay --duration 180
+  --interval 60 --downscale 4` reached gameplay and the report shows
+  `capture_metadata_present: … eye views=synthetic` and
+  `eye_views_scene_faithful [SKIP]: … deviates … by up to 20.907 deg … placeholder
+  … (GH #77)` — the measured 20.9° is exactly the scripted head yaw the identity
+  baseline ignores.
+- **Blocker / honest limit:** the `eye=runtime` graded branch is only exercised on
+  a real headset, so the sim run proves the *skip* + the deviation, not the pass.
+  I did **not** commit a regenerated `report.json`: the clean 180 s run's only
+  extra FAIL was a truncated in-flight final capture (harness reports it, never
+  crashes), and the committed wake-58 baseline is a clean 10-frame live capture —
+  the new check skips on its token-less `eye_frames` by design
+  (`test_eye_frame_check_skipped_without_file`), so the baseline stays coherent and
+  the diff stays focused. Loop-wide deploy gate unchanged (#67 step 3, #72 req 1
+  A/B, #68 req 5).
+- **Next:** the record is honest; the loudest remaining offline thread is that the
+  mock never produces a scene-faithful eye view at all (`eye=synthetic` everywhere)
+  — a real capstone would derive the per-eye view from the scripted head pose in
+  the *record* (not the shared state) so a sim run can grade `runtime`-equivalent
+  data. Otherwise the ladder is still deploy-gated (#67 step 3).
+
 ## Wake 58 — 2026-10-17 20:10 (scheduled loop)
 - **Unit:** filed **GH #76** (native stereo is a shifted monoscopic capture — epic
   #57 **definition-of-done item 1**, previously untracked: the epic table listed it
