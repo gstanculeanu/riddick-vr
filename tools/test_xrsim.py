@@ -526,6 +526,8 @@ def _args(**kw):
         host_exe=kw.get("host_exe"), game_arg=kw.get("game_arg"),
         scenario_immediate=kw.get("scenario_immediate", False),
         require_parallax=kw.get("require_parallax", False),
+        built_hook=kw.get("built_hook"),
+        require_fresh_hook=kw.get("require_fresh_hook", False),
         evaluate_only=True, selftest=False)
 
 
@@ -1474,6 +1476,116 @@ def test_sim_confirm_flags_parse(td):
                            "--sim-confirm-hold-ms", "80", "--selftest"]) == 0
 
 
+# ----------------------------- GH #81: the hook build under test is identified
+def test_file_identity_reports_hash_and_tracks_change(td):
+    """A build is identified by content (sha256), not by path or mtime alone."""
+    p = Path(td) / "opengl32.dll"
+    p.write_bytes(b"hook-build-one")
+    a = xrsim.file_identity(p)
+    assert a["bytes"] == len(b"hook-build-one") and len(a["sha256"]) == 64
+    assert a["mtime_utc"].endswith("Z"), a
+    # A same-size edit must not be masked by the identity cache: pin a new mtime
+    # like a rebuild would, and the hash must change.
+    p.write_bytes(b"hook-build-two")
+    os.utime(p, (1700000000, 1700000000))
+    b = xrsim.file_identity(p)
+    assert b["sha256"] != a["sha256"], (a, b)
+    assert xrsim.file_identity(Path(td) / "absent.dll") is None
+
+
+def test_deployed_hook_identity_matches_and_differs(td):
+    game = Path(td) / "gamedir"
+    game.mkdir()
+    built = Path(td) / "dist" / "opengl32.dll"
+    built.parent.mkdir()
+    built.write_bytes(b"current-build")
+    # Nothing deployed yet: the deployed hook is unknown, and nothing is compared.
+    ident = xrsim.deployed_hook_identity(game, built)
+    assert ident["deployed"] is None and ident["deployed_present"] is False
+    assert ident["matches_build"] is None
+    assert "unknown" in xrsim.format_hook_identity(ident)
+    # Same bytes -> the run exercised the current build.
+    (game / "opengl32.dll").write_bytes(b"current-build")
+    assert xrsim.deployed_hook_identity(game, built)["matches_build"] is True
+    # A different deployed hook -> stale, named in the summary.
+    (game / "opengl32.dll").write_bytes(b"older-deployed-hook!!")
+    stale = xrsim.deployed_hook_identity(game, built)
+    assert stale["matches_build"] is False
+    assert "DIFFERS" in xrsim.format_hook_identity(stale)
+    # No repo build to compare against: the deployed identity is still recorded.
+    no_build = xrsim.deployed_hook_identity(game, None)
+    assert no_build["deployed_present"] is True and no_build["matches_build"] is None
+    assert "no repo build to compare" in xrsim.format_hook_identity(no_build)
+
+
+def test_deployed_hook_check_skips_by_default_and_grades_on_request(td):
+    built = {"path": "b", "sha256": "b" * 64, "bytes": 2, "mtime_utc": "t"}
+    stale = {"deployed": {"path": "g", "sha256": "a" * 64, "bytes": 1,
+                          "mtime_utc": "t"},
+             "built": built, "deployed_present": True, "matches_build": False}
+    rec = xrsim.deployed_hook_check(stale)
+    assert rec["skip"] is True and rec["check"] == "deployed_hook_matches_build"
+    assert "STALE" in rec["detail"] and "reported only" in rec["detail"]
+    assert rec["deployed_hook"] is stale
+    graded = xrsim.deployed_hook_check(stale, require_fresh=True)
+    assert graded["ok"] is False and not graded.get("skip")
+    fresh = dict(stale, matches_build=True)
+    assert xrsim.deployed_hook_check(fresh, require_fresh=True)["ok"] is True
+    assert xrsim.deployed_hook_check(fresh)["skip"] is True
+    # Nothing deployed: reported (skipped) but never silently graded green.
+    missing = {"deployed": None, "built": built, "deployed_present": False,
+               "matches_build": None}
+    assert xrsim.deployed_hook_check(missing)["skip"] is True
+    assert xrsim.deployed_hook_check(missing, require_fresh=True)["ok"] is False
+
+
+def test_evaluate_records_hook_identity_and_grades_only_when_asked(td):
+    """The report carries `deployed_hook`; the graded form is opt-in so a normal
+    (deploy-gated) run cannot redden on the expected stale hook."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    game = Path(td) / "gamedir_eval"
+    game.mkdir()
+    built = Path(td) / "dist_eval" / "opengl32.dll"
+    built.parent.mkdir()
+    built.write_bytes(b"current-build")
+    (game / "opengl32.dll").write_bytes(b"older-deployed-hook!!")
+    budget = ("FrameBudget samples=30 mean_ms=6.0 max_ms=9.0 over_budget=0 "
+              "budget_ms=11.11 p50_ms=5.0 p95_ms=7.0")
+
+    def hook_rec(checks):
+        return [c for c in checks if c["check"] == "deployed_hook_matches_build"][0]
+
+    passed, checks = xrsim.evaluate(
+        _args(game_dir=str(game), built_hook=str(built)), art, budget, "")
+    rec = hook_rec(checks)
+    assert rec["skip"] is True and passed, checks
+    assert rec["deployed_hook"]["matches_build"] is False
+
+    passed2, checks2 = xrsim.evaluate(
+        _args(game_dir=str(game), built_hook=str(built), require_fresh_hook=True),
+        art, budget, "")
+    rec2 = hook_rec(checks2)
+    assert not rec2.get("skip") and rec2["ok"] is False and passed2 is False, checks2
+
+    # Installing the built hook flips the graded check green.
+    (game / "opengl32.dll").write_bytes(b"current-build")
+    passed3, checks3 = xrsim.evaluate(
+        _args(game_dir=str(game), built_hook=str(built), require_fresh_hook=True),
+        art, budget, "")
+    assert hook_rec(checks3)["ok"] is True and passed3, checks3
+
+
+def test_hook_identity_flags_parse(td):
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.main(["--selftest"]) == 0
+        assert xrsim.main(["--require-fresh-hook", "--selftest"]) == 0
+        assert xrsim.main(["--built-hook", str(Path(td) / "dist" / "opengl32.dll"),
+                           "--selftest"]) == 0
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -1560,6 +1672,11 @@ def main() -> int:
              test_sim_confirm_env_is_off_by_default,
              test_sim_confirm_env_sets_route_and_cadence,
              test_sim_confirm_flags_parse,
+             test_file_identity_reports_hash_and_tracks_change,
+             test_deployed_hook_identity_matches_and_differs,
+             test_deployed_hook_check_skips_by_default_and_grades_on_request,
+             test_evaluate_records_hook_identity_and_grades_only_when_asked,
+             test_hook_identity_flags_parse,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

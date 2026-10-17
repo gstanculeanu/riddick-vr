@@ -2,6 +2,62 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 69 — 2026-10-18 00:19 (scheduled loop)
+- **Unit:** filed + landed **GH #81** — every live XRSIM run now **identifies the
+  hook build it actually exercised**, and an opt-in gate (`--require-fresh-hook`)
+  refuses to let a stale-hook run be read as a validation of current source. This
+  is the *meta-blocker* of the whole deploy-gated ladder: the loop has been
+  validating current `main` against a hook ~11 h older, in every wake. Harness +
+  tests + docs + invariant; **no hook change, no build, no deploy, no live-input
+  exception beyond the allowed `xrsim` run**.
+- **Why this unit:** every player-visible item (#67/#64/#61/#65/#62/#63) and the
+  whole #71/#72/#76/#79/#80 ladder is code-complete and deploy-gated, so the
+  highest offline value is making that gate **measurable** instead of implicit in
+  prose. The prompt's #68 is the iteration vehicle and says to extend it; a run
+  whose code identity is unknown cannot validate anything.
+- **Decisive finding (measured, read-only):** the game loads
+  `<game-dir>\opengl32.dll` — a *deployed* copy the loop must not write — while
+  the mock host is launched from the repo. Measured now: deployed
+  `479232 B sha256 8514d35adec1… mtime 2026-10-17T10:47:05Z` vs built
+  `dist\opengl32.dll 488448 B sha256 14867cf370f0… mtime 2026-10-17T22:11:44Z`
+  → the run grades a hook older than the tree. `--sim-confirm` (#80) is inert
+  against a hook predating the bridge, so a stale-hook run cannot separate "the
+  bridge is broken" from "the bridge is not installed" — the confound wake 62/68
+  recorded as an honest limit but never measured.
+- **Change:** `tools/xrsim.py` — `file_identity` (sha256/bytes/mtime_utc, cached on
+  `(path,size,mtime_ns)`), `deployed_hook_identity(game_dir, built_hook)` (`matches_build`
+  True/False/None), `format_hook_identity` (one line) and `deployed_hook_check`
+  (reported+skipped by default, graded on request); `run_sim` prints
+  `[xrsim] hook under test: … -> MATCHES|DIFFERS …` at launch; `evaluate()` adds
+  the `deployed_hook_matches_build` check; both `run` and `--evaluate-only` write
+  the `deployed_hook` report key; new flags `--require-fresh-hook` and
+  `--built-hook` (env `RIDDICKVR_BUILT_HOOK`). `tools/test_xrsim.py` +5 cases;
+  `tools/verify_reported_fixes.py` GH #81 invariant (summary `#75-81`);
+  `docs/adr/0470-xrsim-hook-build-identity.md`; a `docs/vr-scenarios.md` note.
+- **Evidence (offline):** all 10 `tools/test_*.py` PASS (incl. the 5 new);
+  `xrsim.py --selftest` PASS; `verify_reported_fixes` (`#40..#81`),
+  `verify_test_artifacts`, `verify_hook_init`, `validate_addresses`,
+  `scenario_tests.py --check` PASS. **No C++ changed → no `build-all`/CTest**
+  (documented).
+- **Evidence (live, allowed exception `RIDDICKVR_SIM=1`, no deploy):**
+  `python tools/xrsim.py --reach-gameplay --duration 20 --interval 30 --downscale 4
+  --artifacts %TEMP%\xrsim81\artifacts --report-file %TEMP%\xrsim81\report.json`
+  (temp paths, so the committed baseline was untouched) printed the identity line
+  naming the stale deployed hook and wrote `deployed_hook` into the report with
+  the check **SKIP** (reported-only); the same captures re-analysed with
+  `--evaluate-only --require-fresh-hook` turned it into **[FAIL] … run exercised a
+  STALE hook … the deploy-gated change under test is not installed (GH #81)** —
+  i.e. the gate reads exactly as it will pass once a deploy installs the build.
+- **Blocker / honest limit:** this *identifies* the hook, it does not install it.
+  A live run still cannot exercise current source; the loop can now only refuse to
+  pretend it did. The session's sim also still never leaves the letterboxed
+  startup page (0 gameplay frames in the 20 s run, as in wakes 62/68), so nothing
+  reach-related changed.
+- **Next:** unchanged deploy-gated ladder — after the one interactive deploy,
+  `xrsim --reach-gameplay --require-fresh-hook` must pass (now the first, cheap
+  assertion before #71 req 1's `--sim-confirm keyboard` and the #72 req 1 latch
+  A/B); then #67 step 3, #68 req 5, #79 hook half, #76 step 1.
+
 ## Wake 68 — 2026-10-18 00:30 (scheduled loop)
 - **Unit:** GH **#79 host-half capstone** — the XRSIM capture now **records its
   own gate sample + the hook-publish race window**, and the harness **asserts the

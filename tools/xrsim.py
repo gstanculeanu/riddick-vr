@@ -120,6 +120,16 @@ staging copies (``GateSample`` lines). The report carries ``capture_gate`` and t
 (both are one staged copy, ADR-0465) and that only live frames were written; the
 straddle rate quantifies the hook-write race window (reported, not failed).
 
+``--require-fresh-hook`` (GH #81) makes a run say *which hook build it exercised*.
+The game loads ``<game-dir>\\opengl32.dll`` -- a deployed copy this loop must not
+write -- so a live run normally tests an older hook than the tree it is reported
+against, which makes a deploy-gated claim impossible to attribute. Every run
+records that binary's path/sha256/size/mtime plus the repo build's (report key
+``deployed_hook``) and prints one line at launch; the
+``deployed_hook_matches_build`` check is *reported* by default (skipped) and
+*graded* only with this flag -- the acceptance instrument for "this live run
+tested current source" on the deploy-gated ladder (#71/#72/#76/#79/#80).
+
 Every dumped frame also carries the head/eye transform and projection the host
 rendered it with (``eye_frames.log`` in the dump dir, GH #68 requirement 1),
 so a capture is self-describing in 3D. The report's ``eye_frames`` key summarises
@@ -159,6 +169,7 @@ re-merged.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -166,6 +177,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # numpy/Pillow are imported lazily so the pure-logic selftest and the
@@ -206,6 +218,16 @@ HOST_EXE = Path(os.environ.get(
 LOG_FILE = GAME_DIR / "riddick_vr.log"
 DEFAULT_ARTIFACTS = REPO_ROOT / "tests" / "xrsim" / "artifacts"
 DEFAULT_REPORT = REPO_ROOT / "tests" / "xrsim" / "report.json"
+
+# GH #81: the hook the *game* loads is a deployed copy inside the game directory
+# (`<game-dir>\opengl32.dll`), not the repo build the mock host is launched from
+# (`dist/riddickvr-host.exe`). This loop must never deploy, so a live run
+# normally exercises an *older* hook than the tree under test -- its identity is
+# recorded (and, opt-in, graded) so no live result is attributed to the wrong
+# build.
+DEPLOYED_HOOK_NAME = "opengl32.dll"
+BUILT_HOOK = Path(os.environ.get(
+    "RIDDICKVR_BUILT_HOOK", str(REPO_ROOT / "dist" / DEPLOYED_HOOK_NAME)))
 
 # The line may carry an optional p50/p95 tail (post-#68 pytest host) and an
 # optional gameplay_only=1 suffix (the branch's gameplay-gated budget); both are
@@ -1259,6 +1281,115 @@ def parse_budget(host_log: str, budget_ms: float):
     return rec["ok"], rec
 
 
+# ------------------------------------------------ hook build identity (GH #81)
+# A live XRSIM run grades the hook the *game* loads, not the tree the host was
+# launched from. The two are only the same after an interactive deploy -- which
+# this loop must not perform -- so every result needs the hook's identity next to
+# it: a deploy-gated `--sim-confirm` (#80) is inert against an older hook, and a
+# stale-hook run of #67/#79's hook half cannot separate "the fix is wrong" from
+# "the fix is not installed". `deployed_hook_matches_build` (opt-in, default
+# reported-not-graded) is the acceptance instrument for "this run tested current
+# source".
+_IDENTITY_CACHE: dict = {}
+
+
+def _mtime_utc(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def file_identity(path):
+    """sha256 + size + mtime of a file, or ``None`` when absent/unreadable.
+
+    Cached on ``(path, size, mtime_ns)`` so re-analysing many frames of one run
+    hashes each binary once; any content change moves the stat and misses.
+    """
+    p = Path(path)
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    if not os.path.isfile(p):
+        return None
+    key = (str(p), st.st_size, st.st_mtime_ns)
+    cached = _IDENTITY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    rec = {"path": str(p), "sha256": h.hexdigest(), "bytes": st.st_size,
+           "mtime_utc": _mtime_utc(st.st_mtime)}
+    _IDENTITY_CACHE[key] = rec
+    return rec
+
+
+def deployed_hook_identity(game_dir, built_hook=None):
+    """Identify the hook the game will load and the repo build to compare it to.
+
+    ``matches_build`` is ``True`` (same sha256), ``False`` (different) or ``None``
+    (nothing to compare -- the deployed hook or the build is absent).
+    """
+    deployed = file_identity(Path(game_dir) / DEPLOYED_HOOK_NAME)
+    built = file_identity(Path(built_hook)) if built_hook else None
+    if deployed is None or built is None:
+        matches = None
+    else:
+        matches = built["sha256"] == deployed["sha256"]
+    return {"deployed": deployed, "built": built,
+            "deployed_present": deployed is not None, "matches_build": matches}
+
+
+def format_hook_identity(ident) -> str:
+    """One-line human summary of :func:`deployed_hook_identity`."""
+    dep, built = ident.get("deployed"), ident.get("built")
+    if dep is None:
+        return (f"no {DEPLOYED_HOOK_NAME} in the game dir -- the hook build under "
+                "test is unknown")
+    verdict = {True: "MATCHES the repo build",
+               False: "DIFFERS from the repo build (STALE hook under test)",
+               None: "no repo build to compare"}[ident.get("matches_build")]
+    line = (f"{dep['path']} sha256={dep['sha256'][:12]} {dep['bytes']} B "
+            f"mtime={dep['mtime_utc']} -> {verdict}")
+    if built is not None:
+        line += (f" [build {built['path']} sha256={built['sha256'][:12]} "
+                 f"{built['bytes']} B mtime={built['mtime_utc']}]")
+    return line
+
+
+def deployed_hook_check(ident, require_fresh=False):
+    """GH #81: report the hook build under test; grade it only on request.
+
+    Default: the check is *skipped*, because the mismatch is the loop's
+    documented deploy gate and must not redden a normal run -- but the identity is
+    still recorded in the report. ``--require-fresh-hook`` makes it the acceptance
+    instrument for "this live run exercised the current build".
+    """
+    dep = ident.get("deployed")
+    matches = ident.get("matches_build")
+    if dep is None:
+        detail = (f"no {DEPLOYED_HOOK_NAME} in the game dir; the hook build under "
+                  "test is unknown")
+    elif matches is True:
+        detail = f"run exercised the current build: {format_hook_identity(ident)}"
+    elif matches is False:
+        detail = (f"run exercised a STALE hook: {format_hook_identity(ident)} -- "
+                  "the deploy-gated change under test is not installed (GH #81)")
+    else:
+        detail = (f"{format_hook_identity(ident)} -- no repo build to compare "
+                  "against, so current source cannot be shown to have been tested")
+    if not require_fresh:
+        detail = "reported only (pass --require-fresh-hook to grade): " + detail
+    rec = {"check": "deployed_hook_matches_build", "ok": matches is True,
+           "detail": detail, "deployed_hook": ident}
+    if not require_fresh:
+        rec["skip"] = True
+    return rec
+
+
 # ----------------------------------------------------- menu advance (GH #71)
 # The scripted run stalls on the game's startup splash/menu: the mock host
 # publishes controller state but *nothing reaches the game*, because (a)
@@ -1534,6 +1665,12 @@ def run_sim(args, artifacts: Path):
     game_cmd = game_command(game_exe, getattr(args, "game_arg", None))
     print(f"[xrsim] game: {' '.join(game_cmd)}")
     game = subprocess.Popen(game_cmd, cwd=str(game_dir), env=env)
+
+    # GH #81: say which hook build this run will actually exercise. The game loads
+    # the *deployed* `<game-dir>\opengl32.dll`, not this tree's build, so every
+    # live result must be read next to this line.
+    print("[xrsim] hook under test: " + format_hook_identity(deployed_hook_identity(
+        game_dir, getattr(args, "built_hook", None) or BUILT_HOOK)))
 
     # GH #71 requirement 1: post the confirm keystroke to the game's own window
     # to *try* to advance the startup splash/menu. This is targeted window
@@ -1833,6 +1970,16 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
         for c in sub:
             checks.append({**c, "group": "comfort",
                            "detail": f"{c.get('detail','')} (frame {lefts[-1].name})"})
+    # GH #81: identify the hook build this run actually exercised. The game loads
+    # `<game-dir>\opengl32.dll` (a deployed copy this loop must not write), not the
+    # repo build the mock host was launched from, so a live result is only
+    # interpretable next to the hook's identity. Reported always; graded only with
+    # `--require-fresh-hook`.
+    eval_game_dir = Path(getattr(args, "game_dir", None) or GAME_DIR)
+    eval_built_hook = getattr(args, "built_hook", None) or BUILT_HOOK
+    checks.append({**deployed_hook_check(
+        deployed_hook_identity(eval_game_dir, eval_built_hook),
+        bool(getattr(args, "require_fresh_hook", False))), "group": "capture"})
     passed = all(c["ok"] for c in checks if not c.get("skip")) if checks else False
     return passed, checks
 
@@ -1953,6 +2100,8 @@ def cmd_evaluate_only(args):
                         "vertical_disparity": vertical_disparity_stats(checks),
                         "stereo_kind": stereo_kind_stats(checks),
                         "comfort_vignette": parse_comfort(host_text),
+                        "deployed_hook": deployed_hook_identity(
+                            game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -2019,6 +2168,17 @@ def main(argv=None):
                          "hook-side sim bridge")
     ap.add_argument("--host-exe", default=None,
                     help="riddickvr-host.exe (env RIDDICKVR_HOST_EXE)")
+    ap.add_argument("--built-hook", default=None,
+                    help="path to the repo-built hook compared against the "
+                         "deployed one (default dist\\opengl32.dll; env "
+                         "RIDDICKVR_BUILT_HOOK) -- GH #81")
+    ap.add_argument("--require-fresh-hook", dest="require_fresh_hook",
+                    action="store_true",
+                    help="grade the hook build under test (GH #81): FAIL unless the "
+                         "run exercised the repo build, i.e. the game dir's "
+                         "opengl32.dll matches the built artifact. The acceptance "
+                         "instrument for a deploy-gated fix; OFF by default because "
+                         "this loop must not deploy")
     ap.add_argument("--sim-confirm", nargs="?", const="both", default=None,
                     metavar="ROUTE",
                     help="opt the hook's simulator-only input bridge in (GH #80): "
@@ -2096,6 +2256,8 @@ def main(argv=None):
                             getattr(args, "sim_confirm_max_taps", None),
                             getattr(args, "sim_confirm_period_ms", None),
                             getattr(args, "sim_confirm_hold_ms", None)) or None,
+                        "deployed_hook": deployed_hook_identity(
+                            game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

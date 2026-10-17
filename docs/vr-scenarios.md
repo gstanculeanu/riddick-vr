@@ -231,6 +231,19 @@ acceptance, deploy-free. The `capture_gate` report key carries the straddle rate
 which is **reported, never failed**. A pre-#79 host / `--evaluate-only` run
 without the lines **skips** the check.
 
+**Hook build identity (GH #81, ADR-0470):** the game loads `opengl32.dll` from
+its **own** `System\Win32_x86` directory, not the repo build the mock host is
+launched from, and installing a fresh one is a *deploy* the autoloop must not
+perform. Every run therefore records `deployed_hook` (path/sha256/bytes/mtime of
+the deployed hook plus the `dist\opengl32.dll` build) in `report.json` and prints
+one `[xrsim] hook under test: … -> MATCHES|DIFFERS …` line at launch. The
+`deployed_hook_matches_build` check is **reported and skipped** by default and
+**graded** with `--require-fresh-hook`, which fails unless the run exercised the
+built hook — the acceptance instrument for "this live run tested current source"
+on the deploy-gated ladder (#71/#72/#76/#79/#80). Measured 2026-10-18: the
+deployed hook was `479232 B sha256 8514d35a…` vs the build
+`488448 B sha256 14867cf3…`, i.e. a run grades a ~11 h older hook.
+
 **Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
 `tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and
 stay untracked — `.gitignore` excludes the directory and only the small,

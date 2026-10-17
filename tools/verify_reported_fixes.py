@@ -748,8 +748,38 @@ def main():
             "on MSystem.dll + the DirectInput/XInput wrappers wired from DllMain) "
             "must exist, be unit-tested, and be recorded")
 
+    # GH #81: a live XRSIM run must identify the *hook build* it exercised. The
+    # game loads the deployed `<game-dir>\opengl32.dll`, not the repo build the
+    # mock host is launched from (measured 2026-10-18: deployed 479232 B
+    # sha256 8514d35a…@2026-10-17T12:47 vs dist build 488448 B sha256 14867cf3…),
+    # so the loop's live results were grading an ~11 h older hook than the tree
+    # they were reported against -- which makes a deploy-gated claim (#71/#72/
+    # #76/#79/#80) impossible to attribute. The identity is recorded (path/
+    # sha256/bytes/mtime) and the graded form is opt-in (`--require-fresh-hook`),
+    # so a normal deploy-gated run stays green while a deploy can be asserted.
+    require("def file_identity" in xrsim_tool and
+            "def deployed_hook_identity" in xrsim_tool and
+            "def format_hook_identity" in xrsim_tool and
+            "def deployed_hook_check" in xrsim_tool and
+            "deployed_hook_matches_build" in xrsim_tool and
+            "--require-fresh-hook" in xrsim_tool and
+            '"deployed_hook"' in xrsim_tool and
+            "hook under test: " in xrsim_tool and
+            "DEPLOYED_HOOK_NAME" in xrsim_tool and
+            "test_file_identity_reports_hash_and_tracks_change" in _xrsim_tests and
+            "test_deployed_hook_identity_matches_and_differs" in _xrsim_tests and
+            "test_deployed_hook_check_skips_by_default_and_grades_on_request"
+            in _xrsim_tests and
+            "test_evaluate_records_hook_identity_and_grades_only_when_asked"
+            in _xrsim_tests and
+            (ROOT / "docs/adr/0470-xrsim-hook-build-identity.md").exists(),
+            "GH #81: a live XRSIM run must record the hook build under test "
+            "(deployed `<game-dir>\\opengl32.dll` vs the repo build) and provide "
+            "the opt-in `--require-fresh-hook` gate so a deploy-gated result "
+            "cannot be attributed to the wrong build")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-80)")
+          "#62, #64-68, #69, #71-73, #75-81)")
     return 0
 
 
