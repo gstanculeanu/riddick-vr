@@ -247,4 +247,15 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME display_branch_cold_start_latch COMMAND riddick_vr_display_branch_tests)
+
+    # GH #79: the XRSIM capture stages both shared eye textures into ONE private
+    # copy and runs the content gate and the BMP write over it, so the pixels
+    # that are graded are the pixels that are saved. The pure sampler
+    # (src/host/eye_sample.h) and the BMP file layout (src/host/bmp_writer.h)
+    # are pinned here without a GPU.
+    add_executable(riddick_vr_eye_capture_tests tests/eye_capture_tests.cpp)
+    target_include_directories(riddick_vr_eye_capture_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
+    )
+    add_test(NAME eye_capture_helpers COMMAND riddick_vr_eye_capture_tests)
 endif()

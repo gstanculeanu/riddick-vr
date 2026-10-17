@@ -160,6 +160,14 @@ headset; the check is **skipped** (never failed) when the line or the locomotion
 input is absent. Snap-turn/recenter and gross HUD clipping assertions are still
 open in requirement 5 (they need hook-side signals and a deploy).
 
+**Capture integrity (GH #79, ADR-0465):** the host reads each shared eye texture
+once per capture — both eyes are staged back-to-back into one private copy that
+the content gate samples and the BMP is written from — so the graded pixels and
+the saved pixels are the same texels. The hook does not yet wait on the
+frame-consumed event, so a blit that lands between the two adjacent copies can
+still tear a pair; the hook half is deploy-gated. A pair that cannot be staged is
+reported as `Capture skipped frame=N (eye staging failed)`.
+
 **Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
 `tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and
 stay untracked — `.gitignore` excludes the directory and only the small,

@@ -73,7 +73,13 @@ public:
         m_ammoQuadCropY = (y < 0.0f) ? 0.0f : (y > 1.0f - m_ammoQuadCropH ? 1.0f - m_ammoQuadCropH : y);
     }
     bool IsMockMode() const { return m_mockMode; }
-    static bool SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::string& filename);
+    // GH #79: write a BMP from an already-mapped private eye copy (the header
+    // layout + row swizzle are the pure helpers in src/host/bmp_writer.h). The
+    // caller stages both eyes once (StageEyePair) and samples + saves from that
+    // same copy, instead of re-reading the shared texture.
+    static bool WriteBmpFromMapped(const uint8_t* base, uint32_t rowPitch,
+                                   uint32_t width, uint32_t height,
+                                   const std::string& filename);
 
 private:
     bool LoadLoader();

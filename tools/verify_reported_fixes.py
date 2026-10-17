@@ -334,7 +334,10 @@ def main():
     dump_gate = (ROOT / "src/host/dump_gate.h").read_text(encoding="utf-8")
     require("FrameContent" in dump_gate and
             "FrameContent::Live" in dump_gate and
-            "SampleEyeContent" in host and
+            # GH #79: the probe samples the private staged copy of both eyes
+            # (the pure sampler), not the shared textures directly.
+            "StageEyePair" in host and
+            "SampleEyeImage" in host and
             "kBlankMeanLuma" in host and
             "RiddickVR::FrameContent::Frozen" in host and
             "DumpGate skip frame=" in host and
@@ -343,7 +346,7 @@ def main():
             # (it reads as a spurious stereo failure), so the content probe
             # samples both eyes.
             "EyePairIsBlank" in dump_gate and
-            "EyePairIsBlank(leftLuma, leftSampled, rightLuma, rightSampled," in host and
+            "EyePairIsBlank(left.meanLuma, true, right.meanLuma, true," in host and
             "a blank right eye must mark the pair as blank" in
             (ROOT / "tests/dump_gate_tests.cpp").read_text(encoding="utf-8") and
             "FrameContent::Blank" in (ROOT / "tests/dump_gate_tests.cpp").read_text(encoding="utf-8") and
@@ -584,8 +587,38 @@ def main():
             "artifact capture from the sampled frame delta and report the "
             "excluded capture cost")
 
+    # GH #79: the XRSIM capture must read each shared eye texture ONCE, as a
+    # back-to-back pair, and grade/save from that private copy. The old path
+    # sampled both eyes (`SampleEyeContent`, its own staging copy each) and then
+    # re-read both textures in `SaveTextureToBMP`, so the hook -- which blits
+    # both eyes on every swap and never waits on the consumed event -- could
+    # overwrite the shared textures between the gate probe and the save
+    # (measured: frame 540, a lit probe with an all-black saved right eye;
+    # frame 1770, an intra-image tear). The hook-side wait is deploy-gated; the
+    # host half is the single staged pair (ADR-0465).
+    eye_sample_hdr = (ROOT / "src/host/eye_sample.h").read_text(encoding="utf-8")
+    bmp_writer_hdr = (ROOT / "src/host/bmp_writer.h").read_text(encoding="utf-8")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    require("SampleEyeImage" in eye_sample_hdr and
+            "MakeBmpHeader" in bmp_writer_hdr and
+            "ConvertRgbaRowToBgra" in bmp_writer_hdr and
+            "StageEyePair" in openxr_cpp and
+            "context->CopyResource(out.leftTex, sharedL);" in openxr_cpp and
+            "context->CopyResource(out.rightTex, sharedR);" in openxr_cpp and
+            "WriteBmpFromMapped" in openxr_cpp and
+            "SampleEyeContent(" not in openxr_cpp and
+            "SaveTextureToBMP(" not in openxr_cpp and
+            "SaveTextureToBMP" not in
+            (ROOT / "src/host/openxr_manager.h").read_text(encoding="utf-8") and
+            "tests/eye_capture_tests.cpp" in cmake and
+            "eye_capture_helpers" in cmake and
+            (ROOT / "docs/adr/0465-eye-capture-single-staged-pair.md").exists(),
+            "GH #79: the XRSIM capture must stage both eyes back-to-back once "
+            "and sample/save from that private copy, not re-read the shared "
+            "textures (the hook half is deploy-gated)")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-78)")
+          "#62, #64-68, #69, #71-73, #75-79)")
     return 0
 
 

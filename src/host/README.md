@@ -58,6 +58,18 @@ The Host component is an independent 64-bit (x64) application responsible for al
   `[Mock Host] ArtifactCapture frame=.. capture_ms=..`) from the loop delta via
   `FrameTimeExcludingHostWork`, so the harness cannot grade itself (GH #78,
   ADR-0464).
+- In mock mode, a capture reads each shared eye texture **once**: the host
+  stages both eyes back-to-back into private staging textures (`StageEyePair`)
+  and runs the content gate (`SampleEyeImage`, `src/host/eye_sample.h`) and the
+  BMP write (`WriteBmpFromMapped`, layout in `src/host/bmp_writer.h`) over that
+  same copy. The hook blits both eyes on every swap and never calls
+  `WaitForFrameConsumed`, so the old "sample then re-read to save" path could
+  grade one frame and save another (measured: frame 540 had a lit probe and an
+  all-black saved right eye; frame 1770 had an intra-image tear). A frame the
+  branch wanted but that could not be staged is logged as `Capture skipped
+  frame=N (eye staging failed)` rather than written from a second read. Pure
+  helpers unit-tested by `tests/eye_capture_tests.cpp` (GH #79, ADR-0465); the
+  hook-side wait is deploy-gated.
 - In mock mode, the host also reads the hook-published locomotion **comfort
   level** (`comfortVignette`, Track C #9) back every frame and prints a running
   summary every 30 frames (`[Mock Host] ComfortVignette samples=.. max=.. mean=..

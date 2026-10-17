@@ -1,7 +1,9 @@
 #include "openxr_manager.h"
+#include "bmp_writer.h"
 #include "comfort_vignette.h"
 #include "dump_gate.h"
 #include "eye_frame.h"
+#include "eye_sample.h"
 #include "frame_time_stats.h"
 #include <iostream>
 #include <sstream>
@@ -1299,155 +1301,112 @@ void OpenXRManager::RenderFrame(IpcBridgeHost& ipcHost) {
 // interop warm-up. Matches the harness's `blank_gameplay` rule (mean <= 1.0).
 static constexpr float kBlankMeanLuma = 1.0f;
 
-// GH #72 requirement 2: sample one eye's texture for the content gate. The
-// caller runs this on *both* eyes (the both-eye rule, EyePairIsBlank). The mean
-// luma separates the all-black interop warm-up (mean ~0) from real content --
-// computed over *every* pixel so it matches the harness's full-image rule (a
-// sparse grid can miss a small bright element and misjudge a dark-but-real frame
-// as blank). The 16x16 luma signature (left eye only) lets the caller drop
-// byte-identical repeats (a static 2D startup page). Returns false when the
-// texture cannot be sampled -- the caller then treats the frame as Live, so a
-// probe failure never blocks a capture.
-static bool SampleEyeContent(ID3D11Device* device, ID3D11DeviceContext* context,
-                             ID3D11Texture2D* texture,
-                             float* outMeanLuma, uint64_t* outSignature) {
-    if (!device || !context || !texture) return false;
-    D3D11_TEXTURE2D_DESC desc{};
-    texture->GetDesc(&desc);
-    if (desc.Width == 0 || desc.Height == 0) return false;
+// GH #79: a private staging copy of BOTH shared eye textures, taken
+// back-to-back. The mock host used to read each shared eye texture twice per
+// capture -- once inside `SampleEyeContent` (the content gate) and again inside
+// `SaveTextureToBMP` -- so the two eyes were sampled at different moments and
+// the pixels that were *graded* were not the pixels that were *saved*. The hook
+// blits both eyes on every swap (~2 ms cadence) with no synchronisation (it
+// never calls `WaitForFrameConsumed`, the missing half of the handshake), so a
+// later second read could be a torn or half-cleared frame (measured: frame 540
+// had a lit probe and an all-black saved right eye; frame 1770 had an
+// intra-image tear).
+//
+// Taking one copy of each eye back-to-back (a) makes the pair the same rendered
+// frame -- same camera time, so the shift-only stereo has no spurious global
+// vertical offset -- and (b) exposes the shared textures to the hook's
+// concurrent write for exactly two `CopyResource` calls, after which sampling
+// and BMP writing run entirely on these private copies (ADR-0465).
+struct StagedEyeImages {
+    ID3D11DeviceContext* context = nullptr;
+    ID3D11Texture2D* leftTex = nullptr;
+    ID3D11Texture2D* rightTex = nullptr;
+    D3D11_MAPPED_SUBRESOURCE mapL{};
+    D3D11_MAPPED_SUBRESOURCE mapR{};
+    D3D11_TEXTURE2D_DESC descL{};
+    D3D11_TEXTURE2D_DESC descR{};
+    bool mappedL = false;
+    bool mappedR = false;
 
-    D3D11_TEXTURE2D_DESC stagingDesc = desc;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    stagingDesc.MiscFlags = 0;
+    ~StagedEyeImages() { Release(); }
 
-    ID3D11Texture2D* staging = nullptr;
-    if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging) {
+    void Release() {
+        if (context) {
+            if (mappedL && leftTex) { context->Unmap(leftTex, 0); mappedL = false; }
+            if (mappedR && rightTex) { context->Unmap(rightTex, 0); mappedR = false; }
+        }
+        if (leftTex) { leftTex->Release(); leftTex = nullptr; }
+        if (rightTex) { rightTex->Release(); rightTex = nullptr; }
+    }
+};
+
+static D3D11_TEXTURE2D_DESC MakeEyeStagingDesc(const D3D11_TEXTURE2D_DESC& src) {
+    D3D11_TEXTURE2D_DESC staging = src;
+    staging.Usage = D3D11_USAGE_STAGING;
+    staging.BindFlags = 0;
+    staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    staging.MiscFlags = 0;
+    return staging;
+}
+
+// Copies both shared eyes into private staging textures back-to-back and maps
+// them. Returns false when the pair could not be staged -- the caller then
+// reports the skip rather than grading a frame it could not read, so a probe
+// failure never writes a partial frame. `out`'s destructor releases any partial
+// state (its textures, and any map that succeeded).
+static bool StageEyePair(ID3D11Device* device, ID3D11DeviceContext* context,
+                         ID3D11Texture2D* sharedL, ID3D11Texture2D* sharedR,
+                         StagedEyeImages& out) {
+    if (!device || !context || !sharedL || !sharedR) return false;
+    sharedL->GetDesc(&out.descL);
+    sharedR->GetDesc(&out.descR);
+    if (out.descL.Width == 0 || out.descL.Height == 0 ||
+        out.descR.Width == 0 || out.descR.Height == 0) {
         return false;
     }
-    context->CopyResource(staging, texture);
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-        staging->Release();
+    const D3D11_TEXTURE2D_DESC stagingL = MakeEyeStagingDesc(out.descL);
+    const D3D11_TEXTURE2D_DESC stagingR = MakeEyeStagingDesc(out.descR);
+    if (FAILED(device->CreateTexture2D(&stagingL, nullptr, &out.leftTex)) || !out.leftTex) {
         return false;
     }
-
-    // Full-image mean luma (plain (R+G+B)/3 average; the harness's near-black
-    // frames are ~0 under any weighting, so the threshold is unambiguous).
-    const uint8_t* base = static_cast<const uint8_t*>(mapped.pData);
-    uint64_t sum = 0;
-    for (uint32_t y = 0; y < desc.Height; ++y) {
-        const uint8_t* row = base + static_cast<size_t>(y) * mapped.RowPitch;
-        for (uint32_t x = 0; x < desc.Width; ++x) {
-            const uint8_t* px = row + static_cast<size_t>(x) * 4; // BGRA8
-            sum += (static_cast<uint32_t>(px[2]) + px[1] + px[0]) / 3; // R,G,B
-        }
+    if (FAILED(device->CreateTexture2D(&stagingR, nullptr, &out.rightTex)) || !out.rightTex) {
+        return false;
     }
-    const double count = static_cast<double>(desc.Width) * desc.Height;
-
-    // 16x16 luma signature for the frozen (byte-identical repeat) check.
-    const int kGrid = 16;
-    uint64_t hash = 1469598103934665603ull; // FNV-1a 64-bit offset basis
-    for (int gy = 0; gy < kGrid; ++gy) {
-        const uint32_t y = static_cast<uint32_t>(
-            static_cast<uint64_t>(gy) * desc.Height / kGrid);
-        const uint8_t* row = base + static_cast<size_t>(y) * mapped.RowPitch;
-        for (int gx = 0; gx < kGrid; ++gx) {
-            const uint32_t x = static_cast<uint32_t>(
-                static_cast<uint64_t>(gx) * desc.Width / kGrid);
-            const uint8_t* px = row + static_cast<size_t>(x) * 4;
-            const uint8_t luma = static_cast<uint8_t>(
-                (static_cast<int>(px[2]) + px[1] + px[0]) / 3);
-            hash = (hash ^ luma) * 1099511628211ull; // FNV-1a 64-bit prime
-        }
-    }
-
-    context->Unmap(staging, 0);
-    staging->Release();
-
-    if (outMeanLuma) *outMeanLuma = static_cast<float>(sum / count);
-    if (outSignature) *outSignature = hash;
+    // GH #79: the two copies are adjacent on purpose -- the pair is one frame.
+    context->CopyResource(out.leftTex, sharedL);
+    context->CopyResource(out.rightTex, sharedR);
+    out.context = context;
+    if (FAILED(context->Map(out.leftTex, 0, D3D11_MAP_READ, 0, &out.mapL))) return false;
+    out.mappedL = true;
+    if (FAILED(context->Map(out.rightTex, 0, D3D11_MAP_READ, 0, &out.mapR))) return false;
+    out.mappedR = true;
     return true;
 }
 
-bool OpenXRManager::SaveTextureToBMP(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::string& filename) {
-    if (!device || !context || !texture) return false;
-
-    D3D11_TEXTURE2D_DESC desc{};
-    texture->GetDesc(&desc);
-
-    D3D11_TEXTURE2D_DESC stagingDesc = desc;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    stagingDesc.MiscFlags = 0;
-
-    ID3D11Texture2D* stagingTex = nullptr;
-    HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, &stagingTex);
-    if (FAILED(hr) || !stagingTex) return false;
-
-    context->CopyResource(stagingTex, texture);
-
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = context->Map(stagingTex, 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) {
-        stagingTex->Release();
-        return false;
-    }
+// GH #79: writes one 32-bit BMP from an already-mapped private eye copy. The
+// header layout + the R8G8B8A8 -> BMP row swizzle are the pure helpers in
+// src/host/bmp_writer.h (unit-tested by tests/eye_capture_tests.cpp).
+bool OpenXRManager::WriteBmpFromMapped(const uint8_t* base, uint32_t rowPitch,
+                                       uint32_t width, uint32_t height,
+                                       const std::string& filename) {
+    if (!base || width == 0 || height == 0) return false;
 
     FILE* fp = nullptr;
     fopen_s(&fp, filename.c_str(), "wb");
-    if (fp) {
-        #pragma pack(push, 1)
-        struct BMPFileHeader {
-            uint16_t bfType = 0x4D42;
-            uint32_t bfSize = 0;
-            uint16_t bfReserved1 = 0;
-            uint16_t bfReserved2 = 0;
-            uint32_t bfOffBits = 54;
-            uint32_t biSize = 40;
-            int32_t  biWidth = 0;
-            int32_t  biHeight = 0;
-            uint16_t biPlanes = 1;
-            uint16_t biBitCount = 32;
-            uint32_t biCompression = 0;
-            uint32_t biSizeImage = 0;
-            int32_t  biXPelsPerMeter = 2835;
-            int32_t  biYPelsPerMeter = 2835;
-            uint32_t biClrUsed = 0;
-            uint32_t biClrImportant = 0;
-        } header;
-        #pragma pack(pop)
+    if (!fp) return false;
 
-        header.biWidth = static_cast<int32_t>(desc.Width);
-        header.biHeight = -static_cast<int32_t>(desc.Height); // Top-down
-        header.biSizeImage = desc.Width * desc.Height * 4;
-        header.bfSize = sizeof(header) + header.biSizeImage;
+    const RiddickVR::BmpFileHeader header = RiddickVR::MakeBmpHeader(width, height);
+    fwrite(&header, sizeof(header), 1, fp);
 
-        fwrite(&header, sizeof(header), 1, fp);
-
-        const uint8_t* pSrc = static_cast<const uint8_t*>(mapped.pData);
-        std::vector<uint8_t> row(desc.Width * 4);
-
-        for (uint32_t y = 0; y < desc.Height; ++y) {
-            const uint8_t* rowSrc = pSrc + y * mapped.RowPitch;
-            for (uint32_t x = 0; x < desc.Width; ++x) {
-                // RGBA to BGRA
-                row[x * 4 + 0] = rowSrc[x * 4 + 2];
-                row[x * 4 + 1] = rowSrc[x * 4 + 1];
-                row[x * 4 + 2] = rowSrc[x * 4 + 0];
-                row[x * 4 + 3] = rowSrc[x * 4 + 3];
-            }
-            fwrite(row.data(), 1, desc.Width * 4, fp);
-        }
-
-        fclose(fp);
+    std::vector<uint8_t> row(static_cast<size_t>(width) * 4);
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint8_t* rowSrc = base + static_cast<size_t>(y) * rowPitch;
+        RiddickVR::ConvertRgbaRowToBgra(rowSrc, row.data(), width);
+        fwrite(row.data(), 1, static_cast<size_t>(width) * 4, fp);
     }
 
-    context->Unmap(stagingTex, 0);
-    stagingTex->Release();
-    return (fp != nullptr);
+    fclose(fp);
+    return true;
 }
 
 // GH #48: file-driven scenario trajectories. Strict flat-JSON subset, no
@@ -1896,47 +1855,70 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                 // subtract harness work from the next loop delta.
                 const auto captureWorkStart = std::chrono::steady_clock::now();
                 const bool dumpDue = (totalFrames == 1 || totalFrames % m_dumpInterval == 0);
-                // GH #72 requirement 2: classify the candidate frame's content
-                // (blank interop warm-up vs frozen static page vs live) before
-                // the branch gate decides. Only sampled when a dump is actually
-                // due and the gameplay-only branch gate would otherwise pass.
+                // GH #79: take ONE private copy of both eyes (adjacent, so the
+                // pair is the same rendered frame) and run the content gate and
+                // the BMP write from it. The capture previously read each shared
+                // texture twice -- sample, then save -- so the graded pixels and
+                // the saved pixels could be different frames of a hook that is
+                // still blitting into them (torn right eye / intra-image tear).
+                //
+                // Staged only when a capture is possible: legacy mode stages any
+                // due frame; gameplay-only stages only once the published branch
+                // says 3D gameplay (the same condition ShouldDumpFrame re-checks).
                 RiddickVR::FrameContent content = RiddickVR::FrameContent::Live;
                 uint64_t contentSignature = 0;
                 bool contentSampled = false;
-                if (dumpDue && m_dumpGameplayOnly && stateRead && !cinemaMode &&
-                    !m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex) {
+                StagedEyeImages staged;
+                bool haveStaged = false;
+                if (dumpDue && !m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
+                    (!m_dumpGameplayOnly || (stateRead && !cinemaMode))) {
+                    haveStaged = StageEyePair(m_d3d11Device, m_d3d11Context,
+                                              m_sharedLeftTex, m_sharedRightTex, staged);
+                    // GH #72 requirement 2: classify the candidate frame's
+                    // content (blank interop warm-up vs frozen static page vs
+                    // live) before the branch gate decides, sampling from the
+                    // private copies.
+                    //
                     // GH #72 requirement 2 (both-eye rule): sample BOTH eyes. A
                     // frame whose right (or left) eye is still all-black -- the
                     // interop warm-up or a level transition -- would read as a
                     // spurious stereo failure, so it is not gradable even when
                     // the branch is gameplay. The 16x16 signature (frozen check)
                     // comes from the left eye.
-                    float leftLuma = 0.0f;
-                    float rightLuma = 0.0f;
-                    uint64_t sig = 0;
-                    const bool leftSampled = SampleEyeContent(
-                        m_d3d11Device, m_d3d11Context, m_sharedLeftTex, &leftLuma, &sig);
-                    const bool rightSampled = SampleEyeContent(
-                        m_d3d11Device, m_d3d11Context, m_sharedRightTex, &rightLuma, nullptr);
-                    if (leftSampled) {
+                    if (haveStaged && m_dumpGameplayOnly) {
+                        const RiddickVR::EyeImageSample left = RiddickVR::SampleEyeImage(
+                            static_cast<const uint8_t*>(staged.mapL.pData),
+                            staged.mapL.RowPitch, staged.descL.Width, staged.descL.Height);
+                        const RiddickVR::EyeImageSample right = RiddickVR::SampleEyeImage(
+                            static_cast<const uint8_t*>(staged.mapR.pData),
+                            staged.mapR.RowPitch, staged.descR.Width, staged.descR.Height);
                         contentSampled = true;
-                        contentSignature = sig;
-                        if (EyePairIsBlank(leftLuma, leftSampled, rightLuma, rightSampled,
+                        contentSignature = left.signature;
+                        if (EyePairIsBlank(left.meanLuma, true, right.meanLuma, true,
                                            kBlankMeanLuma)) {
                             content = RiddickVR::FrameContent::Blank;
-                        } else if (m_hasLastDumpSignature && sig == m_lastDumpSignature) {
+                        } else if (m_hasLastDumpSignature && left.signature == m_lastDumpSignature) {
                             content = RiddickVR::FrameContent::Frozen;
                         }
                     }
                 }
-                if (!m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
-                    ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content)) {
+                // GH #79: the capture body below runs entirely on the private
+                // staged copies; a frame the branch wanted but that could not be
+                // staged is reported below, never written from a second read.
+                const bool dumpCandidate =
+                    !m_dumpDir.empty() && m_sharedLeftTex && m_sharedRightTex &&
+                    ShouldDumpFrame(dumpDue, m_dumpGameplayOnly, stateRead, cinemaMode, content);
+                if (dumpCandidate && haveStaged) {
                     char leftPath[MAX_PATH];
                     char rightPath[MAX_PATH];
                     sprintf_s(leftPath, "%s\\test_frame_%04u.bmp", m_dumpDir.c_str(), totalFrames);
                     sprintf_s(rightPath, "%s\\right_%04u.bmp", m_dumpDir.c_str(), totalFrames);
-                    const bool okL = SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedLeftTex, leftPath);
-                    const bool okR = SaveTextureToBMP(m_d3d11Device, m_d3d11Context, m_sharedRightTex, rightPath);
+                    const bool okL = WriteBmpFromMapped(
+                        static_cast<const uint8_t*>(staged.mapL.pData), staged.mapL.RowPitch,
+                        staged.descL.Width, staged.descL.Height, leftPath);
+                    const bool okR = WriteBmpFromMapped(
+                        static_cast<const uint8_t*>(staged.mapR.pData), staged.mapR.RowPitch,
+                        staged.descR.Width, staged.descR.Height, rightPath);
                     std::cout << "[Mock Host] Captured stereo frame " << totalFrames
                               << " (L=" << (okL ? "ok" : "err") << " R=" << (okR ? "ok" : "err")
                               << ") cinema=" << (cinemaMode ? 1 : 0)
@@ -2047,13 +2029,12 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                         m_lastDumpSignature = contentSignature;
                         m_hasLastDumpSignature = true;
                     }
-                    // GH #78: make the excluded cost visible instead of hiding
-                    // it -- this is what the frame budget subtracts next loop.
-                    const double captureMs = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - captureWorkStart).count();
-                    std::cout << "[Mock Host] ArtifactCapture frame=" << totalFrames
-                              << " capture_ms=" << std::fixed << std::setprecision(1)
-                              << captureMs << std::endl;
+                } else if (dumpCandidate) {
+                    // GH #79: the branch wanted this frame but the eye pair could
+                    // not be staged (e.g. a handle swap mid-capture). Report the
+                    // skip rather than write a frame from a second, later read.
+                    std::cout << "[Mock Host] Capture skipped frame=" << totalFrames
+                              << " (eye staging failed)" << std::endl;
                 } else if (dumpDue && m_dumpGameplayOnly && stateRead && !cinemaMode &&
                            content != RiddickVR::FrameContent::Live) {
                     // GH #72 requirement 2: the branch says gameplay but the
@@ -2063,6 +2044,16 @@ void OpenXRManager::RunLoop(IpcBridgeHost& ipcHost, bool autoExitWithGame) {
                               << " reason="
                               << (content == RiddickVR::FrameContent::Blank ? "blank" : "frozen")
                               << std::endl;
+                }
+                // GH #78: make the excluded cost visible instead of hiding it --
+                // this is what the frame budget subtracts next loop. Emitted for
+                // every capture attempt, including the GH #79 staging failure.
+                if (dumpCandidate) {
+                    const double captureMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - captureWorkStart).count();
+                    std::cout << "[Mock Host] ArtifactCapture frame=" << totalFrames
+                              << " capture_ms=" << std::fixed << std::setprecision(1)
+                              << captureMs << std::endl;
                 }
                 // GH #78: this iteration's capture work is subtracted from the
                 // next frame-time sample (including the cheap non-dump path).

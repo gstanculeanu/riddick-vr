@@ -1,6 +1,10 @@
 # ADR 0449: XRSIM graded-window content gate (blank warm-up + frozen repeats)
 
 Status: Accepted (scheduled autoloop wake 43, GH #72 requirement 2)
+Amended by ADR-0465 (GH #79): the probe is now the pure `SampleEyeImage`
+(`src/host/eye_sample.h`) run over the one private staged eye pair, instead of
+`SampleEyeContent` reading each shared texture separately. The decision below is
+unchanged.
 
 ## Context
 
