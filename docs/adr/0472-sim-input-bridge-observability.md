@@ -94,7 +94,11 @@ Make the bridge report what it observed, and let the harness parse it.
 ## Validation
 
 - `sim_input_bridge_pure_core` (CTest): the new table is total and inverse
-  (`SimInputProcNameAt(i) -> i`), case-sensitive, and rejects near-misses.
+  (`SimInputProcNameAt(i) -> i`), case-sensitive, and rejects near-misses; and
+  `SimShouldLogPoll` is tested for the properties that matter -- a power-of-two
+  poll is logged, a count in the doubling cadence's gap is not, every
+  `kSimPollLogEvery` is, and over 1..4000 consecutive logged counts are never
+  more than a factor of two apart.
 - `sim_input_bridge_win32_intercept` / `_inert` (CTest): the summary emission is
   safe before/without a live engine, and the interception/inertness contract is
   unchanged.
@@ -102,4 +106,11 @@ Make the bridge report what it observed, and let the harness parse it.
   gate/proc/summary lines, the connected/disconnected flags, the one-line stats,
   and the `input_bridge` report key written by an `--evaluate-only` run.
 - Live (allowed sim exception `RIDDICKVR_SIM=1`, read-only shadow install, no
-  deploy): see `tools/autoloop/STATE.md` wake 71 for the measured counters.
+  deploy, `--require-fresh-hook` = the run exercised the built hook): see
+  `tools/autoloop/STATE.md` wake 71 for the measured counters. The headline
+  reading is `inputProcRequests=2` (both `XInputGetState` and
+  `DirectInputCreateA` resolved through the swap, both owned) with `polls=0` —
+  reported *by value* at deferred init, so the engine holds the bridge's pointers
+  and never calls them in a 120 s session that does reach a full-bleed 3D state.
+  That retires the ADR-0468 "1167 keeps the bytes invisible" hypothesis: no call
+  happens at all, so the confirm cannot be the reach's mechanism.

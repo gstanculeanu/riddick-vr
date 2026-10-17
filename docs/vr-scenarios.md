@@ -156,18 +156,25 @@ constructor for both procs (see the wake-71 update below).
 inferred. It names every input proc the engine resolved through the swapped
 `GetProcAddress` (`owned` by the route or merely `observed`), counts how often
 the engine polled each wrapped entry point, counts the confirms it fabricated,
-and records the real API's return code. A parseable `summary` line is emitted on
-a poll cadence from the wrappers (a harness run `TerminateProcess`es the game, so
-`DLL_PROCESS_DETACH` never runs); the harness parses it into the `input_bridge`
-report key and prints one summary line, flagging `xinput_connected` /
-`xinput_device_not_connected`. It is *reported*, not graded (no criterion yet).
+and records the real API's return code. A parseable `summary` line is emitted
+**once from the deferred-init report** (so a poll whose own line preceded the
+logger is still reported *by value*), **from the wrappers on a doubling poll
+cadence** (`SimShouldLogPoll`: 1, 2, 4, … 128, then every 120 — two consecutive
+logged counts are never more than a factor of two apart, so "never read" and
+"read 12 times" cannot look alike; a harness run `TerminateProcess`es the game, so
+`DLL_PROCESS_DETACH` never runs) and at detach; the harness parses it into the
+`input_bridge` report key and prints one summary line, flagging
+`xinput_connected` / `xinput_device_not_connected`. It is *reported*, not graded
+(no criterion yet).
 
 Measured 2026-10-18 with `--shadow-install … --require-fresh-hook
 --sim-confirm both` (hook `sha256 38648e15…` = the build under review):
 `inputProcRequests=2` — the engine resolved **both** `XInputGetState` and
 `DirectInputCreateA` through the swapped `GetProcAddress`, and the bridge owned
 both — yet `polls=0`, `taps=0`, `createDevicePatched=0`: the engine **never
-calls** either entry point in a 120 s session. So fabricating the confirm on
+calls** either entry point in a 120 s session, and the tightened build reports
+that `polls=0` *by value* at deferred init (`summary … lastRealResult=none`), not
+merely by an absent line. So fabricating the confirm on
 those device read paths cannot advance the splash, and the reach must come from
 another surface (`RndrGL.dll` imports Raw Input — ADR-0466 — or the in-process
 console route of ADR-0466's wake-64 addendum). Also note the wake-70 reading

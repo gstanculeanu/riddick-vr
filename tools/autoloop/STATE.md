@@ -22,24 +22,32 @@ Durable, human-readable state written by each scheduled wake. Newest at top.
   + rejects near-misses).
 - **Change (hook):** `sim_input_bridge_win32.{h,cpp}` — records **every** input
   proc the engine requests (owned or not) and logs each name once; the XInput
-  wrapper counts polls / press edges / the real return code (first poll, every
-  120th poll, and on a result change); the DirectInput keyboard wrapper counts
-  polls / injected `DIK_RETURN`s; `SimInputBridgeLogSummary()` emits one parseable
-  `summary route=… polls=… taps=… lastRealResult=… procs[…]` line and is called
-  **from the wrappers on a cadence** — because a harness run `TerminateProcess`es
-  the game, so `DLL_PROCESS_DETACH` never runs — and from `DllMain` detach for a
-  graceful exit. Route-gated interception is unchanged.
+  wrapper counts polls / press edges / the real return code and the DirectInput
+  keyboard wrapper counts polls / injected `DIK_RETURN`s;
+  `SimInputBridgeLogSummary()` emits one parseable `summary route=… polls=… taps=…
+  lastRealResult=… procs[…]` line. It is emitted **once from the deferred-init
+  report** (so a poll whose own line preceded the logger is still reported *by
+  value* — the difference between "never read" and "read 12 times"), **from the
+  wrappers on a pure doubling poll cadence** (`SimShouldLogPoll`: 1, 2, 4, … 128,
+  then every `kSimPollLogEvery` = 120, so two consecutive logged counts are never
+  more than a factor of two apart and a small count cannot hide) — because a
+  harness run `TerminateProcess`es the game, so `DLL_PROCESS_DETACH` never runs —
+  and from `DllMain` detach for a graceful exit. Route-gated interception is
+  unchanged.
 - **Change (harness):** `tools/xrsim.py` — `parse_input_bridge` +
   `input_bridge_stats` + 5 regexes; report key `input_bridge` in both the `run`
   and `--evaluate-only` paths; one printed summary line; docstring updated.
   `tools/test_xrsim.py` +4 cases; `verify_reported_fixes.py` gains a #80/#71
   invariant (ADR-0472).
 - **Evidence (offline):** `tools/build-all.ps1 -Config Release`, **no `-Deploy`**
-  OK (x86 proxy 489984 B + x64 host); **CTest 22/22 x64, 24/24 x86**; all 11
-  `tools/test_*.py` green except the two **pre-existing** red ones (GH #82 —
-  untouched by this wake, see below); `xrsim.py --selftest`,
-  `verify_reported_fixes` (#40..#81), `verify_hook_init`, `validate_addresses`,
-  `verify_test_artifacts`, `scenario_tests.py --check` PASS.
+  OK (x86 proxy 489984 B + x64 host); **CTest 22/22 x64, 24/24 x86** (incl. the
+  new `TestPollLogCadence` in `sim_input_bridge_pure_core`); all 11
+  `tools/test_*.py` PASS in the owner's run — `test_xmd_pose.py` /
+  `test_xmd_fk.py` included, whereas the peer session read those two red under
+  `--inventory --check`, so **GH #82 stays open** as invocation-specific;
+  `xrsim.py --selftest`, `verify_reported_fixes` (#40..#81),
+  `verify_hook_init`, `validate_addresses`, `verify_test_artifacts`,
+  `scenario_tests.py --check` PASS.
 - **Evidence (live, `RIDDICKVR_SIM=1`, read-only shadow install, no deploy):** a
   shadow + `--require-fresh-hook --sim-confirm both` run of **this build**
   (`sha256 38648e15…`, `fresh=true`) recorded `inputProcRequests=2`: the engine
@@ -51,7 +59,13 @@ Durable, human-readable state written by each scheduled wake. Newest at top.
   current build is exercised (`deployed_hook_matches_build` PASS, 9 gameplay
   frames, `comfort_vignette_applied` PASS `max=1.000` on 230/240 moving frames,
   `eye_views_scene_faithful` PASS) but its `input_bridge` key was empty because
-  its hook log never appeared (see the blocker).
+  its hook log never appeared (see the blocker). **Tightened build, 53 s,
+  isolated `--shadow-dir`:** the deferred-init report printed the summary itself
+  — `summary route=both polls=0 taps=0 keyboardPolls=0 keyboardTaps=0
+  lastRealResult=none createDevicePatched=0 keyboardWrapped=0 getProcCalls=90
+  inputProcRequests=2 procs[XInputGetState:owned,DirectInputCreateA:owned]` — so
+  `polls=0` is now a *reported value*, not an absent line (the blind spot a fixed
+  cadence would have had).
 - **Decisive finding:** fabricating the confirm on the engine's DirectInput/XInput
   read path cannot advance the splash — this session's engine **resolves those
   procs and never polls them**. The reach must therefore come from another
@@ -70,13 +84,19 @@ Durable, human-readable state written by each scheduled wake. Newest at top.
   frames may have come from the other instance. Live attribution is therefore
   **partly borrowed** this wake; the `inputProcRequests=2 / polls=0` datum is
   still about *this* build (the shadow's hook sha256 matches `dist\opengl32.dll`),
-  but the loop must not run two live harnesses at once.
+  but the loop must not run two live harnesses at once. **Resolved for this
+  commit:** the peer (the resumed 00:59 session) found this session already live,
+  deliberately abstained from tracked files, and filed **GH #83** (no
+  single-instance guard); the owner (this session) landed the unit — code, tests,
+  harness, ADR-0472, `docs/vr-scenarios.md` and this record — and pushed.
 - **Also measured (pre-existing, NOT this wake):** `tools/test_xmd_pose.py`
   (`NODES size 228 != 19 * 34`) and `tools/test_xmd_fk.py` (`--inventory --check`)
-  are **still red on `main`** (GH #82) — none of this wake's files is involved.
-- **Next:** (1) with **one** live harness at a time, re-run `--shadow-install
-  --require-fresh-hook --sim-confirm both` and confirm `polls=0` is not a
-  focus/`TerminateProcess` artefact; (2) then stop fabricating on
+  were read red by the peer session (GH #82); the owner's plain invocation of both
+  passed, so the red is invocation-specific and GH #82 remains open.
+- **Next:** (1) the re-run is done — `polls=0` is the *reported* deferred-init
+  value, so it is not a missing-line artefact (a focus/`TerminateProcess`
+  artefact stays possible but is unlikely: the engine polls at frame rate, so any
+  poll would have logged on the doubling cadence); (2) stop fabricating on
   DirectInput/XInput and decide (REA first) where the confirm is actually read —
   the **Raw Input** path in the engine/RndrGL, or the in-process **console
   command** (`loadgame Checkpoint`); (3) the deploy-gated ladder is otherwise
