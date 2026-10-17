@@ -2,6 +2,56 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 51 — 2026-10-17 12:40 (scheduled loop; began 2026-10-16 22:08)
+- **Unit (two parts):** (a) GH **#73** — stop tracking the 26 legacy XRSIM
+  eye-capture BMPs (safe, independent cleanup, **landed**); (b) found + filed GH
+  **#74** — a **critical regression** that blocks the harness: a concurrent session
+  merged `pr-70` into `main` mid-wake and **replaced the autoloop's XRSIM harness
+  and host assertions with a parallel #68 implementation**.
+- **Why:** I started on the "make the committed XRSIM baseline honest" unit
+  (the committed `report.json` is a legacy evaluate-only capture, and 26 × 25.6 MB
+  BMPs are tracked against the repo's own `.gitignore`). While validating it, a
+  live `--reach-gameplay` run proved the harness is fine and the committed
+  baseline is stale; then `tools/xrsim.py` began rejecting `--reach-gameplay` —
+  the tree had moved. Investigation found the regression.
+- **Probe evidence (pre-regression, fresh host, `RIDDICKVR_SIM=1`, allowed
+  exception):** a real `--reach-gameplay --duration 30 --interval 300` run gave
+  **5 distinct gameplay frames**, `gameplay_full_bleed_reached` PASS (fill 1.00),
+  `gameplay_window_has_content` PASS (0 blank), all stereo gates PASS
+  (`dx=-48…+36`, `identical=False`), `capture_metadata_present` PASS (yaw span
+  21.3°), `frame_budget` PASS (p50=2.28 p95=4.90, budget 11.11) — **exactly one
+  real FAIL**, `comfort_vignette_applied` (the deploy-gated wake-50 hook fix).
+  This is the honest baseline the committed `report.json` does *not* show.
+- **Regression (#74) — measured, not inferred.** Merge `e6c6c6e` (parents
+  `f5fd7f7` + branch `b84753e`) took the **branch's** versions of three files the
+  autoloop had advanced (wakes 45–50). At HEAD: `tools/xrsim.py` (+300/−953) has
+  **0** refs to `--reach-gameplay`, `--duration`, `display_branch`, `eye_frames`,
+  `content_gate`, `p50_ms`, `comfort_vignette`, `gameplay_full_bleed`, and no
+  `--evaluate-only`/`--hook-log`; `src/host/openxr_manager.cpp` (+57/−240) has
+  **0** `ComfortVignette` / `eye_frames.log` refs; `tools/verify_reported_fixes.py`
+  (+45/−229) has **0** `#68/#71/#72`/`comfort_vignette`/`eye_frames` invariants.
+  The lost versions are intact at `f5fd7f7`. The branch *did* add real things that
+  must be kept in any fix: `--game-dir/--game-exe/--host-exe`, numpy-free
+  selftest, `--scenario-immediate`, gameplay-gated scenario start +
+  `gameplay_only=1` FrameBudget, per-frame `frame_%04u.json` sidecar, and
+  `133a2d8` targeted window-message sim advance (no OS input injection). ADRs
+  0447–0456 + `src/host/README.md` + `docs/vr-scenarios.md` now describe code that
+  is gone.
+- **Change landed (this wake):** `git rm --cached -r tests/xrsim/artifacts` (26
+  BMPs → 0 tracked; files kept on disk; `git check-ignore --no-index` now matches
+  `.gitignore:38`). Commit `20b6995`; 26 deletions, nothing else.
+- **Deliberately NOT done:** I did **not** unilaterally re-merge the divergent
+  `xrsim.py` (a 953-line-different second implementation) — choosing between the
+  two parallel #68 designs is a design decision for the interactive session /
+  maintainer, and a wrong union would clobber the branch's work. Filing #74 with
+  the exact recovery path (`git show f5fd7f7:<file>`) is the bounded, safe action.
+- **Blocker:** #74 (harness reconciliation). Until then, `report.json` cannot be
+  honestly regenerated (HEAD's `xrsim.py` has no `--reach-gameplay`/
+  `--evaluate-only`), so #73 requirement 2 is deferred.
+- **Next:** reconcile #74 (union preferred, else supersede ADRs 0447–0456 and the
+  docs); then regenerate `tests/xrsim/report.json` (#73.2).
+- Branch: committed on `main`, pushed to `origin/main`.
+
 ## Wake 50 — 2026-10-16 22:05 (scheduled loop)
 - **Unit:** GH **#68 requirement 5 (comfort rules), first slice** — assert the
   locomotion comfort vignette is actually *applied*. Building the assertion
