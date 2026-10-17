@@ -128,6 +128,16 @@ headset; the check is **skipped** (never failed) when the line or the locomotion
 input is absent. Snap-turn/recenter and gross HUD clipping assertions are still
 open in requirement 5 (they need hook-side signals and a deploy).
 
+**Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
+`tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and
+stay untracked — `.gitignore` excludes the directory and only the small,
+diffable `tests/xrsim/report.json` is committed (regenerated from a live
+`--reach-gameplay` run). `python tools/verify_test_artifacts.py` enforces this
+(no `tests/xrsim/artifacts/*` may be git-tracked, the ignore rule must stay, and
+`report.json` must exist and be valid JSON) and runs in the CI lane, so the
+665 MB / 3-unique-blob over-commit that #73 requirement 1 removed cannot recur
+silently.
+
 ## Current coverage and limits
 
 The scripted profiles provide deterministic controller poses and velocities,

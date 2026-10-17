@@ -62,6 +62,8 @@ jobs:
           python -m pip install --quiet --disable-pip-version-check numpy pillow
           python tools/test_xrsim.py
           python tools/xrsim.py --selftest
+      - name: XRSIM eye captures stay untracked (GH #73)
+        run: python tools/verify_test_artifacts.py
       - name: Hook-init regression test (GH #42)
         run: python tools/verify_hook_init.py
       - name: Scenario manifest validation (GH #48, GH #75)

@@ -490,8 +490,22 @@ def main():
             "opt out of the marker requirement and the shipped manifest must pass "
             "--check")
 
+    # GH #73 requirement 3: the large XRSIM eye-capture BMPs are evidence, not
+    # source -- they stay untracked (only the diffable report.json is committed).
+    # A guard makes a silent re-add loud and the CI lane runs it, so the defect
+    # that #73 requirement 1 fixed (`git rm --cached`, 20b6995) cannot recur.
+    artifact_guard = ROOT / "tools/verify_test_artifacts.py"
+    require(artifact_guard.exists() and
+            "git" in artifact_guard.read_text(encoding="utf-8") and
+            "ls-files" in artifact_guard.read_text(encoding="utf-8") and
+            "tests/xrsim/artifacts/" in (ROOT / ".gitignore").read_text(encoding="utf-8") and
+            "tools/verify_test_artifacts.py" in
+            (ROOT / ".github/workflows/vr-worker.yml").read_text(encoding="utf-8"),
+            "GH #73: XRSIM eye captures must stay untracked, guarded by "
+            "tools/verify_test_artifacts.py and run in the CI lane")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-72, #75)")
+          "#62, #64-68, #69, #71-73, #75)")
     return 0
 
 
