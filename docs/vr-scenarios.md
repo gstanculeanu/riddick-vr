@@ -293,6 +293,15 @@ previously deploy-gated `comfort_vignette_applied` went **PASS** (`max=1.000`)
 where the stale-hook baseline was `max=0.000`; the install hashed byte-identical
 before and after four runs.
 
+**Live config tuning (GH #67, ADR-0480):** the hook resolves its config beside
+its own module (`<dir-of-opengl32.dll>\riddick_vr.ini`, a real copy in the
+shadow), so `--ini KEY=VALUE` (repeatable, requires `--shadow-install`) sets a key
+in the **shadow's** ini — e.g. `--ini ViewmodelObserve=1` for the GH #67 probe,
+`--ini SuppressEngineViewmodel=1` for GH #66. The run echoes the overrides
+(manifest/`shadow` and report `ini_overrides`), and the game install is never
+written. That is what makes an off-by-default hook flag reachable by a live run
+without a deploy.
+
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
 renderer init), the host logging `Game Connected: WAITING` for the whole (short)

@@ -177,6 +177,79 @@ def test_format_shadow_is_one_line_with_a_verdict(d: str) -> None:
         "dest": "D:/shadow", "source": "F:/game", "junctions": 12,
         "hook_sha256": None, "built_hook_sha256": "aa", "fresh": False})
     assert "STALE/absent" in stale
+    tuned = shadow_install.format_shadow({
+        "dest": "D:/shadow", "source": "F:/game", "junctions": 12,
+        "hook_sha256": "aa", "built_hook_sha256": "aa", "fresh": True,
+        "ini_overrides": {"ViewmodelObserve": "1"}})
+    assert "ini[ViewmodelObserve=1]" in tuned and "\n" not in tuned
+
+
+def test_merge_ini_replaces_inserts_and_is_idempotent(d: str) -> None:
+    text = ("; header comment\n[VR]\nViewmodelObserve=0\nNativeHands=1\n"
+            "[Other]\nViewmodelObserve=9\n")
+    out = shadow_install.merge_ini(text, {"ViewmodelObserve": "1", "New": "2"})
+    lines = out.splitlines()
+    assert "ViewmodelObserve=1" in lines and "ViewmodelObserve=0" not in lines
+    # A same-named key in another section must be left alone (the reader is
+    # section-scoped, so replacing it would not change what the hook reads).
+    assert lines.count("ViewmodelObserve=9") == 1
+    assert "; header comment" in out and "NativeHands=1" in lines
+    assert lines[lines.index("[VR]") + 1] == "New=2"  # missing key goes after header
+    assert shadow_install.merge_ini(out, {"ViewmodelObserve": "1", "New": "2"}) == out
+
+
+def test_merge_ini_appends_a_missing_section(d: str) -> None:
+    assert shadow_install.merge_ini("", {"ViewmodelObserve": "1"}).splitlines() == \
+        ["[VR]", "ViewmodelObserve=1"]
+    out = shadow_install.merge_ini("BuildInfo=1\n", {"ViewmodelObserve": "1"})
+    assert out.splitlines() == ["BuildInfo=1", "", "[VR]", "ViewmodelObserve=1"]
+    # CRLF input keeps CRLF (the shadow copies the install's own file verbatim).
+    crlf = shadow_install.merge_ini("[VR]\r\nA=0\r\n", {"A": "1"})
+    assert crlf == "[VR]\r\nA=1\r\n"
+
+
+def test_parse_ini_overrides_rejects_malformed(d: str) -> None:
+    assert shadow_install.parse_ini_overrides(["A=1", "B=x=y"]) == {"A": "1", "B": "x=y"}
+    assert shadow_install.parse_ini_overrides([]) == {}
+    for bad in ("noequals", "=1"):
+        try:
+            shadow_install.parse_ini_overrides([bad])
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} must be rejected")
+
+
+def test_apply_ini_overrides_writes_only_the_shadow(d: str) -> None:
+    source = Path(d) / "src"
+    _make_source(source)
+    _write(source / "System/Win32_x86/riddick_vr.ini", b"[VR]\nViewmodelObserve=0\n")
+    before = _sha(source / "System/Win32_x86/riddick_vr.ini")
+    shadow = Path(d) / "shadow"
+    shadow.mkdir()
+    ini = shadow_install.apply_ini_overrides(shadow, {"ViewmodelObserve": "1"})
+    assert ini == shadow / "System/Win32_x86/riddick_vr.ini"
+    assert "ViewmodelObserve=1" in ini.read_text(encoding="utf-8")
+    # The source install's own ini is never opened for write.
+    assert _sha(source / "System/Win32_x86/riddick_vr.ini") == before
+    assert shadow_install.apply_ini_overrides(shadow, {}) is None
+
+
+def test_build_shadow_applies_ini_overrides(d: str) -> None:
+    if not IS_WINDOWS:
+        print("     (skip junction build: not Windows)")
+        return
+    source = Path(d) / "src"
+    _make_source(source)
+    built_hook = Path(d) / "dist"
+    built_hook.mkdir()
+    _write(built_hook / "opengl32.dll", b"FRESH BUILT HOOK")
+    manifest = shadow_install.build_shadow(
+        source, Path(d) / "shadow", built_hook,
+        ini_overrides={"ViewmodelObserve": "1", "ViewmodelTrace": "1"})
+    assert manifest["ini_overrides"] == {"ViewmodelObserve": "1", "ViewmodelTrace": "1"}
+    ini = Path(manifest["game_dir"]) / "riddick_vr.ini"
+    body = ini.read_text(encoding="utf-8")
+    assert "ViewmodelObserve=1" in body and "ViewmodelTrace=1" in body
 
 
 def main() -> int:
@@ -186,7 +259,12 @@ def main() -> int:
              test_build_shadow_routes_hook_and_mirrors_assets,
              test_build_is_idempotent_and_never_writes_the_source,
              test_manifest_flags_a_stale_hook,
-             test_format_shadow_is_one_line_with_a_verdict)
+             test_format_shadow_is_one_line_with_a_verdict,
+             test_merge_ini_replaces_inserts_and_is_idempotent,
+             test_merge_ini_appends_a_missing_section,
+             test_parse_ini_overrides_rejects_malformed,
+             test_apply_ini_overrides_writes_only_the_shadow,
+             test_build_shadow_applies_ini_overrides)
     with tempfile.TemporaryDirectory() as d:
         for test in tests:
             # Each test gets its own scratch directory (they build trees/g/heads).

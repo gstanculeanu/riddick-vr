@@ -61,6 +61,12 @@ GAME_EXE_NAME = "DarkAthena.exe"
 # Files in the program directory that carry per-run/session state and must not be
 # inherited from the install.
 SKIP_FILE_NAMES = {HOOK_NAME, HOOK_LOG_NAME}
+# The hook resolves its config beside its own module (``vr_config.cpp``:
+# ``<dir-of-opengl32.dll>\\riddick_vr.ini``, then CWD), so a shadow's real program
+# directory is the only place a live run reads keys from. The keys live under the
+# ``[VR]`` section; the reader is the Win32 profile API (case-insensitive).
+INI_NAME = "riddick_vr.ini"
+INI_SECTION = "VR"
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -151,6 +157,110 @@ def _iso_utc(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def parse_ini_overrides(pairs) -> dict:
+    """Parse repeatable ``KEY=VALUE`` CLI tokens into an ordered dict.
+
+    Raises :class:`ValueError` on a token without ``=`` or an empty key. The
+    value may be empty and may itself contain ``=`` (split on the first one).
+    """
+    out: dict[str, str] = {}
+    for token in pairs or []:
+        if "=" not in token:
+            raise ValueError(f"ini override must be KEY=VALUE, got {token!r}")
+        key, value = token.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"ini override has an empty key: {token!r}")
+        out[key] = value
+    return out
+
+
+def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
+    """``(header_index, end_index)`` of ``[section]`` in *lines* (end exclusive).
+
+    ``end_index`` is the next section header (or ``len(lines)``). Case- and
+    whitespace-insensitive, matching the Win32 profile API. ``None`` when the
+    section header is absent.
+    """
+    target = section.strip().lower()
+    header = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("[") and stripped.endswith("]")):
+            continue
+        name = stripped[1:-1].strip().lower()
+        if header is None:
+            if name == target:
+                header = index
+        else:
+            return header, index
+    return (header, len(lines)) if header is not None else None
+
+
+def merge_ini(text: str, overrides: dict, section: str = INI_SECTION) -> str:
+    """Return *text* with each ``KEY=VALUE`` override set in *section*.
+
+    Mirrors the reader the hook actually uses (``GetPrivateProfileIntA``): a key
+    is only replaced **inside** *section* (a same-named key in another section is
+    left alone), a missing key is inserted directly after the section header, and
+    a missing section is appended. Every other line -- including comments -- is
+    preserved verbatim, and applying the same overrides twice yields the same
+    bytes (idempotent). The original line-ending style is kept.
+    """
+    if not overrides:
+        return text
+    eol = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+
+    bounds = _section_bounds(lines, section)
+    if bounds is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"[{section}]")
+        bounds = (len(lines) - 1, len(lines))
+    header, end = bounds
+
+    inserts: list[str] = []
+    for key, value in overrides.items():
+        name = key.strip().lower()
+        replaced = False
+        for i in range(header + 1, end):
+            stripped = lines[i].lstrip()
+            if stripped.startswith((";", "#")) or "=" not in stripped:
+                continue
+            if stripped.split("=", 1)[0].strip().lower() == name:
+                lines[i] = f"{key.strip()}={value}"
+                replaced = True
+                break
+        if not replaced:
+            inserts.append(f"{key.strip()}={value}")
+    if inserts:
+        lines[header + 1:header + 1] = inserts
+
+    out = eol.join(lines)
+    if text == "" or text.endswith(("\n", "\r")):
+        out += eol
+    return out
+
+
+def apply_ini_overrides(shadow_root: str | os.PathLike, overrides: dict,
+                        game_system_rel: str = GAME_SYSTEM_REL) -> Path | None:
+    """Write *overrides* into a shadow's program-dir ``riddick_vr.ini``.
+
+    The hook resolves ``riddick_vr.ini`` beside its own module, so the shadow's
+    **real** program directory (never a junction) is the only file this touches;
+    the source install is never opened. Creates the file when the shadow has
+    none. Returns the ini path, or ``None`` when there is nothing to set.
+    """
+    if not overrides:
+        return None
+    ini = Path(shadow_root) / game_system_rel / INI_NAME
+    current = ini.read_text(encoding="utf-8", errors="replace") if ini.is_file() else ""
+    ini.parent.mkdir(parents=True, exist_ok=True)
+    ini.write_text(merge_ini(current, dict(overrides)), encoding="utf-8")
+    return ini
+
+
 def _make_junction(link: Path, target: Path) -> None:
     """Create a directory junction ``link`` -> ``target`` (no admin required)."""
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -174,11 +284,15 @@ def _resolve_hook(hook: str | os.PathLike) -> Path:
 def build_shadow(source_root: str | os.PathLike,
                  dest_root: str | os.PathLike,
                  hook: str | os.PathLike,
-                 plan: dict | None = None) -> dict:
+                 plan: dict | None = None,
+                 ini_overrides: dict | None = None) -> dict:
     """(Re)build a shadow of *source_root* at *dest_root*, with *hook* installed.
 
     Idempotent: an existing *dest_root* is removed first. Never writes to
-    *source_root*. Returns :func:`shadow_manifest`.
+    *source_root*. *ini_overrides* (``KEY=VALUE``) are written into the shadow's
+    program-dir ``riddick_vr.ini`` by :func:`apply_ini_overrides`, so a live run
+    can flip a hook flag (e.g. ``ViewmodelObserve=1``) without deploying. Returns
+    :func:`shadow_manifest`.
     """
     source = Path(source_root)
     dest = Path(dest_root)
@@ -199,13 +313,15 @@ def build_shadow(source_root: str | os.PathLike,
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source / rel, target)
     shutil.copy2(hook_path, dest / plan["hook_rel"])
+    apply_ini_overrides(dest, ini_overrides or {})
 
-    return shadow_manifest(source, dest, hook_path)
+    return shadow_manifest(source, dest, hook_path, ini_overrides=ini_overrides)
 
 
 def shadow_manifest(source_root: str | os.PathLike,
                     dest_root: str | os.PathLike,
-                    hook: str | os.PathLike) -> dict:
+                    hook: str | os.PathLike,
+                    ini_overrides: dict | None = None) -> dict:
     """Identity + layout of a built shadow, so a run can prove what it exercised."""
     source = Path(source_root)
     dest = Path(dest_root)
@@ -225,16 +341,21 @@ def shadow_manifest(source_root: str | os.PathLike,
         "built_hook_sha256": (built or {}).get("sha256"),
         "fresh": fresh,
         "junctions": len(shadow_plan(source)["junctions"]),
+        "ini_overrides": dict(ini_overrides or {}),
     }
 
 
 def format_shadow(manifest: dict) -> str:
     """One-line human summary of a shadow manifest."""
     verdict = "current build" if manifest.get("fresh") else "STALE/absent"
+    overrides = manifest.get("ini_overrides") or {}
+    ini = ""
+    if overrides:
+        ini = " ini[" + " ".join(f"{k}={v}" for k, v in overrides.items()) + "]"
     return (f"shadow install {manifest['dest']} of {manifest['source']} "
             f"({manifest.get('junctions')} junction(s)) -> hook "
             f"{manifest.get('hook_sha256') or 'missing'} = {verdict} "
-            f"[built {manifest.get('built_hook_sha256')}]")
+            f"[built {manifest.get('built_hook_sha256')}]{ini}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -250,11 +371,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hook", default=str(Path(__file__).resolve().parent.parent
                                               / "dist" / HOOK_NAME),
                         help="built opengl32.dll to install in the shadow")
+    parser.add_argument("--ini", action="append", default=[], metavar="KEY=VALUE",
+                        help="set a key in the shadow's program-dir riddick_vr.ini "
+                             "(e.g. --ini ViewmodelObserve=1); repeatable. The "
+                             "source install is never written")
     parser.add_argument("--json", action="store_true",
                         help="print the manifest as JSON")
     args = parser.parse_args(argv)
 
-    manifest = build_shadow(args.source, args.dest, args.hook)
+    manifest = build_shadow(args.source, args.dest, args.hook,
+                            ini_overrides=parse_ini_overrides(args.ini))
     if args.json:
         print(json.dumps(manifest, indent=2))
     else:

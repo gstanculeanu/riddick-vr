@@ -160,6 +160,13 @@ records that binary's path/sha256/size/mtime plus the repo build's (report key
 ``deployed_hook_matches_build`` check is *reported* by default (skipped) and
 *graded* only with this flag -- the acceptance instrument for "this live run
 tested current source" on the deploy-gated ladder (#71/#72/#76/#79/#80).
+``--ini KEY=VALUE`` (repeatable, requires ``--shadow-install``) sets a hook
+config key in the **shadow's** program-dir ``riddick_vr.ini`` -- the file the
+hook resolves beside its own module (``vr_config.cpp``). A deploy-free live run
+can therefore flip an opt-in flag (e.g. ``--ini ViewmodelObserve=1`` for the GH
+#67 viewmodel probe, or ``--ini SuppressEngineViewmodel=1`` for GH #66) and
+record it in the run's ``shadow``/``ini_overrides``; the game install is never
+written.
 
 Every dumped frame also carries the head/eye transform and projection the host
 rendered it with (``eye_frames.log`` in the dump dir, GH #68 requirement 1),
@@ -2515,6 +2522,26 @@ def cmd_selftest(require_image_deps=False):
         launch_retry_decision("early_exit", 2, 2) is False and
         launch_retry_decision("started", 1, 2) is False)
 
+    # GH #67 live tuning: `--ini` sets a hook flag in the *shadow's* riddick_vr.ini
+    # (the file the hook resolves beside its module) so a deploy-free run can flip
+    # it. The parser is pure and the merge is section/case-aware + idempotent -- the
+    # two properties that make "this run used ViewmodelObserve=1" attributable.
+    import shadow_install as _shadow
+    parsed = _shadow.parse_ini_overrides(["ViewmodelObserve=1", "A= b=c"])
+    rejected = False
+    try:
+        _shadow.parse_ini_overrides(["noequals"])
+    except ValueError:
+        rejected = True
+    base_ini = "[VR]\nViewmodelObserve=0\nWeird=1\n[Other]\nViewmodelObserve=9\n"
+    merged = _shadow.merge_ini(base_ini, {"ViewmodelObserve": "1", "A": "2"})
+    results["ini_override_parse_and_merge"] = (
+        parsed == {"ViewmodelObserve": "1", "A": " b=c"} and rejected and
+        merged.count("ViewmodelObserve=1") == 1 and
+        merged.count("ViewmodelObserve=9") == 1 and      # other section untouched
+        "A=2" in merged and                              # missing key inserted
+        _shadow.merge_ini(merged, {"ViewmodelObserve": "1", "A": "2"}) == merged)
+
     skipped = []
     if not have_image_deps():
         skipped = ["shifted_pair_passes", "identical_pair_fails",
@@ -2677,6 +2704,13 @@ def main(argv=None):
                     help="scratch directory for --shadow-install "
                          "(default %%TEMP%%\\riddickvr-shadow-<pid>, one per run "
                          "-- GH #83)")
+    ap.add_argument("--ini", action="append", default=[], metavar="KEY=VALUE",
+                    help="set a hook config key in the *shadow's* program-dir "
+                         "riddick_vr.ini (the file the hook resolves beside its own "
+                         "module), so a live run can flip a flag without deploying; "
+                         "requires --shadow-install and never writes the game "
+                         "install. Repeatable, e.g. --ini ViewmodelObserve=1 "
+                         "--ini ViewmodelTrace=1 (GH #67 live tuning)")
     ap.add_argument("--ignore-live-lock", dest="ignore_live_lock",
                     action="store_true",
                     help="do not take the single-live-run lock (GH #83). Only for "
@@ -2741,6 +2775,16 @@ def main(argv=None):
         return cmd_selftest(args.require_image_deps)
     if args.evaluate_only:
         return cmd_evaluate_only(args)
+
+    # GH #67 live tuning: ini overrides only make sense on the read-only shadow
+    # (the hook reads `<dir-of-opengl32.dll>\riddick_vr.ini`). Refuse to write the
+    # game install -- this loop must never touch it. Checked before the image-dep
+    # probe so a misused flag fails the same way everywhere.
+    if args.ini and not args.shadow_install:
+        print("xrsim: --ini requires --shadow-install (refusing to write the game "
+              "install's riddick_vr.ini)", file=sys.stderr)
+        return 2
+
     if not have_image_deps():
         print("xrsim: numpy and Pillow are required for real runs "
               "(pip install numpy pillow)", file=sys.stderr)
@@ -2770,8 +2814,11 @@ def main(argv=None):
         shadow_dest = (Path(args.shadow_dir) if args.shadow_dir
                        else default_shadow_dir(os.getpid()))
         built = Path(args.built_hook) if args.built_hook else BUILT_HOOK
-        manifest = shadow_install.build_shadow(args.shadow_install, shadow_dest, built)
+        ini_overrides = shadow_install.parse_ini_overrides(args.ini)
+        manifest = shadow_install.build_shadow(args.shadow_install, shadow_dest, built,
+                                               ini_overrides=ini_overrides)
         args.shadow_manifest = manifest
+        args.ini_overrides = manifest.get("ini_overrides") or None
         args.game_dir = manifest["game_dir"]
         if not args.game_exe:
             args.game_exe = manifest["game_exe"]
@@ -2819,6 +2866,7 @@ def main(argv=None):
                             game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
                         "input_bridge": parse_input_bridge(fresh),
                         "shadow": getattr(args, "shadow_manifest", None),
+                        "ini_overrides": getattr(args, "ini_overrides", None),
                         "live_lock": live_lock_note,
                         "launch": launch,
                         "host_log": str(host_log_path(artifacts)),

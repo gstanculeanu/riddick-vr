@@ -215,6 +215,26 @@ def main():
             "GH #67: the first-person viewmodel pass must be identifiable by an "
             "off-by-default, non-suppressing observation probe consumed by XRSIM")
 
+    # GH #67 step 3 (live tuning): the probe must be *reachable live* without a
+    # deploy. `--ini` writes a hook flag into the read-only shadow's own
+    # program-dir riddick_vr.ini -- the file the hook resolves beside its module
+    # (vr_config.cpp) -- and the run records the override, so "this run used
+    # ViewmodelObserve=1" is attributable without ever writing the game install.
+    _shadow_tool = (ROOT / "tools/shadow_install.py").read_text(encoding="utf-8")
+    require("def merge_ini" in _shadow_tool and
+            "def parse_ini_overrides" in _shadow_tool and
+            "def apply_ini_overrides" in _shadow_tool and
+            '"--ini"' in xrsim_tool and
+            "ini_overrides=" in xrsim_tool and
+            '"ini_overrides"' in xrsim_tool and
+            "test_merge_ini_replaces_inserts_and_is_idempotent" in
+            (ROOT / "tools/test_shadow_install.py").read_text(encoding="utf-8") and
+            "test_ini_flag_parses_and_refuses_without_a_shadow" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8"),
+            "GH #67 step 3: the viewmodel probe must be reachable live from the "
+            "read-only shadow (--ini writes the shadow's riddick_vr.ini), so the "
+            "observation can be taken without deploying (ADR-0480)")
+
     # GH #67 step 1: the draw-time modelview must be the *effective* one. RndrGL
     # composes transforms from glLoadMatrixf + glPushMatrix/glTranslatef/
     # glPopMatrix, so a software mirror (gl_matrix_tracker.h) must be fed by the

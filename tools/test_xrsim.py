@@ -1799,6 +1799,36 @@ def test_launch_reliability_flags_parse(td):
         assert xrsim.main(["--max-launch-attempts", "1", "--selftest"]) == 0
 
 
+# ------------------ GH #67 live tuning: --ini writes only the shadow
+def test_ini_flag_parses_and_refuses_without_a_shadow(td):
+    """`--ini KEY=VALUE` must be accepted (repeatable), and must be refused
+    without `--shadow-install` -- the hook reads its config beside its own
+    module, and the loop must never write the game install's ini (GH #67)."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.main(["--selftest"]) == 0
+        assert xrsim.main(["--ini", "ViewmodelObserve=1", "--selftest"]) == 0
+        assert xrsim.main(["--ini", "A=1", "--ini", "B=2", "--selftest"]) == 0
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = xrsim.main(["--ini", "ViewmodelObserve=1"])
+    assert rc == 2 and "--shadow-install" in err.getvalue(), err.getvalue()
+
+
+def test_ini_overrides_reach_the_shadow_and_the_report(td):
+    """The override is written into the shadow's program-dir ini and echoed in
+    the manifest/report, so a run says which flags it exercised (GH #67). Uses
+    the pure merge so no game launch is needed."""
+    import shadow_install
+    merged = shadow_install.merge_ini("[VR]\nViewmodelObserve=0\n",
+                                      {"ViewmodelObserve": "1", "ViewmodelTrace": "1"})
+    assert "ViewmodelObserve=1" in merged and "ViewmodelTrace=1" in merged
+    manifest = {"fresh": True, "junctions": 1, "dest": "D:/s", "source": "F:/g",
+                "hook_sha256": "a", "built_hook_sha256": "a",
+                "ini_overrides": {"ViewmodelObserve": "1"}}
+    assert "ini[ViewmodelObserve=1]" in shadow_install.format_shadow(manifest)
+    assert manifest["ini_overrides"] == {"ViewmodelObserve": "1"}
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -1904,6 +1934,8 @@ def main() -> int:
              test_no_game_start_fails_once_and_demotes_capture_checks,
              test_no_launch_record_keeps_capture_grading,
              test_launch_reliability_flags_parse,
+             test_ini_flag_parses_and_refuses_without_a_shadow,
+             test_ini_overrides_reach_the_shadow_and_the_report,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

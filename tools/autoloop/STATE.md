@@ -2,6 +2,86 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 79 — 2026-10-18 03:27 (scheduled loop)
+- **Unit:** GH **#67 step 3** — the viewmodel observation probe is now **reachable
+  by a live run** (`tools/xrsim.py --ini KEY=VALUE` writes the flag into the
+  *shadow's* own `riddick_vr.ini`), and the first live observation was taken:
+  `viewmodel_pass_identified` **PASS** (16 probe lines), `--require-fresh-hook`
+  PASS. Harness/tools + tests + ADR-0480 + docs + a `verify_reported_fixes`
+  invariant; **no C++ change, no build, no deploy, no install write**.
+- **Why this unit:** it is the explicit "Next" of wake 78 and the top
+  player-visible item (#67). The probe (#67 step 2, wakes 43/44) had been
+  code-complete for days and every wake recorded the same wall: the flag could
+  only be set by editing the **game install's** ini, which the loop must never
+  write — so the *matrix* the #67 comments ask for was never measured. ADR-0471
+  removed the hook-binary half of that wall; this removes the **config** half.
+- **Change (pure):** `shadow_install.merge_ini(text, overrides, section="VR")`
+  mirrors the reader the hook uses (`GetPrivateProfileStringA`/`IntA`):
+  section-scoped (a same-named key in another section is left alone),
+  case-insensitive, inserts a missing key after the header, appends a missing
+  section, preserves comments + the line-ending style, and is idempotent.
+  `parse_ini_overrides(["K=V"])` rejects a bare token; `apply_ini_overrides`
+  writes only `<shadow>\System\Win32_x86\riddick_vr.ini` (a **real copy**, never
+  a junction). `build_shadow(..., ini_overrides=)` applies them and
+  `shadow_manifest` records them; `format_shadow` prints `ini[K=V]`.
+- **Change (harness):** `tools/xrsim.py --ini KEY=VALUE` (repeatable) forwards
+  them; used **without** `--shadow-install` it is refused (exit 2) rather than
+  writing the game install. The report gains `ini_overrides` (the manifest carries
+  the same). `--selftest` +1 case.
+- **Evidence (offline):** `tools/test_shadow_install.py` **PASS** (+5:
+  `test_merge_ini_replaces_inserts_and_is_idempotent`,
+  `test_merge_ini_appends_a_missing_section`,
+  `test_parse_ini_overrides_rejects_malformed`,
+  `test_apply_ini_overrides_writes_only_the_shadow`,
+  `test_build_shadow_applies_ini_overrides`); `tools/test_xrsim.py` **PASS** (+2:
+  `test_ini_flag_parses_and_refuses_without_a_shadow`,
+  `test_ini_overrides_reach_the_shadow_and_the_report`); `xrsim --selftest` PASS
+  (+1 `ini_override_parse_and_merge`, now 14); all **11 `tools/test_*.py` PASS**;
+  `verify_reported_fixes` (extended GH #67 invariant, summary unchanged
+  `#40…#87`), `scenario_tests.py --check`, `verify_hook_init`,
+  `validate_addresses` (PASS), `verify_test_artifacts` all PASS. **No C++ -> no
+  `build-all`/CTest** (documented); the hook under test is the wake-77 build.
+- **Evidence (live, `RIDDICKVR_SIM=1`, read-only shadow, NO deploy):**
+  `python tools/xrsim.py --shadow-install "F:\…\Assault on Dark Athena"
+  --reach-gameplay --duration 45 --ini ViewmodelObserve=1 --ini ViewmodelTrace=1
+  --require-fresh-hook` → **XRSIM RESULT PASS** (attempt 1/2, game lived 45.0 s,
+  8790 frames, p50=3.23 ms; 29/29 gameplay captures, `gameplay_full_bleed_reached`
+  fill 1.00, `comfort_vignette_applied` max=1.000 13019/13080,
+  `deployed_hook_matches_build` PASS `sha256=b372e2abe8a7` = the repo build;
+  manifest `ini[ViewmodelObserve=1 ViewmodelTrace=1]`), and the new
+  **`[PASS] viewmodel: viewmodel_pass_identified (16 probe line(s), max in-window
+  draws=5700, matrix sampled)`**.
+- **DECISIVE (the #67 datum the comments wanted):** the probe fires live on the
+  current build, and the measurement is **not** what step 3 assumed. On every one
+  of the 16 sampled frames the captured `GL_MODELVIEW` is the **identity**
+  (`[1 0 0 0][0 1 0 0][0 0 1 0][0 0 0 1]`) and `pushes=0 translates=0`: the engine
+  does **not** build the first-person pass with `glLoadMatrixf` /
+  `glPushMatrix` / `glTranslatef` (the calls step 1 hooked), so the sample is not
+  the viewmodel transform. The trace (`Viewmodel pass trace [#N]: P? P? P? P? C P?
+  P? C C P? d2 P? d1 P? d1 P? d1 P? D d12 C d36 P? d1 P? d26 P? d19 P? D d7 …`)
+  shows the engine's own software-stacked matrix path (`glMultMatrixf` is *not*
+  intercepted — the issue's step 1 lists it as "loaded but never intercepted"),
+  and the `P?` tokens show the near plane is **not** captured, so the
+  depth-only-clear boundary opens on the world pass too (≈19 in-window draws/frame
+  of ~92, not a clean FP-only pass). `inside=5700 / outside=26830` per 300 frames.
+- **Blocker / honest limit:** the *mechanism* (shadow ini tuning + live probe) is
+  validated end-to-end; the *content* of the sample is not yet the viewmodel
+  transform. No C++ changed, so nothing player-visible changed. Artifacts/report
+  in `%TEMP%\xrsim80` (committed `tests/xrsim/report.json` untouched). Install
+  untouched: deployed hook `479232 B 12:47`, install `riddick_vr.ini` `7363 B
+  16-Oct 22:14`, install `riddick_vr.log` `7635 B 00:25` — all unchanged; no
+  game/host processes left; live lock released.
+- **Next:** (1) **#67 step 1 completion** — intercept `glMultMatrixf` (and
+  `glLoadMatrixd`) in `dllmain.cpp`/`opengl_proxy.cpp` and feed the
+  `GlMatrixTracker`, so the sampled modelview is the effective viewmodel
+  transform; capture the projection near-plane (`P?` -> a value) so the
+  near-plane-drop opener can be evaluated against the real pass. Then re-run the
+  same `--ini ViewmodelObserve=1` command (now one line) and read a non-identity
+  matrix + non-zero `pushes`/`translates`. (2) The rest of the deploy-gated ladder
+  is now live-tunable the same way (#66 `SuppressEngineViewmodel=1`, #76 step 1,
+  #79 hook half, #68 req 5). (3) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (4) GH
+  #83's manual-session blind spot.
+
 ## Wake 78 — 2026-10-18 03:16 (scheduled loop)
 - **Unit:** GH **#87** — an XRSIM live run whose game exits in ~2 s with no hook
   log and no captured frame is no longer graded as "the fix is broken": the
