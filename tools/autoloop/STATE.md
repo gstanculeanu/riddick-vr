@@ -2,7 +2,112 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
-## Wake 88 — 2026-10-18 08:16 (scheduled loop)
+## Wake 89 — 2026-10-18 08:19 (scheduled loop)
+- **Unit:** GH **#67 step 1 (ninth correction, ADR-0491)** — the census of the
+  first-person window's submission **mechanism** now covers all three entry-point
+  families the shipped module binds (indexed arrays, display lists, **immediate
+  mode**), and the immediate-mode route is **measured empty on the live level**:
+  over **21** sampled intervals the window held **0** `glBegin` blocks / **0**
+  vertices (immediate mode *is* used — **2** blocks outside the window, 8 2-D
+  vertices, 0 3-D), so *"the arms are submitted with `glBegin`..`glEnd`"* is
+  **falsified** on this target. This closes the last un-instrumented mechanism of
+  #67 step 1. Real C++ change → `build-all.ps1` + CTest on both architectures; one
+  live run on a read-only per-run shadow (no deploy, no install write).
+- **Why this unit:** the explicit "Next" of wake 88 / ADR-0490 ("engine-side
+  identification of the FP viewmodel pass; the geometric route is measured to be a
+  dead end") and the top player-visible item (#67). The one *engine-side* fact
+  still unmeasured was the project's own reference question:
+  `docs/rea/reference/RndrGL_GL_Path.txt` §2 records `glBegin`/`glEnd` as imported
+  and **not intercepted** ("left as a follow-up **if the first-person arms turn
+  out to use immediate mode**"), and calls the live module a "fixed-function
+  **immediate-mode** renderer". All eight prior corrections hooked only
+  `glDrawElements`/`glCallList`, so a mesh submitted with `glBegin..glEnd` emitted
+  **no** draw call and could never appear in any sample.
+- **Measured first (read-only, no launch):** `python tools/gl_vocabulary_scan.py
+  --game-dir "F:\The Chronicles of Riddick - Assault on Dark Athena" --imports` →
+  `System/Win32_x86/RndrGL.dll` (939248 B) binds **96** static `OPENGL32.dll`
+  imports including `glBegin`, `glEnd`, `glVertex3f`, `glVertex3fv`, `glVertex2f`,
+  `glVertex2i` — the bindings the hook now intercepts.
+- **Change:**
+  - **NEW `src/hook/immediate_mode_observe.h`** (pure, header-only): per interval
+    and split by the window state at each `glBegin` — blocks (`beganIn/Out`,
+    `endIn/Out`), 3-D vs 2-D vertices (`v3In/Out`, `v2In/Out`, kept apart so "2-D
+    HUD" is distinguishable), and the window's **largest** block with **exact**
+    bounds (one `glBegin`..`glEnd` batch = one submitted mesh, the immediate
+    analogue of ADR-0483). A block is classified by its starting side, a
+    begin-while-open closes the previous block, an unmatched `glEnd` is not a
+    block, an open block survives `ComputeSnapshot`.
+  - `src/hook/dllmain.cpp`: IAT-hooks `OPENGL32.dll!glBegin/glEnd/glVertex3f/
+    glVertex3fv/glVertex2f/glVertex2i` in RndrGL, each observing then forwarding
+    **verbatim** (observation only; never suppresses; inert unless
+    `ViewmodelObserve=1`). `src/hook/opengl_proxy.{h,cpp}`: the `NoteImmediate*`
+    feed + the census log line plus the candidate logged as a
+    `ViewmodelProbe submission fpimm:` line, so XRSIM grades it with the **same**
+    planar-vs-volumetric predicate as `fp`/`world`/`near`.
+  - `tools/xrsim.py`: `VIEWMODEL_IMMEDIATE_RE`, `viewmodel_immediate_census()`,
+    report key `viewmodel_probe.immediate`, and two graded checks —
+    **`viewmodel_in_window_immediate_geometry`** (PASS on 3-D in-window immediate
+    vertices, **FAIL** when the census ran and there were none, **SKIP** on a
+    pre-#0491 hook) and `viewmodel_immediate_candidate_is_volumetric`.
+  - `tests/immediate_mode_observe_tests.cpp` (new CTest
+    `immediate_mode_observe`, both arches), `tools/test_xrsim.py` +
+    `test_immediate_mode_census_is_parsed_and_graded`, `xrsim --selftest`
+    +`viewmodel_immediate_census_is_parsed`, the #67 invariant in
+    `tools/verify_reported_fixes.py` extended, `docs/adr/0491-…`,
+    `src/hook/README.md`, `docs/vr-scenarios.md`, `RndrGL_GL_Path.txt` corrected.
+- **EVIDENCE live (1 run, `RIDDICKVR_SIM=1`, read-only per-run shadow,
+  `--reach-gameplay --duration 45 --advance-menu --advance-min-taps 8
+  --require-fresh-hook --downscale 4 --ini ViewmodelObserve=1 --ini
+  ViewmodelTrace=1`; `deployed_hook_matches_build` PASS, hook sha256
+  `a8897b5d5d9b` 500224 B = repo build):** reached the live level (31 gameplay
+  captures, `gameplay_full_bleed_reached` PASS fill 1.00, 8 taps). Census over
+  **21 intervals: `beganIn=0`, `v3In=0`, `v2In=0`, `openIn=0`, `sample=0` in
+  every one**, while the same run counts `arrayIn=61658`,
+  `arrayOut=3377008`, `listIn=0`, `listOut=0`; immediate mode is used only for
+  **2 blocks outside** the window (**8** 2-D vertices, **0** 3-D). `fpimm` None.
+  → `[FAIL] viewmodel_in_window_immediate_geometry` ("the first-person window held
+  NO 3-D immediate-mode vertices, so 'the arms are submitted with glBegin..glEnd'
+  is NOT supported on this target"); `[SKIP]
+  viewmodel_immediate_candidate_is_volumetric` (no in-window block to grade). The
+  pre-existing checks are unchanged and still honest:
+  `viewmodel_candidate_is_volumetric` FAIL (the last in-window array draw is the
+  12-count plane), `viewmodel_near_field_candidate_identifies_pass` FAIL (3/18),
+  `projection_near_extracted` PASS (318/318), `viewmodel_pass_identified` PASS
+  (18 probe lines, up to 4580 in-window draws/interval). `XRSIM RESULT: FAIL`
+  (honest). Artifacts/report: `%TEMP%\oc_wake89` (`art\`, `report.json`,
+  `run.txt`).
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x64 host + x86
+  hook, `dist\opengl32.dll` 500224 B `sha256 a8897b5d5d9b`); **CTest 28/28 (x86)
+  and 26/26 (x64)** (each +1); all **12 `tools/test_*.py` exit 0**;
+  `xrsim --selftest` PASS; `verify_reported_fixes`, `scenario_tests.py --check`,
+  `verify_test_artifacts`, `verify_hook_init`, `validate_addresses` all PASS.
+- **Blocker:** none. **Limits (honest):** the census is per 300-swap interval,
+  not per frame; the candidate is the interval's largest in-window block, so a
+  small arms block in an interval dominated by a larger HUD block would not be the
+  candidate (its vertices are still tallied); the `glVertex*` hooks add one
+  observe-check per vertex; immediate mode is measured barely used here (2
+  blocks/run, 2-D, outside the window), so the negative is a statement about this
+  build/level, not about the arms in every state; and finding (or not finding)
+  immediate geometry in the window removes a **mechanism blind spot** — it does
+  **not** identify the arms (the same distinction ADR-0489 drew for the window).
+- **Next:** (1) **#67 step 1 — the census is now complete** (arrays + lists +
+  immediate mode all measured): the remaining route is the engine-side
+  identification of the pass itself, i.e. REA of the RndrGL draw path / the
+  engine's own viewmodel draw (GH #66 approach 2); (2) **is the viewmodel even
+  drawn on this level?** — these runs are a *passive* level start with no weapon
+  equipped (the sim bridge cannot drive the engine's input, GH #80), and Riddick's
+  FP arms are drawn when armed/in combat, so the empty window may be "no viewmodel
+  in this state" rather than "not identified" — a state question for the harness,
+  not another geometry heuristic; (3) `ViewmodelObserve=0` remains the default and
+  the #63 suppression boundary is untouched; (4) the deploy-gated ladder on a real
+  scene (#76 step 1, #79 hook half remaining, #68 req 5); (5) the page-content
+  discriminator for `gameplay_full_bleed_reached` (GH #71 req 2); (6)
+  `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (7) GH #83 manual-session blind spot.
+- **Branch:** committed on **main** (`3a53fa0`) and **pushed** (`9dc5ec4..3a53fa0`);
+  single writer; install untouched (no deploy), no leftover processes, live lock
+  released. `STATE.log` **appended** (never replaced — GH #88).
+
+
 - **Unit:** GH **#67 step 1 (eighth correction, ADR-0490)** — the
   **window-independent near-field discriminator** ADR-0489's "Next" #1 asked for
   is implemented and **measured to be falsified on the live level**: the engine
