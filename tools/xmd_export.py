@@ -103,6 +103,18 @@ def _sibling_nodes(x: Xmd, name: str):
     return [n for n in x.walk_linked() if n.name == name]
 
 
+def triangle_nodes(x: Xmd):
+    """The *mesh* ``TRIANGLES`` chunks in traversal order (GH #86).
+
+    ``TRIANGLES`` is not exclusive to the mesh: the 2009 models also carry one
+    under a ``BOXTREE`` bounding-volume node, in a different layout, and
+    ``CDataFile::GetNext(cluster, "TRIANGLES")`` only ever sees a sibling of the
+    cluster. Pairing clusters with ``[n for n in walk_linked() if ...]`` used to
+    pick the ``BOXTREE`` leaf and mis-align every later cluster (or fail to
+    decode it), so this defers to :meth:`mos_xmd.Xmd.triangle_nodes`."""
+    return x.triangle_nodes()
+
+
 def decode_cluster(x: Xmd, index: int) -> ClusterMesh:
     """Decode cluster ``index`` (VERTEXFRAMES/TVERTEXFRAMES/BONEDEFORM/TRIANGLES)."""
     vf_nodes = vertex_frame_nodes(x)
@@ -127,7 +139,7 @@ def decode_cluster(x: Xmd, index: int) -> ClusterMesh:
                     f"cluster {index}: {len(uvs)} UVs != {len(positions)} verts")
 
     triangles: tuple[int, ...] = ()
-    tri_nodes = _sibling_nodes(x, "TRIANGLES")
+    tri_nodes = triangle_nodes(x)
     if index < len(tri_nodes):
         _count, triangles = x.triangle_indices(tri_nodes[index])
 

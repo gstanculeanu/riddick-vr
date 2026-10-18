@@ -1031,6 +1031,119 @@ def test_skeleton_selects_skel_nodes_over_boxtree(tmp_dir):
         os.remove(path)
 
 
+# --------------------------------------------------------------------------- #
+# GH #86: "TRIANGLES" is not exclusive to the mesh. The 2009 Assault on Dark
+# Athena models also carry a TRIANGLES under BOXTREE (a per-leaf triangle set in
+# a different `u16 tag; u16 count; u16[count]` run layout), and it precedes the
+# clusters in node-table order, so `chunk("TRIANGLES")` used to pick it and
+# mis-align every later cluster.
+# --------------------------------------------------------------------------- #
+def _run_index_payload(runs) -> bytes:
+    """A BOXTREE ``TRIANGLES`` leaf: ``u16 tag; u16 count; u16[count]`` runs."""
+    out = bytearray()
+    for tag, idx in runs:
+        out += struct.pack("<2H", tag, len(idx))
+        for i in idx:
+            out += struct.pack("<H", i)
+    return bytes(out)
+
+
+_BOXTREE_TRI_RUNS = [(0, [0, 1]), (0, [2, 0, 1])]
+
+
+def _boxtree_triangles_container() -> bytes:
+    """Two clusters plus a BOXTREE ``TRIANGLES`` leaf *ahead of* them.
+
+    Mirrors the shipped 2009 layout (e.g. ``Misc/Cigarette.xmd``): the
+    bounding-volume node owns a ``NODES`` + a ``TRIANGLES`` (its own run layout)
+    and precedes the clusters in node-table order, and it sits between the two
+    clusters in traversal order so a by-index pairing mis-aligns cluster 1."""
+    stride = mos_xmd.NODE_RECORD_LEN
+
+    def at(i):
+        return stride * (i + 1)
+
+    verts = [(0, 0, 0), (65535, 0, 0), (0, 65535, 0)]
+    normals = [(127, 0, 0), (0, 127, 0), (0, 0, -127)]
+    vf0 = _vf204_frame(verts, normals)
+    vf1 = _vf204_frame(verts, normals, mx=(10.0, 20.0, 30.0))
+    tri0 = _triangles([0, 1, 2])
+    tri1 = _triangles([2, 1, 0])
+    bt_nodes = b"\x00" * 24
+    bt_tri = _run_index_payload(_BOXTREE_TRI_RUNS)
+    skel = _flat_nodes(3)
+    skel_idx = _node_indices([1, 2])
+    nodes = [
+        ("EXTENDEDMODEL", 0, at(1), 0, 0, 0),         # @0x30, child BOXTREE
+        ("BOXTREE", at(4), at(2), 0, 0, 0),           # @0x60, child NODES
+        ("NODES", at(3), 0, len(bt_nodes), 2, 0),     # @0x90 (BOXTREE child)
+        ("TRIANGLES", 0, 0, len(bt_tri), 3, 256),     # @0xC0 BOXTREE leaf
+        ("CLUSTERS", at(11), at(5), 0, 0, 0),         # @0xF0 sibling SKELETON
+        ("CLUSTER", at(8), at(6), 0, 0, 0),           # @0x120
+        ("VERTEXFRAMES", at(7), 0, len(vf0), 1, 0),   # @0x150
+        ("TRIANGLES", 0, 0, len(tri0), 1, 0),         # @0x180 cluster 0
+        ("CLUSTER", 0, at(9), 0, 0, 0),               # @0x1B0
+        ("VERTEXFRAMES", at(10), 0, len(vf1), 1, 0),  # @0x1E0
+        ("TRIANGLES", 0, 0, len(tri1), 1, 0),         # @0x210 cluster 1
+        ("SKELETON", 0, at(12), 0, 0, 0),             # @0x240
+        ("NODES", at(13), 0, len(skel), 3, 0),        # @0x270 skeleton NODES
+        ("NODEINDICES", 0, 0, len(skel_idx), 2, 0),   # @0x2A0
+    ]
+    return build_container(nodes, [b"", b"", bt_nodes, bt_tri, b"", b"",
+                                   vf0, tri0, b"", vf1, tri1, b"",
+                                   skel, skel_idx])
+
+
+def test_triangle_nodes_skips_boxtree_leaf(tmp_dir):
+    path = _write_tmp(_boxtree_triangles_container())
+    try:
+        x = mos_xmd.Xmd(path)
+        # The trap: `chunk` returns the first TRIANGLES (the BOXTREE leaf) ...
+        trap = x.chunk("TRIANGLES")
+        assert trap.flags == 256 and trap.count == 3, trap.as_dict()
+        # ... which is *not* decodable as a mesh index list, the exact red on F:.
+        try:
+            mos_xmd.decode_triangles(x.data, trap.data_offset, trap.data_size)
+            raise AssertionError("the BOXTREE TRIANGLES decoded as a mesh")
+        except mos_xmd.GeometryError as e:
+            assert "TRIANGLES size" in str(e), e
+        # ... but mesh selection skips it, in traversal order, and pairing is
+        # then exact (cluster 1 gets its own triangles, not the leaf's).
+        mesh = x.triangle_nodes()
+        assert [n.flags for n in mesh] == [0, 0], [n.flags for n in mesh]
+        assert x.triangle_node() is mesh[0]
+        assert x.triangle_indices()[1] == (0, 1, 2), x.triangle_indices()
+        clusters = x.cluster_meshes()
+        assert len(clusters) == 2, clusters
+        assert [c["triangle_count"] for c in clusters] == [1, 1], clusters
+        assert [c["index_in_range"] for c in clusters] == [True, True], clusters
+        assert [c["error"] for c in clusters] == [None, None], clusters
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
+def test_boxtree_only_triangles_means_no_mesh(tmp_dir):
+    # A prop whose only TRIANGLES is a BOXTREE leaf has no mesh triangles.
+    stride = mos_xmd.NODE_RECORD_LEN
+    payload = _run_index_payload(_BOXTREE_TRI_RUNS)
+    nodes = [
+        ("EXTENDEDMODEL", 0, stride * 2, 0, 0, 0),
+        ("BOXTREE", 0, stride * 3, 0, 0, 0),
+        ("TRIANGLES", 0, 0, len(payload), 3, 256),
+    ]
+    path = _write_tmp(build_container(nodes, [b"", payload]))
+    try:
+        x = mos_xmd.Xmd(path)
+        assert x.triangle_node() is None
+        assert x.triangle_nodes() == []
+        assert x.triangle_indices() == (0, ())
+        assert x.cluster_meshes() == []
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
 def _misc_payload(version=0x102, flags=0, surface_index=0, reserved=0,
                   box_min=(0.0, 0.0, 0.0), box_max=(100.0, 200.0, 300.0),
                   trailer=0.0, tail=None) -> bytes:
@@ -1481,6 +1594,8 @@ def main() -> int:
              test_skeleton_detects_parent_table_mismatch,
              test_boxtree_nodes_is_not_a_skeleton,
              test_skeleton_selects_skel_nodes_over_boxtree,
+             test_triangle_nodes_skips_boxtree_leaf,
+             test_boxtree_only_triangles_means_no_mesh,
              test_cluster_info_roundtrip,
              test_cluster_info_flags_match_uv,
              test_cluster_info_detects_flags_uv_mismatch,

@@ -159,6 +159,21 @@ def test_check_skips_boxtree_prop(tmp_dir):
         os.remove(prop)
 
 
+def test_check_pairs_boxtree_triangles(tmp_dir):
+    # GH #86: a BOXTREE leaf TRIANGLES (a different run layout, not a mesh
+    # index list) must not be paired with a cluster — doing so made the corpus
+    # check red across 19 files of the 2009 install.
+    d = os.path.join(tmp_dir, "boxtree-tri-corpus")
+    os.makedirs(d, exist_ok=True)
+    path = tm._write_tmp(tm._boxtree_triangles_container(), d)
+    try:
+        problems, totals = xmd_pose.check(d)
+        assert problems == [], problems
+        assert totals["models"] == 1 and totals["clusters"] == 2, totals
+    finally:
+        os.remove(path)
+
+
 def test_check_reports_skeleton_size_mismatch(tmp_dir):
     # GH #84: a genuine 34-byte count mismatch is still *reported* per file --
     # not swallowed, and not allowed to abort the corpus walk.
@@ -207,6 +222,7 @@ def main() -> int:
     tests = (test_bone_centroids_and_pose, test_bind_table_tree,
              test_cluster_relation_same_and_shifted, test_analyze_relations,
              test_check_clean_and_empty, test_check_skips_boxtree_prop,
+             test_check_pairs_boxtree_triangles,
              test_check_reports_skeleton_size_mismatch, test_main_cli,
              test_main_requires_input)
     with tempfile.TemporaryDirectory() as d:

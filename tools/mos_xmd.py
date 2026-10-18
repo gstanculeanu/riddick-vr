@@ -87,6 +87,17 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
 
   TRIANGLES    : ``u32 triangle_count`` then ``triangle_count`` *u16* triplets.
 
+                 The name is **not** exclusive to the mesh: like ``NODES`` above,
+                 the 2009 *Assault on Dark Athena* models also carry a
+                 ``TRIANGLES`` chunk under a ``BOXTREE`` bounding-volume node
+                 (1411 of them; a per-leaf triangle set in a different
+                 ``u16 tag; u16 count; u16[count]`` run layout, not a triangle
+                 list). ``CTriangleMeshCore::Read`` resolves the mesh's indices
+                 with ``CDataFile::GetNext(cluster, "TRIANGLES")`` — a *sibling*
+                 of the cluster's ``VERTEXFRAMES`` — so a ``BOXTREE`` leaf can
+                 never be one. Use :meth:`Xmd.triangle_nodes` (mesh chunks, in
+                 traversal order) instead of :meth:`Xmd.chunk` (GH #86).
+
   TVERTEXFRAMES: one quantized UV frame, recovered from MXR.dll
                  ``FUN_100807d0`` (the version-0x200 branch, which every
                  shipped asset selects)::
@@ -146,6 +157,9 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  submesh, in traversal order; every index must be < the paired
                  frame's vertex count and a non-empty UV frame's count must
                  equal its position frame's count (validated by ``--check``).
+                 The mesh ``TRIANGLES`` are selected by
+                 :meth:`Xmd.triangle_nodes` (a ``BOXTREE`` ``TRIANGLES`` leaf is
+                 not a cluster chunk — GH #86), so the index pairing is exact.
                  Each ``CLUSTER``'s ``MISCELLANEOUS`` header additionally mirrors
                  the cluster frame's quantization range as a 6-float reference
                  bounding box (ADR-0425; see ``ClusterInfo``).
@@ -1233,8 +1247,54 @@ class Xmd:
                 return sib
         return self.chunk("NODEINDICES")
 
+    def triangle_nodes(self) -> list[Node]:
+        """The container's *mesh* ``TRIANGLES`` chunks, in traversal order.
+
+        The name is not exclusive to the mesh (GH #86). ``chunk("TRIANGLES")``
+        returns the first node named ``TRIANGLES`` in node-table order, but the
+        shipped 2009 *Assault on Dark Athena* models also carry one under a
+        ``BOXTREE`` bounding-volume node (1411 across the install), where it is a
+        per-leaf triangle set in a different ``u16 tag; u16 count; u16[count]``
+        run layout. The engine's mesh reader resolves the cluster's triangles
+        with ``CDataFile::GetNext(cluster, "TRIANGLES")`` — i.e. as a sibling of
+        the cluster's ``VERTEXFRAMES`` — so a ``BOXTREE`` leaf can never be a
+        cluster chunk.
+
+        A ``TRIANGLES`` is therefore excluded only when its parent is a
+        ``BOXTREE`` that owns no ``VERTEXFRAMES`` (the conclusive BV-leaf case);
+        a node whose parent link is unknown (a flat synthetic container) is
+        kept. On both shipped installs the result has exactly one entry per
+        ``VERTEXFRAMES`` (2004 ``C:`` 4662/4662, 2009 ``F:`` 8805/8805) and
+        every entry decodes with :func:`decode_triangles`."""
+        order = self.walk_linked()
+        parents = self.node_parents()
+        child_names: dict[int, set[str]] = {}
+        for n in order:
+            p = parents.get(n.offset)
+            if p is not None:
+                child_names.setdefault(p, set()).add(n.name)
+        out: list[Node] = []
+        for n in order:
+            if n.name != "TRIANGLES":
+                continue
+            p = parents.get(n.offset)
+            parent = self.by_offset.get(p) if p is not None else None
+            if (parent is not None and parent.name == "BOXTREE"
+                    and "VERTEXFRAMES" not in child_names.get(p, ())):
+                continue
+            out.append(n)
+        return out
+
+    def triangle_node(self) -> Node | None:
+        """The first *mesh* ``TRIANGLES`` chunk (see :meth:`triangle_nodes`).
+
+        Returns ``None`` when the container carries none (a static prop, or only
+        a ``BOXTREE`` ``TRIANGLES``)."""
+        nodes = self.triangle_nodes()
+        return nodes[0] if nodes else None
+
     def geometry_summary(self):
-        tri = self.chunk("TRIANGLES")
+        tri = self.triangle_node()
         boned = self.chunk("BONEDEFORM")
         nodes = self.skeleton_node()
         verts = self.chunk("VERTEXFRAMES")
@@ -1650,7 +1710,7 @@ class Xmd:
 
     def triangle_indices(self, node: Node | None = None):
         if node is None:
-            node = self.chunk("TRIANGLES")
+            node = self.triangle_node()
         if node is None:
             return 0, ()
         return decode_triangles(self.data, node.data_offset, node.data_size)
@@ -1774,7 +1834,9 @@ class Xmd:
         order = self.walk_linked()
         vf_nodes = [n for n in order if n.name == "VERTEXFRAMES"]
         tv_nodes = [n for n in order if n.name == "TVERTEXFRAMES"]
-        tri_nodes = [n for n in order if n.name == "TRIANGLES"]
+        # Mesh TRIANGLES only: a BOXTREE bounding-volume leaf carries a
+        # same-named chunk in a different layout (GH #86).
+        tri_nodes = self.triangle_nodes()
         skin_owner = self._skin_owner_map()
         infos = self.cluster_infos()
         aligned = len(infos) == len(vf_nodes)

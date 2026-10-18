@@ -211,6 +211,25 @@ def test_manifest_bone_space_palette(tmp_dir):
         os.remove(path)
 
 
+def test_decode_cluster_skips_boxtree_triangles(tmp_dir):
+    # GH #86: a BOXTREE TRIANGLES leaf sits between the two clusters; pairing by
+    # index must use the mesh chunks, so cluster 1 keeps its own triangles.
+    path = tm._write_tmp(tm._boxtree_triangles_container())
+    try:
+        x = mos_xmd.Xmd(path)
+        m0 = xmd_export.decode_cluster(x, 0)
+        m1 = xmd_export.decode_cluster(x, 1)
+        assert m0.triangles == (0, 1, 2), m0.triangles
+        assert m1.triangles == (2, 1, 0), m1.triangles
+        assert m1.vertex_count == 3 and m1.tri_count == 1, (m1.vertex_count,
+                                                            m1.tri_count)
+        # `chunk("TRIANGLES")` is the BOXTREE leaf; the mesh selector is not.
+        assert x.chunk("TRIANGLES").flags == 256
+        assert xmd_export.triangle_nodes(x) == x.triangle_nodes()
+    finally:
+        os.remove(path)
+
+
 def test_main_list_and_errors(tmp_dir):
     path = tm._write_tmp(_single_cluster())
     try:
@@ -230,7 +249,9 @@ def main() -> int:
     tests = (test_export_roundtrip, test_export_without_uv,
              test_export_cluster_select_and_out_of_range,
              test_manifest_bones_and_surfaces, test_skeleton_dict_children,
-             test_manifest_bone_space_palette, test_main_list_and_errors)
+             test_manifest_bone_space_palette,
+             test_decode_cluster_skips_boxtree_triangles,
+             test_main_list_and_errors)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:
             t(d)

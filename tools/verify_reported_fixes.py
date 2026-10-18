@@ -907,8 +907,34 @@ def main():
             "count) must be decoded drop-in compatible with 0x204, unit-tested "
             "and recorded")
 
+    # GH #86: `TRIANGLES` is not exclusive to the mesh either. The 2009 models
+    # also carry a TRIANGLES under a BOXTREE bounding-volume node (1411 across
+    # the install) in a different `u16 tag; u16 count; u16[count]` run layout;
+    # by-index pairing picked it and either failed to decode (41 red on `F:`) or
+    # silently paired ~1938 clusters with the wrong list. The engine resolves the
+    # mesh chunk with CDataFile::GetNext(cluster, "TRIANGLES") -- a sibling of
+    # the cluster's VERTEXFRAMES -- so a BOXTREE child can never be one.
+    xmd_export_src = (ROOT / "tools/xmd_export.py").read_text(encoding="utf-8")
+    require("def triangle_nodes(self)" in mos_xmd and
+            "def triangle_node(self)" in mos_xmd and
+            "self.triangle_nodes()" in mos_xmd and
+            "def triangle_nodes(x: Xmd)" in xmd_export_src and
+            "tri_nodes = triangle_nodes(x)" in xmd_export_src and
+            "test_triangle_nodes_skips_boxtree_leaf" in mos_xmd_tests and
+            "test_boxtree_only_triangles_means_no_mesh" in mos_xmd_tests and
+            "test_check_pairs_boxtree_triangles" in (
+                ROOT / "tools/test_xmd_pose.py").read_text(encoding="utf-8") and
+            "test_decode_cluster_skips_boxtree_triangles" in (
+                ROOT / "tools/test_xmd_export.py").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0477-xmd-triangles-boxtree-leaf-selection.md"
+             ).exists(),
+            "GH #86: the mesh TRIANGLES must be selected (not a BOXTREE "
+            "bounding-volume leaf), the cluster->triangle pairing must be exact "
+            "on both installs, and the selection must be unit-tested and "
+            "recorded")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-81, #83, #85)")
+          "#62, #64-68, #69, #71-73, #75-81, #83, #85, #86)")
     return 0
 
 

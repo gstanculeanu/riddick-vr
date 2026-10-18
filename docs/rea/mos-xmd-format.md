@@ -45,9 +45,25 @@ names `VERTEXFRAMES`, `TVERTEXFRAMES`, `BONEDEFORM`, `SKELETON`, `NODEINDICES`.
   (`+0x18`=next_sibling, `+0x1C`=first_child) reproduces the correct
   per-cluster nesting. **Exact role confirmation is a small pending task.**
 - Chunk payloads tile the data region contiguously — verified for every
-  `TRIANGLES` (declared count == node `count`).
+  **mesh** `TRIANGLES` (declared count == node `count`).
 - `CDataFile::GetNext(df, "NAME")` selects a sibling chunk by name; that is how
-  the mesh reader finds `VERTEXFRAMES`/`TVERTEXFRAMES`/`BONEDEFORM`.
+  the mesh reader finds `VERTEXFRAMES`/`TVERTEXFRAMES`/`BONEDEFORM` **and
+  `TRIANGLES`** (`MXR_CTriangleMeshCore_Read.txt:380`), i.e. the mesh's triangles
+  must be a *sibling of the cluster*, never a child of another node.
+- **Chunk names are not globally unique (GH #84, GH #86).** The 2009 install adds
+  a `BOXTREE` bounding-volume node whose children are a 12-byte `NODES` (the BV
+  records) **and a `TRIANGLES`** (1411 leaves; a per-leaf triangle set in a
+  different `u16 tag; u16 count; u16[count]` run layout — *not* a `u32 count` +
+  `u16` list, so it sizes as `Σ(4 + 2·count)` with `count` 1-7). A `GetNext`
+  lookup scoped to the cluster can never see it. Tooling must therefore select
+  the *mesh* `NODES` (`SKELETON`-parented) and the *mesh* `TRIANGLES` (parent is
+  not a `BOXTREE`, or shares its parent with a `VERTEXFRAMES`) — see
+  `tools/mos_xmd.py` `skeleton_node()` / `triangle_nodes()`.
+
+  | install | mesh `TRIANGLES` | `BOXTREE` `TRIANGLES` | mesh decode |
+  |---|---|---|---|
+  | 2004 `C:` | 4662 (all `CLUSTER`-parented) | 0 | 4662/4662 |
+  | 2009 `F:` | 8805 (`VERTEXBUFFER` 8645 / `CLUSTER` 160) | 1411 | 8805/8805 |
 
 ## Geometry (`CTriangleMeshCore`) — in `MXR.dll`
 - Reader entry: `CTriangleMeshCore::Read` ≈ `FUN_10080f50` (error strings
