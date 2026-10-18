@@ -48,6 +48,17 @@ lived-seconds / frames / hook-log freshness) instead of grading the capture
 checks -- so "the game did not start" can never be read as "the feature is
 broken".
 
+**Extension (autoloop wake 97):** the early exit is only **one** no-measurement
+signature. A second was measured in wake 96 -- the game stayed **alive the whole
+window** (47 s) with **0 frames and no hook log** while the identical re-run
+passed; the old rule graded it ``started`` (it merely "stayed live") and its 0
+frames produced a false red that was *not* retried. An attempt that stays live for
+at least ``--min-live-seconds`` with no fresh hook log and no captured frame is now
+its own state, ``no_evidence`` ("the hook never attached"), retried once like an
+early exit and reported as one distinct ``game_started`` failure if it repeats. A
+run with **any** evidence (a frame or a fresh hook log) is still ``started`` and is
+never retried.
+
 ``--reach-gameplay`` (GH #71 requirement 1) runs with an unlimited frame count
 bounded by wall-clock ``--duration``, because the mock host follows the *game's*
 uncapped swap rate (~250-300 FPS on the trivial startup splash): a 180-frame
@@ -2524,38 +2535,62 @@ LAUNCH_INDEPENDENT_CHECKS = ("deployed_hook_matches_build",)
 
 def game_start_decision(game_exited, live_seconds, frames, hook_fresh,
                         min_live_seconds=EARLY_EXIT_MIN_LIVE_SECONDS):
-    """Pure (GH #87): did the game actually start -- is this attempt a measurement?
+    """Pure (GH #87 + extension): did the game actually start -- is this attempt a
+    *measurement*?
 
-    Returns ``(state, detail)`` with ``state`` one of:
+    "Evidence" is a captured frame or a *fresh* hook log; without either, the hook
+    never attached and no check on the capture is meaningful. Returns
+    ``(state, detail)`` with ``state`` one of:
 
-    * ``"started"`` -- the game produced evidence (a captured frame or a *fresh*
-      hook log) or stayed live for at least ``min_live_seconds``; grade normally.
-    * ``"early_exit"`` -- the game process ended before ``min_live_seconds`` with
-      no captured frame and no fresh hook log. This is the measured GH #87
-      signature; the identical re-run passes, so the attempt is not evidence
-      against the change under test.
+    * ``"started"`` -- the game produced evidence; grade normally.
+    * ``"no_evidence"`` -- the game stayed live for at least ``min_live_seconds``
+      but produced **no** captured frame and **no** fresh hook log: the hook never
+      attached, so the run measured nothing. This is the **second** measured
+      GH #87 signature (autoloop wake 96: the game lived 47 s with 0 frames and no
+      hook log while the *identical* re-run passed). Without this state that
+      attempt reads as a live scene that simply failed every check -- a false red.
+    * ``"early_exit"`` -- the game process ended *before* ``min_live_seconds`` with
+      no captured frame and no fresh hook log; the identical re-run passes, so the
+      attempt is not evidence against the change under test.
+
+    A harness-terminated run *shorter* than ``min_live_seconds`` with no evidence
+    is still ``"started"``: a ``--frames`` run is bounded by frame count, not wall
+    clock, so such a game may simply be too short to prove anything yet (the
+    pre-extension behaviour for genuinely short runs is preserved).
     """
-    if not game_exited:
-        return "started", "game still live at run end"
-    if live_seconds >= min_live_seconds:
-        return ("started",
-                f"game exited after {live_seconds:.1f}s "
-                f"(>= min-live {min_live_seconds:.0f}s)")
-    if frames:
-        return ("started",
-                f"game exited after {live_seconds:.1f}s but captured {frames} "
-                f"frame(s)")
-    if hook_fresh:
+    evidence = bool(frames) or bool(hook_fresh)
+    if evidence:
+        if not game_exited:
+            return "started", "game still live at run end"
+        if frames:
+            return ("started",
+                    f"game exited after {live_seconds:.1f}s but captured {frames} "
+                    f"frame(s)")
         return ("started",
                 f"game exited after {live_seconds:.1f}s but wrote a fresh hook log")
+    if live_seconds >= min_live_seconds:
+        return ("no_evidence",
+                f"game {'exited' if game_exited else 'live'} after "
+                f"{live_seconds:.1f}s with no hook log and no captured frame: the "
+                f"hook never attached, so the attempt is not a measurement "
+                f"(min-live {min_live_seconds:.0f}s; GH #87 extension)")
+    if not game_exited:
+        return "started", "game still live at run end"
     return ("early_exit",
             f"game exited after {live_seconds:.1f}s with no hook log and no "
             f"captured frame (min-live {min_live_seconds:.0f}s; GH #87)")
 
 
 def launch_retry_decision(state, attempt, max_attempts=LAUNCH_MAX_ATTEMPTS):
-    """Pure (GH #87): retry only a not-yet-final *early exit*; never a real result."""
-    return state == "early_exit" and attempt < max(int(max_attempts), 1)
+    """Pure (GH #87 + extension): retry an attempt that measured nothing.
+
+    Both no-measurement states are retried while attempts remain -- a not-yet-final
+    ``early_exit`` (game gone in ~2 s) *or* ``no_evidence`` (game live the whole
+    window but the hook never attached). A real result is never retried, and the
+    retry is bounded.
+    """
+    return (state in ("early_exit", "no_evidence")
+            and attempt < max(int(max_attempts), 1))
 
 
 def format_launch_summary(launch):
@@ -2564,26 +2599,31 @@ def format_launch_summary(launch):
         return "no launch recorded"
     attempts = launch.get("attempts") or []
     last = attempts[-1] if attempts else {}
-    state = "started" if launch.get("game_started") else "DID NOT START"
+    state = launch.get("state")
+    if state is None:  # pre-extension launch records carry only the boolean
+        state = "started" if launch.get("game_started") else "early_exit"
+    label = {"started": "started", "no_evidence": "NO EVIDENCE",
+             "early_exit": "DID NOT START"}.get(state, str(state))
     min_live = launch.get("min_live_seconds", EARLY_EXIT_MIN_LIVE_SECONDS)
     return (f"launch attempts={len(attempts)}/{launch.get('max_attempts')} "
-            f"game {state}; last lived {last.get('live_seconds', 0):.1f}s, "
+            f"game {label}; last lived {last.get('live_seconds', 0):.1f}s, "
             f"{last.get('frames', 0)} frame(s), hook log "
             f"{'fresh' if last.get('hook_fresh') else 'absent'} "
             f"(min-live {min_live:.0f}s; GH #87)")
 
 
 def demote_checks_for_no_game_start(checks, keep=LAUNCH_INDEPENDENT_CHECKS):
-    """GH #87: a game that never started is not a measurement of the change under
-    test, so its failing capture checks are *reported, not graded*. Returns the
-    names of the demoted checks (the check list is modified in place)."""
+    """GH #87: an attempt the hook never attached to is not a measurement of the
+    change under test, so its failing capture checks are *reported, not graded*.
+    Returns the names of the demoted checks (the check list is modified in place)."""
     demoted = []
     for c in checks:
         if c.get("skip") or c.get("ok") or c.get("check") in keep:
             continue
         c["skip"] = True
         c["detail"] = (str(c.get("detail", "")) +
-                       " (not graded: the game did not start -- GH #87)").strip()
+                       " (not graded: the attempt was not a measurement -- the hook "
+                       "never attached; GH #87)").strip()
         demoted.append(c.get("check"))
     return demoted
 
@@ -2856,10 +2896,12 @@ def run_sim(args, artifacts: Path):
         print(f"[xrsim] launch attempt {i}/{max_attempts}: {state} -- {detail}")
         if not launch_retry_decision(state, i, max_attempts):
             break
-    launch = {"game_started": state == "started", "attempts": attempts,
+    launch = {"game_started": state == "started", "state": state,
+              "attempts": attempts,
               "max_attempts": max_attempts, "min_live_seconds": min_live,
               "detail": detail, "summary": format_launch_summary(
-                  {"game_started": state == "started", "attempts": attempts,
+                  {"game_started": state == "started", "state": state,
+                   "attempts": attempts,
                    "max_attempts": max_attempts, "min_live_seconds": min_live})}
     return host_log, log_mark, menu_stats, launch, window_stats
 
@@ -3347,15 +3389,17 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
     checks.append({**deployed_hook_check(
         deployed_hook_identity(eval_game_dir, eval_built_hook),
         bool(getattr(args, "require_fresh_hook", False))), "group": "capture"})
-    # GH #87: is this attempt a measurement at all? A game that ended within a
-    # couple of seconds of launch with no hook log and no captured frame is not
-    # evidence against the change under test (the identical re-run passes), so it
-    # becomes one distinct `game_started` failure and the capture FAILs it would
-    # otherwise produce are demoted to reported-not-graded.
+    # GH #87 (+ extension): is this attempt a measurement at all? Two signatures
+    # are not: the game ending within a couple of seconds of launch (no hook log,
+    # no frame), and the game staying live the whole window with no hook log and no
+    # frame (the hook never attached). Either way the capture FAILs are demoted to
+    # reported-not-graded and one distinct `game_started` failure stands in their
+    # place, so "nothing was measured" can never read as "the fix is broken".
     launch = launch if launch is not None else getattr(args, "launch_stats", None)
     if launch is not None:
         started = bool(launch.get("game_started", True))
         rec = {"group": "launch", "check": "game_started", "ok": started,
+               "state": launch.get("state"),
                "detail": format_launch_summary(launch)}
         if not started:
             rec["demoted_checks"] = demote_checks_for_no_game_start(checks)
@@ -3424,17 +3468,22 @@ def cmd_selftest(require_image_deps=False):
             release_live_lock(lk, 101) is False and
             release_live_lock(lk, 202) is True and not lk.exists())
 
-    # GH #87: an early game exit with no evidence is not a measurement -> retried
-    # once; a real result (frames, a fresh hook log, or a game that stayed live)
+    # GH #87 + extension: an attempt with no evidence is not a measurement -> it is
+    # retried once. Two signatures have no evidence: the game ending early (an early
+    # exit) and the game staying live the whole window with the hook never attached
+    # (no_evidence). Any evidence (a frame or a fresh hook log) is a real result and
     # must never be retried, and the retry is bounded.
     results["game_start_decision_states"] = (
-        game_start_decision(False, 2.0, 0, False)[0] == "started" and
         game_start_decision(True, 2.0, 0, False)[0] == "early_exit" and
         game_start_decision(True, 2.0, 1, False)[0] == "started" and
         game_start_decision(True, 2.0, 0, True)[0] == "started" and
-        game_start_decision(True, 30.0, 0, False)[0] == "started")
+        game_start_decision(True, 30.0, 0, False)[0] == "no_evidence" and
+        game_start_decision(False, 30.0, 0, False)[0] == "no_evidence" and
+        game_start_decision(False, 2.0, 0, False)[0] == "started")
     results["launch_retry_bounds_early_exit"] = (
         launch_retry_decision("early_exit", 1, 2) is True and
+        launch_retry_decision("no_evidence", 1, 2) is True and
+        launch_retry_decision("no_evidence", 2, 2) is False and
         launch_retry_decision("early_exit", 2, 2) is False and
         launch_retry_decision("started", 1, 2) is False)
 
@@ -3920,14 +3969,17 @@ def main(argv=None):
                     help="start the scenario at host frame 0 instead of waiting for gameplay")
     ap.add_argument("--min-live-seconds", type=float,
                     default=EARLY_EXIT_MIN_LIVE_SECONDS,
-                    help="GH #87: if the game process ends on its own before this "
-                         "many seconds with no hook log and no captured frame, the "
-                         "attempt is an early exit (the game did not start); it is "
-                         "retried once and, if it repeats, reported as a distinct "
-                         f"game_started failure (default {EARLY_EXIT_MIN_LIVE_SECONDS:g})")
+                    help="GH #87: an attempt with no hook log and no captured "
+                         "frame that either ends on its own before this many "
+                         "seconds (an early exit) or stays live at least this long "
+                         "with the hook never attached (no evidence) is not a "
+                         "measurement; it is retried once and, if it repeats, "
+                         "reported as a distinct game_started failure "
+                         f"(default {EARLY_EXIT_MIN_LIVE_SECONDS:g})")
     ap.add_argument("--max-launch-attempts", type=int, default=LAUNCH_MAX_ATTEMPTS,
-                    help="GH #87: host+game launches per run; an early game exit "
-                         f"is retried once (default {LAUNCH_MAX_ATTEMPTS})")
+                    help="GH #87: host+game launches per run; an attempt that "
+                         f"measured nothing (early exit / no evidence) is retried "
+                         f"once (default {LAUNCH_MAX_ATTEMPTS})")
     ap.add_argument("--evaluate-only", action="store_true",
                     help="re-analyse existing captures; do not launch host/game")
     ap.add_argument("--selftest", action="store_true")

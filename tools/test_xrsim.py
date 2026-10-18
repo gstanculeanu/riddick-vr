@@ -2253,25 +2253,69 @@ def test_live_lock_and_shadow_flags_parse(td):
 # ------------------ GH #87: an early game exit is not a measurement
 def test_game_start_decision_states(td):
     """The measured GH #87 signature (game ended in ~2 s, no hook log, no frames)
-    is an early exit that must not be read as evidence; *any* evidence or a game
-    that stayed live is a real measurement."""
+    is an early exit; *any* evidence is a real measurement. The wake-96 extension:
+    a game that stays **live** the whole window with no hook log and no frame is
+    ``no_evidence`` (the hook never attached) -- not ``started``."""
     state, detail = xrsim.game_start_decision(True, 2.0, 0, False)
     assert state == "early_exit" and "GH #87" in detail
-    # A captured frame / a fresh hook log / a live game is a real measurement.
+    # A captured frame / a fresh hook log is a real measurement.
     assert xrsim.game_start_decision(True, 2.0, 1, False)[0] == "started"
     assert xrsim.game_start_decision(True, 2.0, 0, True)[0] == "started"
-    assert xrsim.game_start_decision(True, 30.0, 0, False)[0] == "started"
+    # A live game with no evidence at all is no longer "started": the hook never
+    # attached, so the attempt measured nothing (wake-96 false red; GH #87 ext).
+    assert xrsim.game_start_decision(True, 30.0, 0, False)[0] == "no_evidence"
+    assert xrsim.game_start_decision(False, 30.0, 0, False)[0] == "no_evidence"
+    assert "GH #87" in xrsim.game_start_decision(False, 30.0, 0, False)[1]
     # The harness terminating the game after a host-bounded/duration run is not an
     # exit: game_exited is False, so a short --frames run is never misretried.
     assert xrsim.game_start_decision(False, 0.5, 0, False)[0] == "started"
 
 
 def test_launch_retry_is_bounded_to_one_early_exit(td):
+    # Both no-measurement states are retried while attempts remain ...
     assert xrsim.launch_retry_decision("early_exit", 1, 2) is True
+    assert xrsim.launch_retry_decision("no_evidence", 1, 2) is True
+    # ... never a real result, and never past the bound.
     assert xrsim.launch_retry_decision("early_exit", 2, 2) is False
+    assert xrsim.launch_retry_decision("no_evidence", 2, 2) is False
     assert xrsim.launch_retry_decision("started", 1, 2) is False
     # A run configured for a single attempt never retries.
     assert xrsim.launch_retry_decision("early_exit", 1, 1) is False
+    assert xrsim.launch_retry_decision("no_evidence", 1, 1) is False
+
+
+def test_no_evidence_run_fails_once_and_demotes_capture_checks(td):
+    """GH #87 extension: a game that stayed live with the hook never attached (0
+    frames, no fresh hook log) is reported as one distinct `game_started` failure
+    (detail: NO EVIDENCE) and its capture FAILs are demoted, never graded."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    game = Path(td) / "gamedir_noevidence"
+    game.mkdir()
+    built = Path(td) / "dist_noevidence" / "opengl32.dll"
+    built.parent.mkdir()
+    built.write_bytes(b"current-build")
+    (game / "opengl32.dll").write_bytes(b"current-build")
+    launch = {"game_started": False, "state": "no_evidence", "max_attempts": 2,
+              "min_live_seconds": 5.0,
+              "attempts": [
+                  {"attempt": 1, "live_seconds": 47.0, "frames": 0,
+                   "hook_fresh": False, "game_exited": False},
+                  {"attempt": 2, "live_seconds": 46.0, "frames": 0,
+                   "hook_fresh": False, "game_exited": False}]}
+    passed, checks = xrsim.evaluate(
+        _args(game_dir=str(game), built_hook=str(built), require_fresh_hook=True),
+        art, "[Mock Host] Game Connected: WAITING", "", launch=launch)
+    by = {c["check"]: c for c in checks}
+    assert by["game_started"]["ok"] is False and not by["game_started"].get("skip")
+    assert by["game_started"]["state"] == "no_evidence"
+    assert "NO EVIDENCE" in by["game_started"]["detail"]
+    assert "2/2" in by["game_started"]["detail"]
+    # The noisy capture FAILs are reported but not graded ...
+    assert by["frames_captured"].get("skip") is True
+    assert "not graded" in by["frames_captured"]["detail"]
+    # ... while the hook identity (independent of a live scene) still grades.
+    assert by["deployed_hook_matches_build"].get("skip") is not True
+    assert passed is False
 
 
 def test_no_game_start_fails_once_and_demotes_capture_checks(td):
@@ -2481,6 +2525,7 @@ def main() -> int:
              test_game_start_decision_states,
              test_launch_retry_is_bounded_to_one_early_exit,
              test_no_game_start_fails_once_and_demotes_capture_checks,
+             test_no_evidence_run_fails_once_and_demotes_capture_checks,
              test_no_launch_record_keeps_capture_grading,
              test_launch_reliability_flags_parse,
              test_ini_flag_parses_and_refuses_without_a_shadow,

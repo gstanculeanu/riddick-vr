@@ -1329,13 +1329,12 @@ def main():
             "on both installs, and the selection must be unit-tested and "
             "recorded")
 
-    # GH #87: a live run can end with the game exiting within ~2 s (no hook log,
-    # all capture checks FAIL) while the *identical* re-run passes -- a false red
-    # that reads as "the fix is broken" and costs a wake each time. An attempt
-    # that ends that way (no fresh hook log, no captured frame, game gone before
-    # `--min-live-seconds`) is retried once and, if it repeats, reported as one
-    # distinct `game_started` failure instead of grading the capture checks; a
-    # launch that produced evidence is never retried.
+    # GH #87 (+ autoloop wake-97 extension): a live run can measure nothing two
+    # ways -- the game *ends* within ~2 s before the hook attaches (an early exit),
+    # or it stays **live** the whole window with the hook never attaching (measured
+    # wake 96: 47 s alive, 0 frames, no hook log, identical re-run passes). Both are
+    # retried once and, if they repeat, reported as one distinct `game_started`
+    # failure instead of grading the capture checks; any evidence is never retried.
     require("def game_start_decision" in xrsim_tool and
             "def launch_retry_decision" in xrsim_tool and
             "def demote_checks_for_no_game_start" in xrsim_tool and
@@ -1344,15 +1343,20 @@ def main():
             "--min-live-seconds" in xrsim_tool and
             "--max-launch-attempts" in xrsim_tool and
             '"game_started"' in xrsim_tool and
+            '"no_evidence"' in xrsim_tool and
             '"launch": launch' in xrsim_tool and
             "game_start_decision_states" in xrsim_tool and
             "launch_retry_bounds_early_exit" in xrsim_tool and
             "test_game_start_decision_states" in _xrsim_tests and
             "test_no_game_start_fails_once_and_demotes_capture_checks"
             in _xrsim_tests and
-            (ROOT / "docs/adr/0479-xrsim-early-game-exit-retry.md").exists(),
-            "GH #87: a live run whose game exits in ~2 s with no hook log and no "
-            "frames must be retried once and, if it repeats, reported as one "
+            "test_no_evidence_run_fails_once_and_demotes_capture_checks"
+            in _xrsim_tests and
+            (ROOT / "docs/adr/0479-xrsim-early-game-exit-retry.md").exists() and
+            (ROOT / "docs/adr/0498-xrsim-no-evidence-attempt-retry.md").exists(),
+            "GH #87: a live run that measures nothing -- the game exits in ~2 s "
+            "with no hook log and no frames, OR stays live with the hook never "
+            "attached -- must be retried once and, if it repeats, reported as one "
             "distinct game_started failure rather than as broken captures")
 
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "

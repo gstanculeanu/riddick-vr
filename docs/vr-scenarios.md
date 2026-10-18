@@ -544,20 +544,23 @@ ADR-0494 is exhausted**; the remaining route is the "is the viewmodel drawn at a
 in `docs/rea/reference/GameClasses2009_ModelSetterSlot68.txt`.
 
 
-**Launch reliability (GH #87, ADR-0479):** a live run can end with
-`DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
-renderer init), the host logging `Game Connected: WAITING` for the whole (short)
-run, and 0 captured frames — **while the identical re-run passes** (measured 2 of
-3 fresh-shadow first launches during the GH #72 A/B). That is a false red, not a
-broken fix, so an attempt whose game process ends before `--min-live-seconds`
-(default 5) with no fresh hook log and no captured frame is retried once
-(`--max-launch-attempts`, default 2). If it repeats, the run reports **one**
-`game_started` failure (report key `launch`, carrying every attempt's
-lived-seconds / frames / hook-log freshness) and demotes the missing-capture FAILs
-to reported-not-graded, so "the game did not start" can never read as "the feature
-is broken". A launch with evidence — including a short host-bounded `--frames`
-run where the game is still alive — is never retried. `--evaluate-only` has no
-launch record and grades exactly as before.
+**Launch reliability (GH #87, ADR-0479; extended by ADR-0498):** a live run can
+measure nothing in two ways — a false red, either way, not a broken fix. (1) The
+game ends within ~2 s — no hook log (or one that stops during renderer init), the
+host logging `Game Connected: WAITING` for the whole (short) run, and 0 captured
+frames — **while the identical re-run passes** (measured 2 of 3 fresh-shadow first
+launches during the GH #72 A/B). (2) The game stays **live for the whole window**
+with **0 frames and no hook log** (measured autoloop wake 96: 47 s alive, no hook
+attach, identical re-run reached 62 distinct gameplay frames). An attempt with no
+evidence (no captured frame **and** no fresh hook log) is retried once
+(`--max-launch-attempts`, default 2) whether it ended early (`early_exit`) or
+stayed live (`no_evidence`). If it repeats, the run reports **one** `game_started`
+failure (report key `launch`, carrying every attempt's state / lived-seconds /
+frames / hook-log freshness) and demotes the missing-capture FAILs to
+reported-not-graded, so "nothing was measured" can never read as "the feature is
+broken". A launch with evidence — including a short host-bounded `--frames` run
+where the game is still alive — is never retried. `--evaluate-only` has no launch
+record and grades exactly as before.
 
 **Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
 `tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and

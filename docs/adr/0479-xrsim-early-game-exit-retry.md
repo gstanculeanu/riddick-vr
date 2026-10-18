@@ -1,5 +1,14 @@
 # ADR-0479 — XRSIM: an early game exit is not a measurement (retry once, report `game_started`)
 
+> **Correction (ADR-0498, autoloop wake 97).** This ADR handled only *one*
+> no-measurement signature (the game **ending** before the hook attaches). A
+> second — the game **staying live** the whole window with the hook never
+> attaching (measured wake 96: 47 s alive, 0 frames, no hook log, identical re-run
+> passes) — is now its own state, `no_evidence`, retried once exactly like an
+> early exit. This corrects the "Honest limits" claim below that such a run
+> "grades as before because it is a real, reproducible defect": it was measured as
+> a flake. See ADR-0498.
+
 - Status: accepted
 - Date: 2026-10-18
 - Refs: GH #87 (this), GH #68 (iteration vehicle), GH #81 (hook identity / the

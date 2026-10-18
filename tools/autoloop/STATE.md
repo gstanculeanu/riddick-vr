@@ -2,6 +2,79 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 97 — 2026-10-18 11:24 (scheduled loop)
+- **Unit:** GH **#87 (extension)** — XRSIM now treats the **second** no-measurement
+  signature as a non-measurement too: an attempt that stays **live** for
+  `--min-live-seconds` but captures **0 frames** and writes **no hook log** (the
+  hook never attached) is its own state `no_evidence`, retried once exactly like
+  an early exit and reported as **one** distinct `game_started` failure (with the
+  capture FAILs demoted) if it repeats. **Harness-only; no C++, no deploy, no
+  install write.** (ADR-0498.)
+- **Why this unit:** it is the explicit lead the previous wake recorded
+  (wake 96, "Ops note"): its *first* live reach attempt ran with the game alive
+  **47 s**, **0 frames, no hook log**, and yet graded `game_started` **PASS** — its
+  0 frames then produced a wall of capture FAILs that read as "the fix is broken"
+  (a false red the retry machinery never saw, because the game had not *exited*).
+  ADR-0479 had explicitly left this case "grading as before because it is a real,
+  reproducible defect"; wake 96 measured it as a **flake** (identical re-run
+  reached 62 distinct gameplay frames), so ADR-0498 corrects that claim.
+- **Change:**
+  - `tools/xrsim.py`: `game_start_decision` now keys on **evidence** (a frame or a
+    *fresh* hook log): no evidence + `live >= min_live` ⇒ `no_evidence` (whether
+    the game exited or was still live); no evidence + game gone *before*
+    `min_live` ⇒ `early_exit` (unchanged); a short harness-terminated `--frames`
+    run with no evidence still `started` (unchanged). `launch_retry_decision`
+    retries `early_exit` **or** `no_evidence` (bounded); `format_launch_summary`
+    labels `NO EVIDENCE`; the `launch` report key and the `game_started` check now
+    carry `state`; the demotion detail reads "the attempt was not a measurement --
+    the hook never attached". Docstring + both CLI help strings updated.
+  - `tools/test_xrsim.py`: updated `test_game_start_decision_states` and
+    `test_launch_retry_is_bounded_to_one_early_exit`; **new**
+    `test_no_evidence_run_fails_once_and_demotes_capture_checks`.
+  - `tools/verify_reported_fixes.py`: the GH #87 invariant extended (`"no_evidence"`,
+    the new test, and ADR-0498).
+  - `docs/adr/0498-xrsim-no-evidence-attempt-retry.md` (**new**);
+    `docs/adr/0479-…` **correction banner**; `docs/vr-scenarios.md` GH #87 section
+    rewritten for the two signatures.
+- **EVIDENCE offline:** `xrsim --selftest` PASS (both extended cases),
+  `test_xrsim.py` PASS (+1, incl. all GH #87 cases),
+  `verify_reported_fixes` PASS (extended GH #87 invariant), `scenario_tests.py
+  --check` PASS, `verify_hook_init` PASS, `validate_addresses` PASS,
+  `verify_test_artifacts` PASS, **all 12 `tools/test_*.py` exit 0**. **No C++ →
+  no `build-all`/CTest** (documented).
+- **EVIDENCE live (deterministic, no game):** the new path end-to-end without
+  launching the game — `--game-exe C:\Windows\System32\PING.EXE --game-dir
+  <empty> --duration 8 --max-launch-attempts 2`: attempt 1/2 `no_evidence` →
+  **retried** → attempt 2/2 `no_evidence` → one `[FAIL] launch: game_started
+  (launch attempts=2/2 game NO EVIDENCE; last lived 10.8s, 0 frame(s), hook log
+  absent)`, every capture check demoted to `[SKIP] … (not graded: the attempt was
+  not a measurement …)`. (`RIDDICKVR_SIM=1`; no desktop input.)
+- **EVIDENCE live (control, real game):** `--shadow-install "F:\…Assault on Dark
+  Athena" --reach-gameplay --duration 45 --advance-menu --advance-min-taps 8
+  --require-fresh-hook` → **XRSIM RESULT PASS**, `launch attempts=1/2 game
+  started` (state=`started`, **not retried**), `menu advance taps=8 … gameplay
+  reached`, `gameplay_full_bleed_reached` fill **1.00**,
+  `deployed_hook_matches_build` PASS (shadow hook `sha256 a8897b5d5d9b` = repo
+  build). So the extension does not alter a good run, and the wake-96 reach
+  reproduces.
+- **Blocker / honest limit:** `no_evidence` is detected only from the harness's
+  outcome signals (frames / hook-log mtime); it does **not** explain *why* the
+  hook fails to attach, and the wake-96 flake was not reproduced on demand (it is
+  intermittent) — the live demonstration uses a stand-in process, and the
+  no-evidence retry is otherwise covered by pure unit tests. The retry can double
+  the wall-clock cost of a run fated to fail (bound: one extra attempt). Nothing
+  about the 2004 build; no headset.
+- **Install untouched:** deployed `System\Win32_x86\opengl32.dll` still `479232 B
+  17-Oct 12:47`, `riddick_vr.ini` `7363 B`, `riddick_vr.log` `7635 B 00:25` — all
+  unchanged; live runs used `%TEMP%` shadows; no game/host/ping processes left;
+  live lock released.
+- **Next:** (1) the #67 state question still needs an **armed** state (the console
+  route looks closed in the retail build — no console key name in `MSystem.dll`'s
+  key table; the `--game-arg` route is already dead); (2) `ViewmodelObserve=0`
+  stays the default; (3) the display-branch mislabel of the static splash (GH #72)
+  is unreachable in a normal run but still worth the content discriminator;
+  (4) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (5) GH #83/#88.
+
 ## Wake 96 — 2026-10-18 10:57 (scheduled loop)
 - **Unit:** GH **#71 requirement 1 (reach live gameplay) + #80** — the iteration
   vehicle now **actually reaches live 3D gameplay** on the current build: the
