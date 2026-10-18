@@ -324,6 +324,18 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   (`Gun`/`Melee`/`Ulaks`/`AngelusChain`) holds either function, so "the player's
   first-person arms are the `VIEWMODEL` property" is **not** supported. Recorded in
   `docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt`. See ADR-0494.
+- **ADR-0495 - the `FirstPerson`/`ThirdPerson` "view-mode table" is a
+  `CWObject_Matinee` script key, not the player FP body/arms.** ADR-0494's "Next
+  1b" proposed chasing the `.data` block at `0x1083ff68`/`0x1083ff6c` to the
+  camera/body-attach code. A read-only static scan measures what it is: the block
+  is `FirstPerson`/`ThirdPerson`/`KeepEndFade`/`NoSkip` (matinee keys), it has
+  **exactly one** code reference (`push 0x1083ff68` at `0x105ec068`), and that
+  site is inside `FUN_105ebf40` = **slot 15** of the vtable `0x1078c0e4`, whose
+  RTTI is `.?AVCWObject_Matinee@@` (`.\WObj_Misc\WObj_Matinee.cpp`). The block is
+  a matinee camera-mode script key, so candidate (1b) is **closed**; the remaining
+  #67 step-1 routes are the object property-setter target (ADR-0494's 1a) and the
+  "is the viewmodel drawn at all?" state question (GH #80). Recorded in
+  `docs/rea/reference/GameClasses2009_ViewmodeConsumer.txt`. See ADR-0495.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

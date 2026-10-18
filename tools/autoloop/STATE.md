@@ -2,6 +2,82 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 94 — 2026-10-18 10:16 (scheduled loop)
+- **Unit:** GH **#67 step 1 (thirteenth correction, ADR-0495)** — ADR-0494's
+  "Next 1b" (chase the `FirstPerson`/`ThirdPerson` "view-mode table" to the
+  camera/body-attach code) is **closed read-only**: the `.data` block at
+  `0x1083ff68` is a **`CWObject_Matinee` script/camera key**, consumed by exactly
+  one method (**slot 15** of the vtable `0x1078c0e4`, RTTI
+  `.?AVCWObject_Matinee@@`, source `.\WObj_Misc\WObj_Matinee.cpp`) — **not** the
+  player's FP body/arms. **No REA/Ghidra request** (static PE/byte scan + RTTI, < 1 s
+  wall); no C++, no build, no deploy, no install write, no live run.
+- **Why this unit:** the explicit "Next" of wake 93 / ADR-0494 listed two
+  candidates for #67 step 1; (1b) was the view-mode table. Measuring it *now*
+  removes a dead branch before any wake spends Ghidra time on it — the wake-93
+  note called it "where the FP body/arms decision lives", which this falsifies.
+- **Measured (read-only; subject `Content\GameClasses_Win32_x86.dll`, 9,016,560 B,
+  `sha256 d7e81d7d3726…`, `confidence=observed`, `authority=shipped-artifact`):**
+  - **The block** `0x1083ff68 -> 0x1078be28 "FirstPerson"`, `0x1083ff6c ->
+    0x1078be1c "ThirdPerson"`, `0x1083ff70 -> "KeepEndFade"`, `0x1083ff74 ->
+    "NoSkip"`, terminator, then `0x1083ff80 -> "CWObject_Matinee"`. `KeepEndFade`/
+    `NoSkip` are matinee playback options ⇒ a matinee key list, not a view-mode enum.
+  - **Exactly one code reference:** an image-wide 4-byte scan finds `push
+    0x1083ff68` at **`0x105ec068`** and **zero** references to `0x1083ff6c`; the
+    strings `0x1078be28`/`0x1078be1c` have **zero** code refs (one data ref each:
+    the block entries).
+  - **A keyed dispatch:** `cmp edi, 0x4d68028a` / `cmp edi, 0x6b2e3218` / `jne …`,
+    then `push 0x1083ff68; lea ecx,[esp+0x20]; call 0x10026c30; mov [esi+0x3b8],eax`.
+  - **The containing function is a `CWObject_Matinee` method:** nearest `55 8B EC`
+    prologue `0x105ebf40`; its address occurs once as `.rdata` `0x1078c120` =
+    **slot 15** of vtable `0x1078c0e4` (`(0x1078c120-0x1078c0e4)/4 = 15`);
+    `-4` COL `0x107b97e0` → TypeDescriptor `0x10840238` =
+    `.?AVCWObject_Matinee@@`; same `.rdata` neighbourhood has
+    `CWO_Matinee_ClientData` + `.\WObj_Misc\WObj_Matinee.cpp`.
+  - **Hash probe negative:** neither key matches crc32/FNV-1/1a/djb2/sdbm of any
+    of the block's names (or ViewMode/CameraMode/Matinee/Camera/View) — the key
+    function is **not claimed**.
+- **Consequence:** candidate (1b) is falsified; ADR-0492 §4's "view-mode /
+  camera-mode name list for an entity" is **corrected** to a matinee camera script
+  key. The remaining #67 step-1 routes are ADR-0494's **(1a)** (the object
+  property-setter target, destination `vtable[0x68]`, and the model-instance
+  creation it feeds) and the **state question** (GH #80 / wake 89).
+- **Change (docs + guard only, NO C++):**
+  - **NEW `docs/rea/reference/GameClasses2009_ViewmodeConsumer.txt`** — subject
+    hash + section map, the reproducer, the verbatim block, the sole code reference
+    with its capstone disassembly, the vtable/RTTI read, the hash-probe negative,
+    and a "not claimed" section.
+  - **NEW `docs/adr/0495-gh67-viewmode-table-is-a-matinee-property-not-the-fp-body.md`.**
+  - `tools/verify_reported_fixes.py` — new GH #67 invariant pinning the artifact
+    (hash, `0x1083ff68`/`0x1083ff6c`, `0x105ec068`, `0x105ebf40`, `0x1078c0e4`,
+    `0x1078c120`, `.?AVCWObject_Matinee@@`, `WObj_Matinee.cpp`, `FirstPerson`,
+    `ThirdPerson`) + ADR-0495.
+  - `src/hook/README.md` (ADR-0495 bullet), `docs/vr-scenarios.md` (wake-94
+    correction).
+- **EVIDENCE offline:** `verify_reported_fixes` PASS (with the new invariant),
+  `scenario_tests.py --check` PASS, `verify_hook_init` PASS, `validate_addresses`
+  PASS, `verify_test_artifacts` PASS, `xrsim --selftest` PASS, all **12
+  `tools/test_*.py` exit 0**. **No C++ → no `build-all`/CTest** (documented).
+  Artifacts: `%TEMP%\oc_wake94\` (`scan_viewmode.py`, `disasm_viewmode.py`,
+  `find_func.py`, `resolve_class.py`, `hash_probe.py`, + `.out.txt` logs).
+- **Blocker:** none. **Limits (honest):** the dispatcher `FUN_105ebf40` is **not
+  decompiled** here; "keyed dispatch" is read from the eight disassembled
+  instructions; the helper `0x10026c30`, the two key values, and the
+  `[esi+0x3b8]` field's meaning are **not** identified; whether the player's FP
+  arms are drawn at all on the sampled passive/unarmed level start is untouched
+  (wake 89 / GH #80); this file says where the block is **not**, not where the
+  arms come from.
+- **Next:** (1) **#67 step 1 — ADR-0494's (1a):** the object's property-setter
+  target (destination `vtable[0x68]`) and the model-instance creation it feeds
+  (a *different* name than `VIEWMODEL` leads there); (2) the "is the viewmodel
+  drawn on this level?" state question (GH #80); (3) `ViewmodelObserve=0` stays the
+  default; (4) the deploy-gated ladder on a real scene (#76 step 1, #79 hook half,
+  #68 req 5); (5) page-content discriminator for `gameplay_full_bleed_reached`
+  (#71 req 2); (6) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (7) GH #83 / GH #88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY; no ephemeral import copy needed — no REA request); no leftover
+  processes; no live lock taken (no live run). `STATE.log` **appended** (never
+  replaced — GH #88).
+
 ## Wake 93 — 2026-10-18 09:39 (scheduled loop)
 - **Unit:** GH **#67 step 1 (twelfth correction, ADR-0494)** — ADR-0493's two open
   questions are answered **read-only** on the live 2009 `GameClasses`: (1) the

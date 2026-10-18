@@ -537,6 +537,36 @@ def main():
             "vtable 0x10759eb4), with the base loader FUN_10260940's key list and the "
             "measured absence from every weapon-class vtable (ADR-0494)")
 
+    # GH #67 step 1 (thirteenth correction, ADR-0495): ADR-0494's "Next 1b" --
+    # chase the FirstPerson/ThirdPerson "view-mode table" to the FP body/arms --
+    # is closed by measurement. The block at 0x1083ff68 ("FirstPerson"/
+    # "ThirdPerson"/"KeepEndFade"/"NoSkip") has exactly ONE code reference
+    # (`push 0x1083ff68` at 0x105ec068), inside FUN_105ebf40, which is slot 15 of
+    # the vtable 0x1078c0e4 whose RTTI is "?AVCWObject_Matinee@@"
+    # (.\WObj_Misc\WObj_Matinee.cpp). So the block is a CWObject_Matinee script
+    # key, not the player FP body/arms. Pin the artifact + the ADR.
+    vm_vmode = ROOT / "docs/rea/reference/GameClasses2009_ViewmodeConsumer.txt"
+    _vm_vmode_text = vm_vmode.read_text(encoding="utf-8") if vm_vmode.exists() else ""
+    require(vm_vmode.exists() and
+            "d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79" in _vm_vmode_text and
+            "0x1083ff68" in _vm_vmode_text and
+            "0x1083ff6c" in _vm_vmode_text and
+            "0x105ec068" in _vm_vmode_text and
+            "0x105ebf40" in _vm_vmode_text and
+            "0x1078c0e4" in _vm_vmode_text and
+            "0x1078c120" in _vm_vmode_text and
+            ".?AVCWObject_Matinee@@" in _vm_vmode_text and
+            "WObj_Matinee.cpp" in _vm_vmode_text and
+            "FirstPerson" in _vm_vmode_text and
+            "ThirdPerson" in _vm_vmode_text and
+            (ROOT / "docs/adr/0495-gh67-viewmode-table-is-a-matinee-property-not-the-fp-body.md").exists() and
+            "ADR-0495" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8"),
+            "GH #67: the FirstPerson/ThirdPerson .data block must stay recorded as a "
+            "CWObject_Matinee script key with exactly one code reference (push "
+            "0x1083ff68 at 0x105ec068) into FUN_105ebf40 = slot 15 of vtable "
+            "0x1078c0e4 (RTTI ?AVCWObject_Matinee@@), so it is NOT chased as the "
+            "player FP body/arms (ADR-0495)")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

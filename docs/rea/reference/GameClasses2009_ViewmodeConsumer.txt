@@ -1,0 +1,187 @@
+# GameClasses_Win32_x86.dll (2009 Dark Athena) -- the `FirstPerson`/`ThirdPerson`
+# "view-mode" name block is a **CWObject_Matinee** script/camera key, consumed by
+# exactly one method (slot 15 of its vtable) -- **not** the player FP body/arms
+# (GH #67 step 1; closes ADR-0494's "Next 1b")
+#
+# subject : F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll
+#           size 9,016,560 B
+#           sha256 d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79
+#           image base 0x10000000   format PE   architecture x86   6 sections
+#             .text  va 0x10001000 vsize 0x739eb1
+#             .rdata va 0x1073b000 vsize 0xe4f4d
+#             .data  va 0x10820000 vsize 0x67128
+#           (all VAs below are absolute; subtract 0x10000000 for RVAs)
+# method  : **read-only, no REA request.** Static PE section map + an image-wide
+#           4-byte little-endian scan for the VAs of interest (an immediate or a
+#           data pointer is byte-identical either way, so no opcode filter is
+#           applied -- see sec 1), plus RTTI resolution of the owning vtable from
+#           the same file bytes. No game file is written; no install write.
+# purpose : GH #67 step 1. ADR-0494's "Next" (1b) proposed chasing the
+#           `FirstPerson`/`ThirdPerson` `.data` "view-mode table" (0x1083ff68/
+#           0x1083ff6c, ADR-0492 sec 4) "to the camera/body-attach code -- that is
+#           where the FP body/arms decision lives". This file measures what that
+#           table actually is: a **CWObject_Matinee** script key block whose only
+#           consumer is one `CWObject_Matinee` method. The FP body/arms decision
+#           does **not** live here (sec 5).
+# ------------------------------------------------------------------------------
+
+## 0. Reproducer (read-only; no REA request, wall < 1 s)
+
+    import struct, pefile
+    MOD = r"F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll"
+    pe = pefile.PE(MOD, fast_load=True)
+    ib = pe.OPTIONAL_HEADER.ImageBase
+    data = open(MOD, "rb").read()
+    secs = [(s.Name.rstrip(b"\x00").decode(), ib + s.VirtualAddress,
+             s.Misc_VirtualSize, s.PointerToRawData, s.SizeOfRawData,
+             s.Characteristics) for s in pe.sections]
+    def off(va):
+        for n, va0, sz, ro, rs, ch in secs:
+            if va0 <= va < va0 + max(sz, rs): return ro + (va - va0)
+    def u32(va):  return struct.unpack_from("<I", data, off(va))[0]
+    def cstr(va):
+        o = off(va); e = data.find(b"\x00", o, o+64); return data[o:e].decode()
+    # the block ADR-0492 sec4 named, and the strings it points at
+    for va in range(0x1083ff50, 0x1083ff90, 4):
+        v = u32(va)
+        print(hex(va), hex(v), cstr(v) if v else "")
+    for name, va in (("FirstPerson", 0x1078be28), ("ThirdPerson", 0x1078be1c)):
+        pat = struct.pack("<I", va)                     # 4-byte scan, ALL sections
+        hits = [(n, va0+i) for n, va0, sz, ro, rs, ch in secs
+                for i in [data[ro:ro+rs].find(pat)] if i >= 0]
+        print(name, "code refs:", [hex(h) for n, h in hits if n == ".text"],
+              "data refs:", [hex(h) for n, h in hits if n != ".text"])
+    for name, va in (("table[0]", 0x1083ff68), ("table[1]", 0x1083ff6c)):
+        pat = struct.pack("<I", va)
+        hits = [(n, va0+i) for n, va0, sz, ro, rs, ch in secs
+                for i in [data[ro:ro+rs].find(pat)] if i >= 0]
+        print(name, "refs:", [(n, hex(h)) for n, h in hits])
+
+The scripts run this wake are kept verbatim for the run record (see the wake-94
+entry in `tools/autoloop/STATE.md`): `scan_viewmode.py` (block + xref scan),
+`disasm_viewmode.py` (capstone at the sole site), `find_func.py` (prologue scan)
+and `resolve_class.py` (vtable/RTTI).
+
+## 1. The `.data` block at 0x1083ff68 (verbatim)
+
+    0x1083ff68 -> 0x1078be28  "FirstPerson"      <-- ADR-0492's "view-mode entry"
+    0x1083ff6c -> 0x1078be1c  "ThirdPerson"      <-- ADR-0492's "view-mode entry"
+    0x1083ff70 -> 0x1075170c  "KeepEndFade"
+    0x1083ff74 -> 0x10751704  "NoSkip"
+    0x1083ff78 -> 0x00000000  (terminator)
+    0x1083ff7c -> 0x00000000
+    0x1083ff80 -> 0x1078c204  "CWObject_Matinee"
+    0x1083ff84 -> 0x105edd30  (code)
+    0x1083ff88 -> 0x10831258  (data)
+
+And the `.rdata` string cluster (VA -> contents):
+
+    0x1078be04  "CWObject_InputEntity"
+    0x1078be1c  "ThirdPerson"
+    0x1078be28  "FirstPerson"
+    0x1078c204  "CWObject_Matinee"
+    0x1078c1e4  ".\WObj_Misc\WObj_Matinee.cpp"
+
+`KeepEndFade` / `NoSkip` are Matinee playback options, so the block reads as a
+**script/camera key list** for a matinee object, not a general engine view-mode
+enum.
+
+## 2. Its code reference: exactly one, and it is a `push imm32`
+
+An image-wide 4-byte scan (`0x68 0xff 0x83 0x10` = 0x1083ff68 little-endian):
+
+| block VA | code refs | data refs |
+|---|---|---|
+| `0x1083ff68` (`FirstPerson` entry) | **1**: `0x105ec068` | 0 |
+| `0x1083ff6c` (`ThirdPerson` entry) | **0** | 0 |
+| string `0x1078be28` `"FirstPerson"` | **0** | 1 (`0x1083ff68`) |
+| string `0x1078be1c` `"ThirdPerson"` | **0** | 1 (`0x1083ff6c`) |
+
+So the strings are reached only through the block, and the block is pushed
+exactly once. The site (capstone):
+
+    0x105ec054  81 ff 8a 02 68 4d   cmp  edi, 0x4d68028a
+    0x105ec05a  74 25               je   0x105ec081
+    0x105ec05c  81 ff 18 32 2e 6b   cmp  edi, 0x6b2e3218
+    0x105ec062  0f 85 94 01 00 00   jne  0x105ec1fc
+    0x105ec068  68 68 ff 83 10      push 0x1083ff68        ; <-- the sole reference
+    0x105ec06d  8d 4c 24 20         lea  ecx, [esp+0x20]
+    0x105ec071  e8 ba ab a3 ff      call 0x10026c30
+    0x105ec076  89 86 b8 03 00 00   mov  [esi+0x3b8], eax
+    0x105ec07c  e9 10 08 00 00      jmp  0x105ec891
+
+`edi` is compared against two 32-bit keys before the push -- a **keyed
+dispatch** (the handler for key `0x6b2e3218` pushes the `FirstPerson`/
+`ThirdPerson` block and stores the result at `[esi+0x3b8]`). The neighbouring
+float stores (`[ebx+0x2c]`, `[ebx+0x24]`, `[ebx+0x20]`) and the int store
+(`[esi+0x3d0]`) are the same dispatcher's other keys.
+
+## 3. The containing function is slot 15 of `CWObject_Matinee`'s vtable
+
+The nearest `55 8B EC` prologue before the site is `0x105ebf40`, so the
+dispatcher function is `FUN_105ebf40`. Its address appears exactly once in the
+image, as a `.rdata` dword:
+
+    0x1078c120  -> 0x105ebf40
+
+Walking back while the entry is a `.text` pointer gives the vtable start
+`0x1078c0e4`; slot index = `(0x1078c120 - 0x1078c0e4) / 4` = **15**. Its `-4`
+dword is the MSVC RTTI CompleteObjectLocator:
+
+    0x1078c0e0  -> 0x107b97e0  (COL)
+      COL 0x107b97e0: signature 0, offset 0, cdOffset 0
+        pTypeDescriptor  0x10840238 -> ".?AVCWObject_Matinee@@"
+        pClassDescriptor 0x107b97f4
+    vtable 0x1078c0e4 .rdata neighbours (all .text pointers), so 0x1078c120 is a
+    real virtual slot:
+      [0]  0x105e7020   [1]  0x10001690   [2]  0x105ed270   [3]  0x100016b0
+      [4]  0x100016e0   [5]  0x103bd6c0   [6]  0x103c4470   [7]  0x103c1560
+      [8]  0x103b7140   [9]  0x103b7160  [10]  0x103c00f0  [11]  0x1002fda0
+     [12]  0x103b71a0  [13]  0x103b71f0  [14]  0x103b7190  [15]  0x105ebf40 <--
+
+The `.rdata` strings on the same vtable's neighbourhood (`CWO_Matinee_ClientData`
+0x1078c1cc, `.\WObj_Misc\WObj_Matinee.cpp` 0x1078c1e4) confirm the class and its
+source unit. **The only consumer of the `FirstPerson`/`ThirdPerson` block is a
+`CWObject_Matinee` method.**
+
+## 4. The key dispatch is not a name hash of the strings
+
+Neither key (`0x4d68028a`, `0x6b2e3218`) matches `crc32`, FNV-1/1a-32, `djb2` or
+`sdbm` of `FirstPerson`, `ThirdPerson`, `KeepEndFade`, `NoSkip`, `ViewMode`,
+`CameraMode`, `Matinee`, `Camera` or `View` (checked this wake). The keys are
+therefore the engine's own script/message ids or a different hash; the *identity*
+of the key function is **not claimed** here (sec 6). What is measured is the
+containing class and the single-reference fact above, which do not depend on it.
+
+## 5. What this means for GH #67 step 1
+
+- ADR-0494's "Next 1b" ("chase the `FirstPerson`/`ThirdPerson` view-mode table to
+  the camera/body-attach code -- that is where the FP body/arms decision lives")
+  is **falsified as a route**: the block is a `CWObject_Matinee` (cutscene/matinee
+  object) key block, and its single consumer is one matinee method that stores a
+  value at `[esi+0x3b8]`. There is no path from this block to the player's
+  first-person body/arms.
+- ADR-0492 sec 4's phrase "engine view-mode name table" is **corrected**: the
+  entries are **matinee camera-mode script keys** (`FirstPerson`/`ThirdPerson`
+  alongside the matinee options `KeepEndFade`/`NoSkip`), not a global view-mode
+  enum that drives the FP vs TP player camera.
+- Consequence for the loop: the *remaining* engine-side candidates for #67 step 1
+  are ADR-0494's **other** "Next" (1a) -- the object property-setter target
+  (destination `vtable[0x68]`) and the model-instance creation it feeds -- and,
+  for *whether* the arms are drawn at all, the harness state question
+  (GH #80 / wake 89). This file removes (1b) so no future wake re-chases it.
+
+## 6. Not claimed
+
+- The dispatcher `FUN_105ebf40` is **not decompiled** here (no Ghidra request this
+  wake); "dispatcher on a 32-bit key" is read from the eight disassembled
+  instructions above plus the `cmp`/`push`/`call`/`store` shape.
+- The helper `0x10026c30` and the key values (`0x4d68028a`, `0x6b2e3218`) are
+  **not** identified; sec 4 records only that common name hashes do not reproduce
+  them.
+- The field `[esi+0x3b8]`'s meaning (a separate `CWObject_Matinee` member) is not
+  established.
+- Whether the player's FP arms are drawn at all on the sampled (passive, unarmed)
+  level start remains **open** (wake 89's state question; GH #80).
+- This file says nothing about where the player FP body/arms *do* come from; it
+  only measures that the `FirstPerson`/`ThirdPerson` block is not it.

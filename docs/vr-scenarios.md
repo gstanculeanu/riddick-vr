@@ -474,6 +474,27 @@ setters, not GL state). Recorded in
 `docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt`.
 
 
+**Correction (wake 94, ADR-0495): the `FirstPerson`/`ThirdPerson` "view-mode
+table" is a `CWObject_Matinee` script key, NOT the player FP body/arms — so
+ADR-0494's "Next 1b" is closed.** ADR-0494 listed two candidate next steps for #67
+step 1; one of them was to chase the `.data` block at `0x1083ff68`/`0x1083ff6c`
+(ADR-0492 §4's "view-mode / camera-mode name list") to the camera/body-attach code.
+A read-only static scan of the same 2009 module (no REA request this wake) measures
+what that block is: `FirstPerson`/`ThirdPerson`/`KeepEndFade`/`NoSkip` — matinee
+playback/camera keys. It has **exactly one** code reference, `push 0x1083ff68` at
+`0x105ec068` (a 32-bit-keyed dispatch: `cmp edi, 0x4d68028a` / `cmp edi,
+0x6b2e3218`), and that site is inside `FUN_105ebf40`, which is **slot 15** of the
+vtable `0x1078c0e4` (its address `0x1078c120` appears exactly once in the image);
+that vtable's `-4` RTTI CompleteObjectLocator `0x107b97e0` has TypeDescriptor
+`0x10840238` = `.?AVCWObject_Matinee@@`, beside `.\WObj_Misc\WObj_Matinee.cpp`.
+So the block is one matinee object's script key, reachable only through that single
+push — there is no route from it to the player's first-person arms. The remaining
+#67 step-1 candidates are the object property-setter target (destination
+`vtable[0x68]`; ADR-0494's "1a") and the "is the viewmodel drawn at all?" state
+question (GH #80 / wake 89). Recorded in
+`docs/rea/reference/GameClasses2009_ViewmodeConsumer.txt`.
+
+
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
 renderer init), the host logging `Game Connected: WAITING` for the whole (short)
