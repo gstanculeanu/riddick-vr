@@ -203,6 +203,18 @@ void LoadVRConfig() {
         if (cfg.stereoReplayProbeEvery > 100000) cfg.stereoReplayProbeEvery = 100000;
         VR_LOG_INFO("Stereo replay probe: enabled=%d every=%d swaps (evidence only)",
             cfg.stereoReplayProbe, cfg.stereoReplayProbeEvery);
+        // GH #76 / GH #90 (ADR-0505): native per-eye render (dual-issue). Default
+        // OFF; falls back to the shifted capture whenever a per-eye frame is black.
+        cfg.stereoDualRender = ReadInt(iniPath, "StereoDualRender", cfg.stereoDualRender) ? 1 : 0;
+        cfg.stereoDualRenderLogEvery = ReadInt(iniPath, "StereoDualRenderLogEvery", cfg.stereoDualRenderLogEvery);
+        if (cfg.stereoDualRenderLogEvery < 0) cfg.stereoDualRenderLogEvery = 0;
+        if (cfg.stereoDualRenderLogEvery > 100000) cfg.stereoDualRenderLogEvery = 100000;
+        if (cfg.stereoDualRender && cfg.stereoParallaxDibr) {
+            VR_LOG_WARN("StereoDualRender=1 supersedes StereoParallaxDibr=1 for world geometry; "
+                        "the depth reprojection is ignored while the dual pass is used");
+        }
+        VR_LOG_INFO("Stereo dual render (GH #90 native per-eye): enabled=%d log_every=%d",
+            cfg.stereoDualRender, cfg.stereoDualRenderLogEvery);
         VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,

@@ -785,6 +785,10 @@ void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
         // inside the renderer, and a no-op unless StereoParallaxDibr is on.
         StereoRenderer::Instance().OnDepthOnlyClear();
     }
+    // GH #76/#90 (ADR-0505): mirror the clear into the native per-eye frames while
+    // the world pass is about to be built (a no-op unless StereoDualRender=1, and
+    // it never clears a frame that already holds this frame's scene draws).
+    StereoRenderer::Instance().OnSceneClear(mask);
     if (real_glClear) {
         real_glClear(mask);
     }
@@ -986,6 +990,20 @@ void OpenGLProxy::NoteDrawElementsSubmission(GLenum mode, GLsizei count, GLenum 
 void OpenGLProxy::NoteDrawListSubmission() {
     if (!s_vertexSubmissionObserver.Observing()) return;
     s_vertexSubmissionObserver.NoteListDraw(s_viewmodelSuppressor.WindowOpen());
+}
+
+// GH #76 / GH #90 (ADR-0505): the dual per-eye pass needs the geometry *and* the
+// pass boundary of each draw. The pointer state is recorded by NoteVertexPointer
+// regardless of the observation switch, so this is a pure read of what the engine
+// last submitted; it never enables observation and never changes a draw.
+VertexSample OpenGLProxy::SampleSubmittedArray(unsigned count, unsigned indexType, const void* indices) {
+    return s_vertexSubmissionObserver.SampleCurrent(count, indexType, indices);
+}
+
+// The window state machine runs when dual render is on (BuildViewmodelSuppressionConfig
+// sets `track` for it), so this reports the live first-person window boundary.
+bool OpenGLProxy::IsViewmodelWindowOpen() {
+    return s_viewmodelSuppressor.WindowOpen();
 }
 
 // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The

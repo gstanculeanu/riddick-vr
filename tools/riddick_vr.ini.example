@@ -183,3 +183,16 @@ DibrRows=6
 ; translate(-offset)*headView vs that view. Changes no rendering. 0 = off.
 StereoReplayProbe=0
 StereoReplayProbeEvery=300
+; GH #76 / GH #90 (ADR-0505): NATIVE STEREO. 1 = dual-issue each world draw into a
+; per-eye colour+depth framebuffer with the per-eye eye-space modelview translation
+; (translate(-offset_eye)), instead of blitting one monoscopic capture. The engine
+; submits eye-space client-array geometry (ADR-0481/0482), so these are two real
+; per-eye views of the world -- the epic #57 DoD item 1 render. Default 0: it
+; doubles the frame's geometry submission and needs on-headset tuning (projection,
+; HUD, comfort). HUD/screen-space draws and the engine's own viewmodel are never
+; translated; a frame whose per-eye buffers stay black (the gate in stereo_dual.h)
+; automatically falls back to the shipped shifted capture, so this cannot present a
+; black eye. Logs "DualRender: ... eligible=.. coverL=.. coverR=.. use=..".
+StereoDualRender=0
+; Log one "DualRender:" evidence line every N swaps (0 = never).
+StereoDualRenderLogEvery=300

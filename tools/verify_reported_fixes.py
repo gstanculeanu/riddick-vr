@@ -1078,6 +1078,38 @@ def main():
             "mock host's placeholder per-eye baseline, and the opt-in live "
             "provenance probe must exist -- option 1 rests on them")
 
+    # GH #76 / GH #90 / ADR-0505: the per-eye camera is applied *at the draw site*
+    # -- dual-issue. What a record-and-replay would reconstruct (the fixed-function
+    # state) is already current at the glDrawElements hook and ADR-0491 measured the
+    # array path to be complete, so the pass re-issues each eligible world draw once
+    # per eye into per-eye frames. The policy (world vs HUD/viewmodel; the
+    # black-eye gate) must be pure + tested, the renderer must build the per-eye
+    # frames and mirror the scene clear, the draw hook must call the pass, and the
+    # whole thing must stay opt-in (default off) with the shipped shifted capture as
+    # the fallback.
+    stereo_dual_h = (ROOT / "src/hook/stereo_dual.h").read_text(encoding="utf-8")
+    require("DualRenderDrawEligible" in stereo_dual_h and
+            "DualFrameUsable" in stereo_dual_h and
+            "DualNonBlackFraction" in stereo_dual_h and
+            "kDualMinEyeCoverage" in stereo_dual_h and
+            "stereo_dual.h" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            (ROOT / "tests/stereo_dual_tests.cpp").exists() and
+            "stereo_dual" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "StereoDualRender" in (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8") and
+            "stereoDualRender" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            "OnSceneDraw" in stereo_renderer_cpp and
+            "OnSceneClear" in stereo_renderer_cpp and
+            "BlitDualEye" in stereo_renderer_cpp and
+            "EnsureDualBuffers" in stereo_renderer_cpp and
+            '"DualRender: swap=' in stereo_renderer_cpp and
+            "OnSceneDraw" in (ROOT / "src/hook/dllmain.cpp").read_text(encoding="utf-8") and
+            "OnSceneClear" in (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0505-gh76-native-per-eye-dual-issue-render.md").exists(),
+            "GH #76 / GH #90 / ADR-0505: the native per-eye pass (stereo_dual.h "
+            "policy + its headless test, the per-eye frames + mirrored scene clear "
+            "+ the draw-hook call, the opt-in config, and the black-eye fail-safe) "
+            "must exist -- it is the epic #57 item-1 render")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

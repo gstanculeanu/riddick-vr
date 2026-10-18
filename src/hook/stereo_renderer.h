@@ -32,6 +32,13 @@ public:
     // reprojection has a real depth source. A no-op unless StereoParallaxDibr=1.
     void OnDepthOnlyClear();
 
+    // GH #76/#90 (ADR-0505): native per-eye render. `OnSceneClear` mirrors an
+    // engine clear into the two per-eye scene frames; `OnSceneDraw` re-issues one
+    // engine glDrawElements per eye with the per-eye eye-space translation. Both
+    // are no-ops unless StereoDualRender=1.
+    void OnSceneClear(GLbitfield mask);
+    void OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const void* indices);
+
     StereoPass GetCurrentPass() const { return m_currentPass; }
     void SetCurrentPass(StereoPass pass) { m_currentPass = pass; }
 
@@ -72,6 +79,13 @@ private:
     void ScanFramebufferDepths(GLint w, GLint h);
     void BlitEye(bool isLeftEye, GLint sx0, GLint sy0, GLint sx1, GLint sy1,
                  GLint dx0, GLint dy0, GLint dx1, GLint dy1);
+
+    // GH #76/#90 (ADR-0505): native per-eye frames (see stereo_renderer.cpp).
+    bool EnsureDualBuffers(GLsizei w, GLsizei h);
+    void DestroyDualBuffers();
+    void RefreshDualEyeOffsets();
+    void BlitDualEye(bool isLeftEye);
+    float SampleDualCoverage(bool isLeftEye);
 
     bool InitD3D11Interop(uint32_t width, uint32_t height);
     void ReleaseD3D11Interop();
@@ -128,6 +142,43 @@ private:
 
     IpcBridgeClient m_ipcClient;
     RiddickVRSharedState m_sharedState{};
+
+    // GH #76/#90 (ADR-0505): native per-eye render state. `m_dualFbo[0/1]` hold the
+    // world pass as seen from each eye; they are created at the engine's viewport
+    // size so the engine's own viewport state applies unchanged to a re-issued
+    // draw. `m_dualFrameActive` means the frame's scene clear was mirrored;
+    // `m_dualEligible` counts re-issued draws (the cheap gate) and `m_dualCoverOk`
+    // is the periodically measured pixel-coverage verdict (the fail-safe gate).
+    bool m_dualEnabled = false;
+    GLuint m_dualFbo[2] = {0, 0};
+    GLuint m_dualColor[2] = {0, 0};
+    GLuint m_dualDepth[2] = {0, 0};
+    GLint m_dualW = 0;
+    GLint m_dualH = 0;
+    bool m_dualFrameActive = false;
+    bool m_dualFrameUsed = false;
+    // The 3-D world span: true from a frame/level colour clear (or the previous
+    // swap) until the mid-frame depth-only clear that opens the first-person
+    // window (ADR-0439/0483). Only draws inside it are candidate world geometry.
+    bool m_dualWorldSpan = false;
+    unsigned m_dualMirrorClears = 0;
+    // Scale census of the span's draws (evidence for the next step): the sampled
+    // extent in the three measured bands plus undecodable draws.
+    unsigned m_dualScaleUnknown = 0;
+    unsigned m_dualScaleNear = 0;
+    unsigned m_dualScaleMid = 0;
+    unsigned m_dualScaleWorld = 0;
+    bool m_dualOffValid = false;
+    float m_dualOff[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    unsigned m_dualDraws = 0;
+    unsigned m_dualEligible = 0;
+    unsigned m_dualSkipped = 0;
+    unsigned m_dualFrames = 0;
+    unsigned m_dualFramesUsed = 0;
+    int m_dualCoverCountdown = 0;
+    bool m_dualCoverOk = true;
+    float m_dualCoverL = 0.0f;
+    float m_dualCoverR = 0.0f;
 };
 
 } // namespace RiddickVR

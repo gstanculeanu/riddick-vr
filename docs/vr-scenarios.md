@@ -314,6 +314,23 @@ at the world origin; GH #77/ADR-0463) is refused and the head-local `+/-halfIpd`
 fallback is used. The opt-in `StereoReplayProbe=1` (evidence only) logs it live —
 `baseline=0.0650m src=fallback offL=(-0.0325,0,0) offR=(+0.0325,0,0) residual ~1.68`.
 Option (1)'s remaining unit is a **draw recorder + replay** (separately scoped).
+**ADR-0505 (wake 103; GH #76 / GH #90) applies that translation at the draw site
+instead of replaying it.** ADR-0491 measured the array path to be *complete* (no
+display lists, no `glDrawArrays`, no world-pass immediate mode), so at
+`Hook_glDrawElements` the geometry is in hand and the fixed-function state that
+will shade it is already current — a record-and-replay would only reconstruct what
+is already there. With `StereoDualRender=1` (default **0**) `OnSceneDraw` re-issues
+each eligible world draw once per eye into two per-eye colour+depth frames with
+`glTranslatef(-offset_eye)`, and `OnSceneClear` mirrors the engine's own clear into
+them and tracks the world span (colour clear/swap starts it; the mid-frame
+depth-only clear ends it); at swap the eye pair *is* two real views
+(`stereo_kind: parallax` is the acceptance, via `xrsim --require-parallax`).
+Eligible = inside the world span **and** the sampled array bounds not near-field
+(ADR-0490's separator), so the HUD, screen-space quads and the engine's viewmodel
+are never eye-translated; a frame with too few eligible draws or a black eye
+(`stereo_dual.h`) falls back to the shipped shifted capture. Logs
+`DualRender: swap=.. eligible=.. skipped=.. coverL=.. coverR=.. use=..` plus the
+span's sampled-scale census `scale=[unknown=.. near=.. mid=.. world=..]`.
 
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim

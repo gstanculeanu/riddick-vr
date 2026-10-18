@@ -200,6 +200,15 @@ public:
     }
     bool Observing() const { return observe_; }
 
+    // GH #76/#90 (ADR-0505): a read-only sample of the current client array, for
+    // the dual per-eye pass. The pointer state is client GL state and is recorded
+    // by NoteVertexPointer whether or not observation is enabled, so this neither
+    // enables observation nor changes a draw.
+    VertexSample SampleCurrent(unsigned count, unsigned indexType, const void* indices) const {
+        return SampleClientVertices(count, indexType, indices, pointerSize_, pointerType_,
+                                    pointerStride_, pointer_);
+    }
+
     // glVertexPointer(size, type, stride, pointer). Client state persists across
     // draws, so this is remembered (not per-draw) -- and it is read only while
     // observing, so it can never change a run that did not ask for it.

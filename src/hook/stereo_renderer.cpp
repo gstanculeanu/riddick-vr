@@ -5,9 +5,11 @@
 #include "display_branch.h" // GH #72 req 1: cold-start full-bleed latch
 #include "depth_parallax.h" // GH #76 interim: depth-based per-eye reprojection
 #include "stereo_replay.h"  // GH #76 option 1: per-eye replay maths + probe
+#include "stereo_dual.h"    // GH #76/#90: native per-eye pass policy (ADR-0505)
 #include "logging.h"
 #include <tlhelp32.h>
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -784,6 +786,10 @@ bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
         m_currentPass = StereoPass::Mono;
     }
 
+    // GH #76/#90 (ADR-0505): seed the native per-eye opt-in so the first frames
+    // (before the first swap re-reads the INI) honour it too.
+    m_dualEnabled = (g_vrConfig.stereoDualRender != 0);
+
     // GH #30: propagate eye-FBO failure — stay Mono instead of presenting
     // half-built stereo buffers.
     if (!CreateEyeBuffers(m_eyeWidth, m_eyeHeight)) {
@@ -885,6 +891,8 @@ bool StereoRenderer::CreateEyeBuffers(uint32_t width, uint32_t height) {
 }
 
 void StereoRenderer::DestroyEyeBuffers() {
+    // GH #76/#90 (ADR-0505): the per-eye native frames go with the eye buffers.
+    DestroyDualBuffers();
     ReleaseD3D11Interop();
 
     if (OpenGLProxy::glDeleteFramebuffers) {
@@ -1088,6 +1096,324 @@ void StereoRenderer::BlitEye(bool isLeftEye, GLint sx0, GLint sy0, GLint sx1, GL
                                    GL_COLOR_BUFFER_BIT, GL_LINEAR);
 }
 
+// ===========================================================================
+// GH #76 (epic #57 DoD item 1) / GH #90: NATIVE per-eye render (ADR-0505).
+//
+// The engine submits the 3-D world as eye-space `glDrawElements` client arrays
+// with an identity GL_MODELVIEW (ADR-0481/0482, and ADR-0491 measured that arrays
+// are the *complete* geometry path: no glDrawArrays, no display lists, no
+// immediate mode in the world pass). So at the draw hook the geometry is in hand
+// AND the whole fixed-function state that will shade it is already current. A
+// per-eye camera is then a pure modelview translation of the same submission
+// (stereo_replay.h), which needs no recording and no copied vertices.
+//
+// This pass re-issues each eligible world draw -- inside the world span (a colour
+// clear or the previous swap starts it; the mid-frame depth-only clear that opens
+// the first-person window ends it) with sampled bounds that are not near-field
+// (stereo_dual.h) -- once per eye into its own colour+depth framebuffer with
+// `translate(-off_eye)`. At swap the two frames replace the monoscopic capture, so
+// the eye pair is two real views of the world rather than one image shifted. A
+// frame with no eligible draws, or whose sampled coverage is empty, falls back to
+// the shipped shifted capture.
+//
+// Everything here is opt-in (StereoDualRender=1) and inert otherwise.
+// ===========================================================================
+
+namespace {
+
+// Column-major GL_MODELVIEW / identity helpers and the few GL enums used here.
+constexpr unsigned kDualDrawFramebuffer  = 0x8CA9u;
+constexpr unsigned kDualReadFramebuffer  = 0x8CA8u;
+constexpr unsigned kDualFramebuffer      = 0x8D40u;
+constexpr unsigned kDualColorAttachment0 = 0x8CE0u;
+constexpr unsigned kDualRenderbuffer     = 0x8D41u;
+constexpr unsigned kDualDepthStencilAtt  = 0x821Au;
+constexpr unsigned kDualModelview        = 0x1700u;
+constexpr unsigned kDualPackAlignment    = 0x0CF5u;
+constexpr unsigned kDualRgba             = 0x1908u;
+constexpr unsigned kDualUnsignedByte     = 0x1401u;
+constexpr unsigned kDualFramebufferComplete = 0x8CD5u;
+
+// A pathologically large frame must not turn the pass into a time sink; the cap
+// only ever *reduces* the work (the gate then falls back if too little was done).
+constexpr unsigned kDualMaxDrawsPerFrame = 400000u;
+// The gate: a frame with fewer eligible draws than this captured no scene.
+constexpr unsigned kDualMinEligibleDraws = 16u;
+// The pixel-coverage read is a GPU sync, so it is sampled only this often (its
+// verdict is reused in between).
+constexpr int kDualCoverageEverySwaps = 60;
+// Rows sampled across the eye frame's height for the coverage measurement.
+constexpr int kDualCoverageRows = 8;
+
+typedef void (WINAPI *DualMatrixMode_t)(GLenum);
+typedef void (WINAPI *DualPushMatrix_t)(void);
+typedef void (WINAPI *DualPopMatrix_t)(void);
+typedef void (WINAPI *DualTranslatef_t)(GLfloat, GLfloat, GLfloat);
+typedef void (WINAPI *DualDrawElements_t)(GLenum, GLsizei, GLenum, const void*);
+typedef void (WINAPI *DualReadPixels_t)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
+typedef void (WINAPI *DualPixelStore_t)(GLenum, GLint);
+
+struct DualGlFns {
+    DualMatrixMode_t matrixMode = nullptr;
+    DualPushMatrix_t pushMatrix = nullptr;
+    DualPopMatrix_t popMatrix = nullptr;
+    DualTranslatef_t translatef = nullptr;
+    DualDrawElements_t drawElements = nullptr;
+    DualReadPixels_t readPixels = nullptr;
+    DualPixelStore_t pixelStorei = nullptr;
+};
+
+// Resolved from the SYSTEM opengl32 so a re-issued draw bypasses the hook layer
+// (no recursion) and, deliberately, does not disturb the modelview *tracker* --
+// push/pop keep the engine's stack balanced. Retried while unresolved, because
+// the real module is only loaded by OpenGLProxy::Initialize.
+const DualGlFns& DualGl() {
+    static DualGlFns fns;
+    static bool tried = false;
+    if (tried && fns.drawElements && fns.matrixMode) return fns;
+    tried = true;
+    HMODULE real = OpenGLProxy::GetRealOpenGLModule();
+    if (real) {
+        if (!fns.matrixMode)   fns.matrixMode   = (DualMatrixMode_t)GetProcAddress(real, "glMatrixMode");
+        if (!fns.pushMatrix)   fns.pushMatrix   = (DualPushMatrix_t)GetProcAddress(real, "glPushMatrix");
+        if (!fns.popMatrix)    fns.popMatrix    = (DualPopMatrix_t)GetProcAddress(real, "glPopMatrix");
+        if (!fns.translatef)   fns.translatef   = (DualTranslatef_t)GetProcAddress(real, "glTranslatef");
+        if (!fns.drawElements) fns.drawElements = (DualDrawElements_t)GetProcAddress(real, "glDrawElements");
+        if (!fns.readPixels)   fns.readPixels   = (DualReadPixels_t)GetProcAddress(real, "glReadPixels");
+        if (!fns.pixelStorei)  fns.pixelStorei  = (DualPixelStore_t)GetProcAddress(real, "glPixelStorei");
+    }
+    return fns;
+}
+
+} // namespace
+
+bool StereoRenderer::EnsureDualBuffers(GLsizei w, GLsizei h) {
+    if (w < 64 || h < 64) return false;
+    if (m_dualFbo[0] != 0 && m_dualFbo[1] != 0 && m_dualW == w && m_dualH == h) return true;
+    DestroyDualBuffers();
+    if (!OpenGLProxy::glGenFramebuffers || !OpenGLProxy::glFramebufferTexture2D ||
+        !OpenGLProxy::glGenRenderbuffers || !OpenGLProxy::glFramebufferRenderbuffer ||
+        !OpenGLProxy::glBindRenderbuffer || !OpenGLProxy::glRenderbufferStorage) {
+        return false;
+    }
+    for (int eye = 0; eye < 2; ++eye) {
+        OpenGLProxy::glGenFramebuffers(1, &m_dualFbo[eye]);
+        OpenGLProxy::glGenTextures(1, &m_dualColor[eye]);
+        OpenGLProxy::glBindTexture(GL_TEXTURE_2D, m_dualColor[eye]);
+        OpenGLProxy::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        OpenGLProxy::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        OpenGLProxy::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        OpenGLProxy::glBindFramebuffer(kDualFramebuffer, m_dualFbo[eye]);
+        OpenGLProxy::glFramebufferTexture2D(kDualFramebuffer, kDualColorAttachment0,
+                                            GL_TEXTURE_2D, m_dualColor[eye], 0);
+        OpenGLProxy::glGenRenderbuffers(1, &m_dualDepth[eye]);
+        OpenGLProxy::glBindRenderbuffer(kDualRenderbuffer, m_dualDepth[eye]);
+        OpenGLProxy::glRenderbufferStorage(kDualRenderbuffer, 0x88F0 /* GL_DEPTH24_STENCIL8 */, w, h);
+        OpenGLProxy::glFramebufferRenderbuffer(kDualFramebuffer, kDualDepthStencilAtt,
+                                               kDualRenderbuffer, m_dualDepth[eye]);
+        const GLenum status = OpenGLProxy::glCheckFramebufferStatus
+            ? OpenGLProxy::glCheckFramebufferStatus(kDualFramebuffer) : kDualFramebufferComplete;
+        if (status != kDualFramebufferComplete) {
+            VR_LOG_WARN("DualRender: per-eye FBO %d incomplete (0x%X); native stereo disabled this run",
+                        eye, status);
+            OpenGLProxy::glBindFramebuffer(kDualFramebuffer, 0);
+            OpenGLProxy::glBindTexture(GL_TEXTURE_2D, 0);
+            DestroyDualBuffers();
+            return false;
+        }
+    }
+    OpenGLProxy::glBindFramebuffer(kDualFramebuffer, 0);
+    OpenGLProxy::glBindTexture(GL_TEXTURE_2D, 0);
+    m_dualW = w;
+    m_dualH = h;
+    VR_LOG_INFO("DualRender: per-eye scene buffers created %dx%d (fbo %u/%u)",
+                w, h, m_dualFbo[0], m_dualFbo[1]);
+    return true;
+}
+
+void StereoRenderer::DestroyDualBuffers() {
+    for (int eye = 0; eye < 2; ++eye) {
+        if (OpenGLProxy::glDeleteFramebuffers && m_dualFbo[eye]) {
+            OpenGLProxy::glDeleteFramebuffers(1, &m_dualFbo[eye]);
+        }
+        if (OpenGLProxy::glDeleteRenderbuffers && m_dualDepth[eye]) {
+            OpenGLProxy::glDeleteRenderbuffers(1, &m_dualDepth[eye]);
+        }
+        if (OpenGLProxy::glDeleteTextures && m_dualColor[eye]) {
+            OpenGLProxy::glDeleteTextures(1, &m_dualColor[eye]);
+        }
+        m_dualFbo[eye] = 0;
+        m_dualDepth[eye] = 0;
+        m_dualColor[eye] = 0;
+    }
+    m_dualW = 0;
+    m_dualH = 0;
+}
+
+// The per-eye eye-space offset the re-issued draws translate by. Uses the live
+// per-eye views when they are scene-faithful and the head-local +/-halfIpd
+// otherwise (the same gate ADR-0504 measured: the mock host publishes a
+// placeholder baseline whose origin is the world origin, GH #77).
+void StereoRenderer::RefreshDualEyeOffsets() {
+    m_dualOffValid = false;
+    if (!m_sharedState.hmdPose.isValid) return;
+    const float headPos[3] = {m_sharedState.hmdPose.position.x,
+                              m_sharedState.hmdPose.position.y,
+                              m_sharedState.hmdPose.position.z};
+    const float headQuat[4] = {m_sharedState.hmdPose.orientation.x,
+                               m_sharedState.hmdPose.orientation.y,
+                               m_sharedState.hmdPose.orientation.z,
+                               m_sharedState.hmdPose.orientation.w};
+    const float baseline = ReplayBaselineMeters(m_sharedState.leftEyeView.m,
+                                                m_sharedState.rightEyeView.m, 0.065f);
+    const float halfIpd = 0.5f * baseline;
+    bool usedL = false, usedR = false;
+    if (!EyeSpaceCameraOffsetFromViews(m_sharedState.leftEyeView.m, m_sharedState.rightEyeView.m,
+                                       headPos, headQuat, false, halfIpd, m_dualOff[0], &usedL)) {
+        return;
+    }
+    if (!EyeSpaceCameraOffsetFromViews(m_sharedState.leftEyeView.m, m_sharedState.rightEyeView.m,
+                                       headPos, headQuat, true, halfIpd, m_dualOff[1], &usedR)) {
+        return;
+    }
+    m_dualOffValid = true;
+}
+
+// Mirrors one engine clear into both per-eye frames, and tracks the frame's
+// world span. The measured frame topology (ADR-0439/0483) is: the 3-D world pass,
+// then a mid-frame **depth-only** clear that opens the first-person window, then
+// the viewmodel/HUD pass, then the swap. So the world span *ends* at the
+// depth-only clear (and a colour clear starts it, as does the previous swap); the
+// eye frames are only cleared while the world span has produced no draw yet, so
+// the mid-frame depth-only clear cannot wipe the world pass just built.
+void StereoRenderer::OnSceneClear(GLbitfield mask) {
+    if (!m_dualEnabled) return;
+    const bool colourBit = (mask & 0x00004000u /* GL_COLOR_BUFFER_BIT */) != 0;
+    const bool depthBit  = (mask & 0x00000100u /* GL_DEPTH_BUFFER_BIT */) != 0;
+    if (!colourBit && !depthBit) return;
+
+    if (colourBit) {
+        m_dualWorldSpan = true;
+    } else if (depthBit) {
+        m_dualWorldSpan = false;
+    }
+    if (m_dualDraws != 0) return;  // the world pass already started: never wipe it
+    if (!OpenGLProxy::real_glClearFunc || !OpenGLProxy::real_glBindFramebuffer) return;
+
+    const GLsizei w = m_viewportWidth > 0 ? m_viewportWidth : static_cast<GLsizei>(m_windowWidth);
+    const GLsizei h = m_viewportHeight > 0 ? m_viewportHeight : static_cast<GLsizei>(m_windowHeight);
+    if (!EnsureDualBuffers(w, h)) return;
+
+    const GLuint engineFbo = OpenGLProxy::GetCurrentDrawFramebuffer();
+    for (int eye = 0; eye < 2; ++eye) {
+        OpenGLProxy::real_glBindFramebuffer(kDualDrawFramebuffer, m_dualFbo[eye]);
+        OpenGLProxy::real_glClearFunc(mask);
+    }
+    OpenGLProxy::real_glBindFramebuffer(kDualDrawFramebuffer, engineFbo);
+    ++m_dualMirrorClears;
+    if (!m_dualOffValid) RefreshDualEyeOffsets();
+}
+
+// One engine glDrawElements, re-issued per eye when it is world geometry inside
+// the world span. Called before the engine's own draw is forwarded, so the client
+// arrays and the fixed-function state are exactly as the engine set them; the
+// engine's draw then proceeds untouched.
+void StereoRenderer::OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+    if (!m_dualEnabled || !m_dualWorldSpan) return;
+    if (count <= 0) return;
+    if (m_dualDraws > kDualMaxDrawsPerFrame) return;
+    const DualGlFns& gl = DualGl();
+    if (!gl.drawElements || !gl.matrixMode || !gl.pushMatrix || !gl.popMatrix || !gl.translatef) return;
+    if (!OpenGLProxy::real_glBindFramebuffer) return;
+
+    const VertexSample sampled = OpenGLProxy::SampleSubmittedArray(
+        static_cast<unsigned>(count), static_cast<unsigned>(type), indices);
+    // GH #76/#90 evidence: the *scale* census of the span's draws. The measured
+    // separation is world ~1.6e3..3.5e3 vs near-field ~0.45 (ADR-0490), so the
+    // bucket counts say directly whether the span holds the world or a
+    // depth/colour-masked pass, and whether the sample decodes at all.
+    float extent = 0.0f;
+    if (sampled.valid) {
+        for (int c = 0; c < 3; ++c) {
+            const float lo = std::fabs(sampled.min[c]);
+            const float hi = std::fabs(sampled.max[c]);
+            const float e = lo > hi ? lo : hi;
+            if (e > extent) extent = e;
+        }
+    }
+    if (!sampled.valid) ++m_dualScaleUnknown;
+    else if (extent <= kNearFieldMaxAbs) ++m_dualScaleNear;
+    else if (extent <= 1000.0f) ++m_dualScaleMid;
+    else ++m_dualScaleWorld;
+
+    if (!DualRenderDrawEligible(sampled)) {
+        ++m_dualSkipped;
+        return;
+    }
+    if (!m_dualOffValid) RefreshDualEyeOffsets();
+    if (!m_dualOffValid) return;
+
+    const GLuint engineFbo = OpenGLProxy::GetCurrentDrawFramebuffer();
+    const GLenum engineMode = OpenGLProxy::GetCurrentMatrixMode();
+    for (int eye = 0; eye < 2; ++eye) {
+        OpenGLProxy::real_glBindFramebuffer(kDualDrawFramebuffer, m_dualFbo[eye]);
+        gl.matrixMode(kDualModelview);
+        gl.pushMatrix();
+        gl.translatef(-m_dualOff[eye][0], -m_dualOff[eye][1], -m_dualOff[eye][2]);
+        gl.drawElements(mode, count, type, indices);
+        gl.popMatrix();
+    }
+    OpenGLProxy::real_glBindFramebuffer(kDualDrawFramebuffer, engineFbo);
+    gl.matrixMode(engineMode);
+    ++m_dualDraws;
+    ++m_dualEligible;
+    m_dualFrameActive = true;
+}
+
+// Blit one per-eye frame into its eye target (the same vertical flip the
+// monoscopic capture path applies, since both sources are GL-oriented).
+void StereoRenderer::BlitDualEye(bool isLeftEye) {
+    if (!OpenGLProxy::glBlitFramebuffer || !OpenGLProxy::real_glBindFramebuffer) return;
+    const int eye = isLeftEye ? 0 : 1;
+    OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, m_dualFbo[eye]);
+    if (OpenGLProxy::glReadBuffer) {
+        OpenGLProxy::glReadBuffer(kDualColorAttachment0);
+    }
+    OpenGLProxy::real_glBindFramebuffer(kDualDrawFramebuffer, isLeftEye ? m_leftFbo : m_rightFbo);
+    OpenGLProxy::glBlitFramebuffer(0, m_dualH, m_dualW, 0,
+                                   0, 0, static_cast<GLint>(m_eyeWidth), static_cast<GLint>(m_eyeHeight),
+                                   GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, 0);
+    if (OpenGLProxy::glReadBuffer) {
+        OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+    }
+}
+
+// Non-black fraction of one eye frame (evidence + the fail-safe gate).
+float StereoRenderer::SampleDualCoverage(bool isLeftEye) {
+    const DualGlFns& gl = DualGl();
+    if (!gl.readPixels || m_dualW < 8 || m_dualH < 8 || m_dualW > 4096) return 0.0f;
+    const int eye = isLeftEye ? 0 : 1;
+    static unsigned char rows[4096 * kDualCoverageRows * 4];
+    const int width = m_dualW;
+    OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, m_dualFbo[eye]);
+    if (OpenGLProxy::glReadBuffer) {
+        OpenGLProxy::glReadBuffer(kDualColorAttachment0);
+    }
+    if (gl.pixelStorei) gl.pixelStorei(kDualPackAlignment, 1);
+    for (int i = 1; i <= kDualCoverageRows; ++i) {
+        const int y = (m_dualH * i) / (kDualCoverageRows + 1);
+        gl.readPixels(0, y, width, 1, kDualRgba, kDualUnsignedByte,
+                      rows + static_cast<size_t>(i - 1) * width * 4);
+    }
+    OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, 0);
+    if (OpenGLProxy::glReadBuffer) {
+        OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+    }
+    return DualNonBlackFraction(rows, static_cast<unsigned>(width) * kDualCoverageRows);
+}
+
+
 // GH #44: find the non-black content bounds of the backbuffer so baked
 // letterbox/pillarbox bars can be cropped out of the gameplay blit.
 // Throttled (every 90 swaps), smoothed, GL-origin (y-up) window coords.
@@ -1174,6 +1500,13 @@ void StereoRenderer::OnViewport(GLint x, GLint y, GLsizei width, GLsizei height)
 
 void StereoRenderer::OnSwapBuffers(HDC hdc) {
     if (!m_initialized) return;
+
+    // GH #76/#90 (ADR-0505): read the live opt-in every swap so an INI edit takes
+    // effect without a rebuild (the whole pass is inert when it is off).
+    m_dualEnabled = (g_vrConfig.stereoDualRender != 0);
+    if (!m_dualEnabled && (m_dualFbo[0] != 0 || m_dualFbo[1] != 0)) {
+        DestroyDualBuffers();
+    }
 
     static uint32_t s_swapCount = 0;
     static ULONGLONG s_lastFpsTime = 0;
@@ -1382,7 +1715,56 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
             }
 
-            if (isCinema) {
+            // GH #76/#90 (ADR-0505): decide whether this frame's *native* per-eye
+            // frames (built by OnSceneDraw during the world span) replace the
+            // monoscopic capture. The gate is the eligible-draw count plus a
+            // periodically sampled non-black coverage of both eyes; if either eye is
+            // black the shipped shifted capture is kept, so the opt-in can never
+            // present a black eye. Logged throttled whenever the pass is enabled, so
+            // a run always shows what the pass actually saw.
+            bool dualUsedThisFrame = false;
+            if (m_dualEnabled) {
+                if (m_dualCoverCountdown <= 0) {
+                    m_dualCoverCountdown = kDualCoverageEverySwaps;
+                    m_dualCoverL = SampleDualCoverage(true);
+                    m_dualCoverR = SampleDualCoverage(false);
+                    m_dualCoverOk = DualFrameUsable(m_dualCoverL, m_dualCoverR);
+                } else {
+                    --m_dualCoverCountdown;
+                }
+                dualUsedThisFrame = (m_dualEligible >= kDualMinEligibleDraws) && m_dualCoverOk;
+                if (m_dualEligible >= kDualMinEligibleDraws) {
+                    ++m_dualFrames;
+                    if (dualUsedThisFrame) ++m_dualFramesUsed;
+                }
+                if (g_vrConfig.stereoDualRenderLogEvery > 0) {
+                    static int s_dualLogCountdown = 0;
+                    if (s_dualLogCountdown <= 0) {
+                        s_dualLogCountdown = g_vrConfig.stereoDualRenderLogEvery;
+                        VR_LOG_INFO("DualRender: swap=%u frames=%u used=%u draws=%u eligible=%u "
+                                    "skipped=%u mirrors=%u active=%d coverL=%.3f coverR=%.3f "
+                                    "size=%dx%d use=%d scale=[unknown=%u near=%u mid=%u world=%u]",
+                                    s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
+                                    m_dualEligible, m_dualSkipped, m_dualMirrorClears,
+                                    (int)m_dualFrameActive, m_dualCoverL, m_dualCoverR,
+                                    (int)m_dualW, (int)m_dualH, (int)dualUsedThisFrame,
+                                    m_dualScaleUnknown, m_dualScaleNear, m_dualScaleMid,
+                                    m_dualScaleWorld);
+                    } else {
+                        --s_dualLogCountdown;
+                    }
+                }
+            }
+            m_dualFrameUsed = dualUsedThisFrame;
+
+            if (!isCinema && dualUsedThisFrame) {
+                // The eye pair IS the two real views: blit each per-eye frame and
+                // draw the VR hands over it. No monoscopic capture is involved.
+                BlitDualEye(true);
+                VRHandRenderer::Instance().RenderHands(m_sharedState, true, m_eyeWidth, m_eyeHeight);
+                BlitDualEye(false);
+                VRHandRenderer::Instance().RenderHands(m_sharedState, false, m_eyeWidth, m_eyeHeight);
+            } else if (isCinema) {
                 // GH #43: fit the 2D frame onto a virtual cinema screen -
                 // contain aspect, centered, black surround (looking at a screen).
                 if (OpenGLProxy::glClearColor && OpenGLProxy::real_glClearFunc) {
@@ -1588,6 +1970,29 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         } else {
             m_currentPass = StereoPass::LeftEye;
         }
+
+        // GH #76/#90 (ADR-0505): re-base the per-eye frames for the next frame. The
+        // measured frame order is world pass -> mid-frame depth-only clear ->
+        // first-person pass, so the frames are cleared *here*, after they were used,
+        // with the engine's own current clear state (colour+depth); clearing at the
+        // mid-frame depth-only clear would wipe the world pass just built. The new
+        // frame's world span starts here too (a frame with no colour clear).
+        if (m_dualEnabled && m_dualFbo[0] != 0 && OpenGLProxy::real_glClearFunc) {
+            for (int eye = 0; eye < 2; ++eye) {
+                OpenGLProxy::real_glBindFramebuffer(kDualDrawFramebuffer, m_dualFbo[eye]);
+                OpenGLProxy::real_glClearFunc(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            }
+            OpenGLProxy::real_glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);
+        }
+        m_dualWorldSpan = true;
+        m_dualFrameActive = false;
+        m_dualDraws = 0;
+        m_dualEligible = 0;
+        m_dualSkipped = 0;
+        m_dualScaleUnknown = 0;
+        m_dualScaleNear = 0;
+        m_dualScaleMid = 0;
+        m_dualScaleWorld = 0;
     }
 }
 

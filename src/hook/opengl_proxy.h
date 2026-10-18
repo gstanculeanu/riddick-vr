@@ -4,6 +4,8 @@
 #include <GL/gl.h>
 #include <cstdint>
 
+#include "vertex_submission_observe.h"
+
 namespace RiddickVR {
 
 // Extension function types
@@ -141,6 +143,15 @@ public:
     static void NoteVertexPointer(GLint size, GLenum type, GLsizei stride, const void* pointer);
     static void NoteDrawElementsSubmission(GLenum mode, GLsizei count, GLenum type, const void* indices);
     static void NoteDrawListSubmission();
+
+    // GH #76 / GH #90 (ADR-0505): the native per-eye render classifies each engine
+    // draw from the *same* client-array sample the GH #67 observer takes (its
+    // pointer state is recorded whether or not observation is on), and bounds the
+    // pass with the live first-person window state. Both are read-only queries;
+    // `SampleSubmittedArray` decodes nothing when the recorded array is not a
+    // float client array (it reports `valid=false` instead of guessing).
+    static VertexSample SampleSubmittedArray(unsigned count, unsigned indexType, const void* indices);
+    static bool IsViewmodelWindowOpen();
 
     // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The
     // shipped RndrGL.dll *imports* glBegin/glEnd/glVertex3f/glVertex3fv (and the

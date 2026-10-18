@@ -2,6 +2,101 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 103 — 2026-10-18 14:45 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 — the
+  per-eye camera is applied AT THE DRAW SITE (ADR-0505)**: a new opt-in
+  (`StereoDualRender=1`, default 0) re-issues each eligible world draw once per eye
+  into two per-eye colour+depth frames with `glPushMatrix + glTranslatef(-offset_eye)
+  + glDrawElements + glPopMatrix`, instead of recording the frame and replaying it.
+  The measurement in ADR-0491 (the array path is the *complete* geometry path: no
+  display lists, no `glDrawArrays`, no world-pass immediate mode) plus ADR-0481/0482
+  (eye-space vertices, identity modelview) means the record-and-replay would only
+  reconstruct what is already current at the hook. Real C++ render change, off by
+  default and gated -> `build-all` + CTest both arches; FOUR live xrsim runs on
+  read-only per-run shadows (no deploy, no install write).
+- **Why this unit:** the standing prompt's top item (#76) and GH #90 (the scoped
+  option-1 unit). GH #63/#64/#61 and the P1 bugs are headset/deploy-gated (#64's
+  latest diagnosis routes them through the capped #67), so #76/#90 is the only
+  player-visible-actionable route left.
+- **Change:**
+  - NEW `src/hook/stereo_dual.h` (pure, headless): `DualRenderDrawEligible`
+    (decodable client array **and** sampled bounds not near-field — ADR-0490's
+    measured separator, so the HUD/screen-space quads and the engine's own
+    viewmodel are never eye-translated), `DualNonBlackFraction`,
+    `DualFrameUsable` + `kDualMinEyeCoverage` (raised to **0.5** after the
+    measurement below: the first 4-row/5% gate passed frames whose mean luminance
+    was ~3/255).
+  - `stereo_renderer.{h,cpp}`: two per-eye colour+depth FBOs at the engine's
+    viewport size (`EnsureDualBuffers`), the **world span** (`OnSceneClear`: a
+    colour clear or the previous swap starts it, the mid-frame depth-only clear
+    ends it — the measured frame order, ADR-0439/0483) which also mirrors the
+    engine's own clear into the eye frames while no draw has been re-issued, the
+    per-eye re-issue (`OnSceneDraw`, incl. the per-eye offset from
+    `EyeSpaceCameraOffsetFromViews`), `BlitDualEye`, `SampleDualCoverage` (8 rows),
+    the swap-time use decision + `DualRender:` evidence log, and a swap-time
+    re-clear of the eye frames with the engine's own clear state.
+  - `dllmain.cpp` `Hook_glDrawElements` calls `OnSceneDraw` before forwarding;
+    `opengl_proxy.cpp` `Hook_glClear` calls `OnSceneClear`; `opengl_proxy.{h,cpp}`
+    add `SampleSubmittedArray` (the GH #67 observer's pointer state, read-only) and
+    `IsViewmodelWindowOpen`; `vertex_submission_observe.h` adds `SampleCurrent`.
+  - `vr_config.{h,cpp}` + `tools/riddick_vr.ini.example`: `StereoDualRender`
+    (default 0) and `StereoDualRenderLogEvery` (default 300).
+  - NEW `tests/stereo_dual_tests.cpp` (CTest `stereo_dual`, both arches), NEW
+    `docs/adr/0505-…`, `docs/adr/README.md` (head -> 0505), `docs/vr-scenarios.md`,
+    `src/hook/README.md`, `verify_reported_fixes.py` new #76/#90/ADR-0505 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 519680 B
+  `ba9b1f4e566e` + x64 host); **CTest 31/31 (x86) and 29/29 (x64)** (+1 each); all
+  12 `tools/test_*.py` exit 0; `verify_reported_fixes`, `scenario_tests.py --check`,
+  `verify_hook_init`, `validate_addresses`, `verify_test_artifacts`, `xrsim
+  --selftest` PASS.
+- **EVIDENCE live (`RIDDICKVR_SIM=1`, read-only per-run shadows,
+  `--reach-gameplay --duration 70 --advance-menu --advance-min-taps 8
+  --require-fresh-hook --require-parallax --dump-branch any --downscale 4 --ini
+  StereoDualRender=1`; `deployed_hook_matches_build` PASS each):**
+  - **Run 1 (no `use`, no log line at all):** the pass never engaged — the first
+    acceptance filter also required the *first-person window* to be open, but that
+    window is opened by the **mid-frame depth-only clear** and holds the
+    viewmodel/HUD pass, i.e. it is *after* the world pass. Fixed by the world span.
+  - **Run 2 (`--dump-branch any`, 4 frames):** the pass engaged (`eligible=60`),
+    the (then 4-row/5%) coverage gate **passed** 2 frames (`use=1`) — but their
+    presented mean luminance was only **~3/255** (a little content over a black
+    frame). The gate floor was raised to 8 rows / 50% for that measured reason.
+  - **Run 3 (scale census added):** the census is decisive — every sampled span
+    reads `scale=[unknown=675..677 near=0 mid=2 world=58]`, i.e. of ~735 draws in
+    the span **~92% are undecodable** by the client-array sampler and only **58-60**
+    are world-scale; `near=0` refutes reading the span as the near-field/viewmodel
+    pass.
+  - **Run 4 (FINAL build, hook `ba9b1f4e566e`):** with the raised gate every
+    sampled frame reads `draws=60 eligible=60 skipped=675..677 mirrors≈1/frame
+    coverL=coverR=0.000..0.281 use=0` -> the pass's frames are refused and gameplay
+    keeps the **shipped shifted capture (no regression)**. The run reached the level
+    (BarScan rects, `ViewmodelProbe proj` lines, 9000+ swaps/70 s) but the harness
+    captured **cinema-labelled frames only** (`gameplay_captures_present`: 0
+    gameplay / 5 cinema), so `stereo_parallax_present` reports
+    `stereo_kind=shift-only (gameplay frames=0)` and the per-tile disparity
+    acceptance could **not** be graded this wake. `frame_budget_reported` also
+    failed (no host `FrameBudget` line), so the pass's frame-time cost is unmeasured.
+- **Verdict / consequence (honest):** the native per-eye pass is landed, opt-in, off
+  by default, gated, and **measured inert on its own gate** — **stereo is NOT
+  fixed**; `--require-parallax` still fails. But the remaining work is now specific
+  rather than speculative: (1) why ~92% of the span's draws are undecodable
+  (log the rejected vertex type/size/stride/pointer; the world pass is not going
+  through the float-array path ADR-0482 sampled), (2) prove/replace the world-span
+  boundary (per-frame draw totals + per-draw projection state; the ~2 mid-scale
+  draws are unexplained), (3) grade parallax (fix the dump gate's gameplay label
+  GH #72/#69, or measure the eye pair in the hook).
+- **Blocker / honest limit:** the pass captures ~60 of ~735 span draws and its
+  frames are not a usable image; the eye frames use the engine's projection
+  (parallel-axis stereo) and the HUD placement is unhandled; the world span is a
+  heuristic; no headset; nothing about the 2004 build.
+- **Next:** (1) the three specifics above (GH #90); (2) keep
+  `StereoDualRender=0`/`StereoParallaxDibr=0`/`StereoReplayProbe=0` as defaults;
+  (3) player-visible queue GH #63/#64/#61 then the P1 bugs #45/#49/#50/#51/#65
+  (headset/deploy-gated); (4) `DEFAULT_GAME_DIR` 2004-vs-2009; (5) GH #83/#88/#89/#74.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY per-run shadows; no deploy, no install write); no leftover game/host
+  processes; live lock released. `STATE.log` **appended** (never replaced — GH #88).
+
 ## Wake 102 — 2026-10-18 14:15 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) — option 1 is
   scoped and its first tested primitive lands (ADR-0504)**: the engine's

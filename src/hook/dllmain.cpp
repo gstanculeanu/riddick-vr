@@ -126,6 +126,11 @@ static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, 
     // (inert unless ViewmodelObserve=1). Must run after ShouldSuppressDrawCall so
     // the window state used to classify the draw is current.
     RiddickVR::OpenGLProxy::NoteDrawElementsSubmission(mode, count, type, indices);
+    // GH #76/#90 (ADR-0505): native per-eye render. The same call is re-issued once
+    // per eye with the per-eye eye-space translation *before* the engine's own draw
+    // runs, while the client arrays and the fixed-function state are exactly as the
+    // engine set them. A no-op unless StereoDualRender=1.
+    RiddickVR::StereoRenderer::Instance().OnSceneDraw(mode, count, type, indices);
     if (real_glDrawElements) real_glDrawElements(mode, count, type, indices);
 }
 

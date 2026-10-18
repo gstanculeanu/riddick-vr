@@ -433,6 +433,29 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   `residual ~ 1.68` (the placeholder's offset from the head). The remaining unit is
   a **draw recorder + per-eye replay** (record the frame's `glDrawElements` calls and
   replay them with that translation); it is separately scoped and not landed here.
+- **Native per-eye render (ADR-0505, wake 103; GH #76 / GH #90).** The per-eye camera
+  is applied **at the draw site** instead of being recorded: ADR-0491 measured the
+  array path to be the complete geometry path (no display lists, no `glDrawArrays`,
+  no world-pass immediate mode), so at `Hook_glDrawElements` the geometry is in hand
+  *and the whole fixed-function state that will shade it is already current*. With
+  `StereoDualRender=1` (default **0**) `StereoRenderer::OnSceneDraw` re-issues an
+  eligible draw once per eye into two per-eye colour+depth framebuffers
+  (`m_dualFbo[0/1]`, sized to the engine's viewport so its viewport state applies
+  unchanged) with real `glPushMatrix` + `glTranslatef(-offset_eye)` + `glDrawElements`
+  + `glPopMatrix` through the system opengl32. `OnSceneClear` (from `Hook_glClear`)
+  mirrors the engine's own clear into those frames while the frame has no eligible
+  draw yet, and maintains the **world span** (colour clear / swap starts it, the
+  mid-frame depth-only clear ends it — the measured frame order, ADR-0439/0483).
+  Eligibility (`stereo_dual.h::DualRenderDrawEligible`) is: inside the world span
+  **and** the sampled array bounds not near-field (ADR-0490's measured separator),
+  so HUD/screen-space quads and the engine's own viewmodel are never
+  eye-translated. At swap the two frames replace the
+  monoscopic capture (`BlitDualEye`); a frame with too few eligible draws or an empty
+  sampled coverage of either eye (`DualFrameUsable`, `kDualMinEyeCoverage`) falls back
+  to the shipped shifted capture, so the opt-in can never present a black eye. Logs
+  `DualRender: swap=.. frames=.. used=.. draws=.. eligible=.. skipped=.. coverL=..
+  coverR=.. size=.. use=..`. The offset uses the scene-faithfulness gate above, so a
+  mock/sim run applies the head-local `+/-halfIpd`.
 
 
 

@@ -171,6 +171,17 @@ struct VRConfig {
     // Default OFF.
     int stereoReplayProbe = 0;
     int stereoReplayProbeEvery = 300;
+    // GH #76 / GH #90 (ADR-0505): **native stereo** -- dual-issue each eligible
+    // world draw into a per-eye framebuffer with the per-eye eye-space modelview
+    // translation, instead of shifting one monoscopic capture. The engine submits
+    // eye-space client-array geometry (ADR-0481/0482), so this is a real per-eye
+    // camera and not a blit. Default OFF: it doubles the frame's geometry
+    // submission and needs on-headset tuning (projection, HUD, comfort), and it
+    // must never regress the shipped capture. A black-eye gate falls back to the
+    // shifted capture automatically. See stereo_dual.h.
+    int stereoDualRender = 0;
+    // Log one `DualRender:` evidence line every N swaps (0 = never).
+    int stereoDualRenderLogEvery = 300;
 };
 
 extern VRConfig g_vrConfig;
