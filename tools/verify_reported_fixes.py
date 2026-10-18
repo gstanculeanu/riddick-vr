@@ -567,6 +567,32 @@ def main():
             "0x1078c0e4 (RTTI ?AVCWObject_Matinee@@), so it is NOT chased as the "
             "player FP body/arms (ADR-0495)")
 
+    # GH #67 step 1 (fourteenth correction, ADR-0496): ADR-0494's "Next 1a" --
+    # the destination vtable slot 0x68 -- is measured to be a per-class virtual
+    # (a census finds 1,319 RTTI vtables / 874 distinct slot-0x68 targets), and on
+    # the item class it is a SECOND property loader (CRPG_Object_Item slot 0x68 =
+    # FUN_10252d70, which calls the slot-8 loader FUN_10260940 and then loads
+    # SPAWN/PROJECTILE/SPAWNEFFECT/SUMMON_PROJECTILECLASS[_PLAYER]/GIVEONPICKUP/
+    # MELEE_HITSOUND). So the slot is not the model-instance creation. Pin the
+    # artifact + the ADR.
+    slot68 = ROOT / "docs/rea/reference/GameClasses2009_ModelSetterSlot68.txt"
+    _slot68_text = slot68.read_text(encoding="utf-8") if slot68.exists() else ""
+    require(slot68.exists() and
+            "d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79" in _slot68_text and
+            "0x10252d70" in _slot68_text and
+            "FUN_10260940" in _slot68_text and
+            "SPAWNEFFECT" in _slot68_text and
+            "SUMMON_PROJECTILECLASS_PLAYER" in _slot68_text and
+            "GIVEONPICKUP" in _slot68_text and
+            "MELEE_HITSOUND" in _slot68_text and
+            "0x104b17d0" in _slot68_text and
+            (ROOT / "docs/adr/0496-gh67-slot68-is-a-per-class-virtual-not-the-model-instance-creation.md").exists() and
+            "ADR-0496" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8"),
+            "GH #67: the item-model destination vtable[0x68] must stay recorded as a "
+            "per-class virtual (874 distinct targets) that on CRPG_Object_Item is a "
+            "second property loader FUN_10252d70, NOT the model-instance creation "
+            "(ADR-0496)")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

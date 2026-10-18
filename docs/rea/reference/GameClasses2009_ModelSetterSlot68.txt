@@ -1,0 +1,204 @@
+# GameClasses_Win32_x86.dll (2009 Dark Athena) — the item-model destination
+# slot `vtable[0x68]`: a per-class virtual, and on `CRPG_Object_Item` a second
+# *property loader* (GH #67 step 1; closes ADR-0494's remaining "Next 1a")
+#
+# subject : F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll
+#           size 9,016,560 B
+#           sha256 d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79
+#           image base 0x10000000   format PE   architecture x86   6 sections
+# provider: Ghidra 12.1.4 (the REA `ghidra` provider, official headless script)
+# method  : read-only. One REA request (an ephemeral import copy) plus local
+#           capstone disassembly and a static vtable/RTTI census of the same bytes.
+#           The install is never written (import_mode "ephemeral-source-immutable").
+# purpose : GH #67 step 1. ADR-0494 recorded the sole remaining engine-side route
+#           as (1a): "the object's property-setter target (destination vtable[0x68])
+#           and the model-instance creation it feeds -- a *different* name than
+#           VIEWMODEL leads there." This file measures that slot: it is a per-class
+#           virtual, and on the item class (whose slot 8 loader is FUN_10260940) it
+#           is a second property loader, NOT a model-instance creator. So (1a) as
+#           stated is not supported and is closed.
+# ------------------------------------------------------------------------------
+
+## 0. Requests made (read-only)
+
+    $env:REA_GHIDRA_STARTUP_TIMEOUT_MS = "1500000"
+    rea decompile "...\Content\GameClasses_Win32_x86.dll" --procedure 0x10252d70 --format json
+      # exit 0, wall 380 s
+      # evidence_id ev_45c80b840286f193cd0f146d8987b7ccbd0f694060a2ad78b50071a45018eb75
+      # provider.id ghidra, provider.version 12.1.4
+      # subject.digest.sha256 d7e81d7d3726..., confidence observed, authority shipped-artifact
+
+    # the static census + the two disassemblies were produced locally from the same
+    # file bytes (no REA request): scan_slot68.py, disasm_2d70.py, disasm_d790.py
+    # (autoloop wake 95, %TEMP%\oc_wake95).
+
+## 1. `FUN_1026d790` hands the loaded value to a *different* object's `vtable[0x68]`
+
+Local capstone disassembly of `FUN_1026d790` (the named-child copy helper,
+ADR-0494 sec 2) — the site the item-model loader uses for `MODEL`/`MODEL0..3`/
+`ATTACHMODEL` — with the two stack arguments named after `CRegistry::FindChild`
+(`0x10283bba`) resolves it:
+
+    1026d7a9  mov  esi,[esp+24h]   ; arg5 = the *registry* that FindChild searches
+    1026d7b9  mov  eax,[esp+1Ch]   ; arg3 = the name source
+    1026d7bd  mov  edx,[eax+18h]   ; name = arg3->vtable[0x18]
+    1026d7c4  call edx
+    1026d7c6  push eax
+    1026d7c7  mov  ecx,esi
+    1026d7c9  call 0x10283bba      ; CRegistry::FindChild(registry,name)
+    1026d7d0  je   end
+    1026d7d2  mov  edx,[eax]
+    1026d7d4  mov  edx,[edx+1B4h]
+    1026d7e0  mov  ecx,eax
+    1026d7e2  call edx             ; child->vtable[0x1B4](&temp)  -> temp
+    1026d7e6  mov  esi,[esp+2Ch]   ; arg6 = the *destination*  (a DIFFERENT object)
+    1026d7ea  mov  edi,[esi]       ; edi  = destination->vtable
+    1026d7ec  mov  ecx,eax
+    1026d7ee  mov  eax,[edx+14h]
+    1026d7f1  push 1
+    1026d7f8  call eax             ; temp->vtable[0x14](1)  -> value in eax
+    1026d7fa  mov  edx,[edi+68h]   ; edx  = destination->vtable[0x68]
+    1026d7fd  push eax             ; the value
+    1026d7fe  mov  ecx,esi         ; ecx  = destination
+    1026d800  call edx
+
+So the found child's value is handed to **`destination->vtable[0x68](value)`**, and
+the destination (`arg6`) is a **separate object** from the registry argument
+(`arg5`). The call is a single virtual dispatch with one value argument: a
+per-class "store this value" style slot, not a fixed function.
+
+## 2. Slot `0x68` is a *per-class* virtual across the image (static census)
+
+For every MSVC RTTI vtable in the image (found via its CompleteObjectLocator at
+`vtable-4`; the TypeDescriptor name read at `+8`), the target of slot `0x68`:
+
+    1,319 RTTI vtables
+      874 distinct slot-0x68 targets
+      582 resolve into .text
+      737 do not (the class's vtable is shorter than 27 slots, so `+0x68` reads
+             adjacent .rdata -- those readings are not meaningful and not claimed)
+
+Largest family: target `0x104b17d0`, shared by 24 `CMWnd_CubeMenu_*` classes.
+There is **no single global `vtable[0x68]` function**, so "the destination
+`vtable[0x68]`" names a per-class virtual whose identity depends on the runtime
+class of the destination object.
+
+Within the `CRPG_Object*` family the slot differs class by class:
+
+    class                        slot 0x68    in .text
+    CRPG_Object                  0x1025df20   yes
+    CRPG_Object_Item             0x10252d70   yes   <- the item-model class
+    CRPG_Object_Weapon           0x1024c320   yes
+    CRPG_Object_ShotGun          0x10255f40   yes
+    CRPG_Object_Rifle            0x10256ba0   yes
+    CRPG_Object_Gun              0x10258de0   yes
+    CRPG_Object_MiniGun          0x10259f70   yes
+    CRPG_Object_Inventory        0x1024ebb0   yes
+    CRPG_Object_Melee / _Ulaks   0x1024cc80   yes
+    CRPG_Object_Char             0x1024cdd0   yes
+    CRPG_Object_Ammo             0x10273d60   yes
+    CRPG_Object_Collectible      (past its vtable -- not claimed)
+    CRPG_Object_CreatureAttack   (past its vtable -- not claimed)
+
+## 3. `CRPG_Object_Item::vtable[0x68] = FUN_10252d70` is a *second property loader*
+
+Ghidra `procedure_pseudo_code`, verbatim:
+
+    void FUN_10252d70(void)
+
+    {
+      int in_ECX;
+
+      FUN_10260940();
+      if ((*(byte *)(in_ECX + 0x2f8) & 0x10) == 0) {
+        FUN_100162e0();
+        FUN_1026d8e0();
+        FUN_100162e0();
+        FUN_1026d8e0();
+        FUN_100162e0();
+        FUN_1026d8e0();
+        FUN_100162e0();
+        FUN_1026d8e0();
+        FUN_100162e0();
+        FUN_1026d8e0();
+        FUN_100162e0("GIVEONPICKUP");
+        FUN_10270060();
+        FUN_100162e0();
+        FUN_1026d840();
+      }
+      return;
+    }
+
+Ghidra did not recover the six unnamed string literals (they are pushed from
+`.rdata`), so the local capstone disassembly names them (each is a temporary
+`CStr::CStr` (`0x100162e0`) feeding a typed property loader):
+
+    10252d85  call 0x10260940      ; the slot-8 item model-property loader
+    10252d8a  test byte [ebx+0x2F8],10h ; guard bit (same bit FUN_10260940 sets)
+    10252da2  push 0x1075112c  ; "SPAWN"                        -> FUN_1026d8e0
+    10252dbf  push 0x1074b6a0  ; "PROJECTILE"                   -> FUN_1026d8e0
+    10252ddc  push 0x10757df8  ; "SPAWNEFFECT"                  -> FUN_1026d8e0
+    10252df9  push 0x10757de0  ; "SUMMON_PROJECTILECLASS"       -> FUN_1026d8e0
+    10252e16  push 0x10757dc0  ; "SUMMON_PROJECTILECLASS_PLAYER"-> FUN_1026d8e0
+    10252e36  push 0x10757db0  ; "GIVEONPICKUP"                 -> FUN_10270060
+    10252e53  push 0x10757da0  ; "MELEE_HITSOUND"               -> FUN_1026d840
+    10252e69  ret 0Ch              ; three stack arguments
+
+That is the shape of a **property loader** (the base item loader plus the item's
+own spawn/projectile keys), not a "create a model instance" setter.
+
+## 4. What this resolves (GH #67 step 1) and what it does not
+
+Resolved:
+
+- **`vtable[0x68]` is a per-class virtual**, not one global function (sec 2), and
+  the destination object in `FUN_1026d790` is a **different** object from the
+  registry it searches (sec 1).
+- **On the item class it is a second property loader** (`FUN_10252d70` = base
+  loader + SPAWN/PROJECTILE/SPAWNEFFECT/SUMMON_PROJECTILECLASS[_PLAYER]/
+  GIVEONPICKUP/MELEE_HITSOUND, sec 3). So ADR-0494's (1a) reading -- that the
+  destination `vtable[0x68]` is "the model-instance creation it feeds" -- is
+  **not supported**: on the class whose slot-8 loader *is* the item model loader,
+  slot 0x68 is another loader.
+
+Not claimed / honest limits:
+
+- **The destination object's class is not identified.** `FUN_1026d790` calls
+  `arg6->vtable[0x68]`; which class `arg6` is, and therefore which of the 874
+  targets the item-model path really reaches, is not established here. (The
+  *registry* argument `arg5` and the *destination* `arg6` are distinct objects,
+  measured; their roles are named from the `FindChild` call, not from caller
+  types.)
+- The guard `this[0x2f8] & 0x10` is not identified beyond "the same bit
+  `FUN_10260940` sets when it takes its short path".
+- Slot-0x68 readings for classes whose vtable is shorter than 27 slots are
+  adjacent `.rdata`, not vtable entries (reported above as "not claimed").
+- **Nothing about the FP arms.** This file measures where the model reference is
+  *stored*; it does not locate the model-instance creation, and it says nothing
+  about whether the engine's first-person arms are drawn on the sampled
+  passive/unarmed level start (the open state question, wake 89 / GH #80).
+- Nothing about the 2004 (*Escape from Butcher Bay*) module: this file is the
+  2009 build only.
+
+## 5. Reproducer
+
+    # REA (read-only; ~6.4 min; needs the raised deadline -- ADR-0493)
+    $env:REA_GHIDRA_STARTUP_TIMEOUT_MS = "1500000"
+    rea decompile "...\Content\GameClasses_Win32_x86.dll" --procedure 0x10252d70 --format json
+
+    # static census (PE section map: .text first section; .rdata VA 0x1073b000/raw 0x73b000)
+    #   for each dword d in .rdata whose value is a .rdata VA with signature 0 at d,
+    #   TypeDescriptor = u32(d + 0x0C), name = cstr(TypeDescriptor + 8);
+    #   vtable = (location of d) + 4; slot 0x68 = u32(vtable + 0x68)
+    # locate the item vtable: 0x107572dc (.?AVCRPG_Object_Item@@" -- slot 8 = FUN_10260940)
+
+## 6. Consequence for GH #67 step 1
+
+With ADR-0495 closing (1b) and this file closing (1a), **every named engine-side
+route of ADR-0494 is exhausted**: the geometric routes (ADR-0481..0491), the name
+tables (ADR-0492/0495), the `VIEWMODEL` property (ADR-0493/0494) and the
+destination `vtable[0x68]` (this file) are all measured negatives. The remaining
+route is the **state question**: whether the engine draws its first-person arms
+*at all* on the sampled passive/unarmed level start, before any further static
+hunt. That is a harness problem (a scripted run that reaches an armed/fighting
+state), not another byte scan -- see GH #80.

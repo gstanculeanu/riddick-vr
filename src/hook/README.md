@@ -336,6 +336,22 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   #67 step-1 routes are the object property-setter target (ADR-0494's 1a) and the
   "is the viewmodel drawn at all?" state question (GH #80). Recorded in
   `docs/rea/reference/GameClasses2009_ViewmodeConsumer.txt`. See ADR-0495.
+- **ADR-0496 — the item-model destination `vtable[0x68]` is a per-class virtual,
+  and on `CRPG_Object_Item` a second *property loader*, not the model-instance
+  creation.** ADR-0494's "Next 1a" proposed chasing the destination slot `0x68`
+  to the model-instance creation. A read-only census (1,319 MSVC RTTI vtables,
+  **874 distinct** slot-0x68 targets; 582 into `.text`) shows the slot is
+  **per-class**, and the item class's slot is `FUN_10252d70` — the slot-8 item
+  model loader `FUN_10260940()` plus **SPAWN**/**PROJECTILE**/**SPAWNEFFECT**/
+  **SUMMON_PROJECTILECLASS**/**SUMMON_PROJECTILECLASS_PLAYER**/**GIVEONPICKUP**/
+  **MELEE_HITSOUND** (a loader, `ret 0xC`). The disassembly of `FUN_1026d790`
+  shows the value goes to a **separate** object's `vtable[0x68]` (a one-argument
+  virtual dispatch), so the slot *stores* the model reference; it does not create
+  the instance. Candidate (1a) is therefore **not supported**. With ADR-0495 (1b),
+  every named engine-side route of ADR-0494 is exhausted; the remaining route is
+  the **state question** — whether the engine draws its FP arms at all on the
+  passive/unarmed level start (GH #80). Recorded in
+  `docs/rea/reference/GameClasses2009_ModelSetterSlot68.txt`. See ADR-0496.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

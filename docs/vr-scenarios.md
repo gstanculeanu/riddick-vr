@@ -495,6 +495,30 @@ question (GH #80 / wake 89). Recorded in
 `docs/rea/reference/GameClasses2009_ViewmodeConsumer.txt`.
 
 
+**Correction (wake 95, ADR-0496): the item-model destination `vtable[0x68]` is a
+per-class virtual, and on the item class a second *property loader* — so ADR-0494's
+"Next 1a" is NOT supported.** ADR-0494's other candidate for #67 step 1 was to chase
+the destination `vtable[0x68]` (the slot `FUN_1026d790` hands the loaded model
+reference to) to the model-instance creation. A read-only census of every MSVC RTTI
+vtable in the same 2009 module (1,319 vtables, **874 distinct** slot-0x68 targets;
+582 into `.text`, the rest into adjacent `.rdata` where the vtable is shorter than
+27 slots) shows the slot is **per-class** — base `CRPG_Object` `0x1025df20`,
+`_Weapon` `0x1024c320`, `_Inventory` `0x1024ebb0`, `_Char` `0x1024cdd0`, … — so there
+is no single "model-instance setter". One read-only REA decompile
+(`--procedure 0x10252d70`, `exit 0`, 380 s) shows what the item class's slot 0x68
+is: `FUN_10252d70` calls the slot-8 item model loader `FUN_10260940()` and then
+loads **SPAWN**, **PROJECTILE**, **SPAWNEFFECT**, **SUMMON_PROJECTILECLASS**,
+**SUMMON_PROJECTILECLASS_PLAYER**, **GIVEONPICKUP**, **MELEE_HITSOUND** (the six
+literals Ghidra left unnamed were recovered by local disassembly) — i.e. a *second
+property loader* (`ret 0xC`), not a model-instance creator. The disassembly of
+`FUN_1026d790` shows the value goes to a **separate** object's `vtable[0x68]` in a
+one-argument virtual dispatch, so the slot *stores* the model reference; it does not
+create the instance. With ADR-0495 (1b), **every named engine-side route of
+ADR-0494 is exhausted**; the remaining route is the "is the viewmodel drawn at all?"
+**state question** on the passive/unarmed level start (GH #80 / wake 89). Recorded
+in `docs/rea/reference/GameClasses2009_ModelSetterSlot68.txt`.
+
+
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
 renderer init), the host logging `Game Connected: WAITING` for the whole (short)
