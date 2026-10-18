@@ -371,6 +371,26 @@ runs' *last* interval was a plane — so the strict
 `viewmodel_volumetric_candidate_sampled` reports the mesh observation without
 claiming the pass was identified.
 
+**Correction (wake 88, ADR-0490): the window-independent near-field route is
+falsified.** ADR-0489's "Next" #1 (a discriminator that does not depend on the
+window) was implemented as a *near-field* test: the interval's largest decodable
+array draw whose sampled bounds are inside ±16 units of the origin, chosen
+regardless of the window (`ViewmodelProbe submission near: … inside=..`; the
+interval line gains `nearSample=0|1` so a pre-#0490 hook is skipped, not failed).
+Two live runs on the reached level measured the candidate in **3 intervals
+only** (`#1200`/`#1500`/`#1800`, the title/transition pages, best `count=44064`,
+bounds ±0.45, volumetric, **0/3 inside the window**), and **no near-field draw at
+all** in the 16 consecutive level intervals (`arrayIn=3600` each, ~2 M array
+draws, `nearSample=0` every one). This engine submits the level's geometry in
+**view space** (magnitudes ≳ 100; the level's in-window sample is at
+`x ≈ 108..120`), so a near-field/object-space test cannot separate the viewmodel
+from the world. XRSIM grades the claim
+(`viewmodel_near_field_candidate_identifies_pass`, PASS only when a near-field
+candidate covers at least as many intervals as the window had in-window draws and
+is volumetric), and both runs FAIL (3/18, 3/19) — the honest verdict. The
+remaining route to GH #67 step 1 is the engine-side identification of the
+viewmodel pass.
+
 
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during

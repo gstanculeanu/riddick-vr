@@ -1175,6 +1175,117 @@ def test_viewmodel_volumetric_sample_is_reported_apart_from_the_strict_gate(td):
     assert best["best"]["count"] == 14688 and best["last"]["count"] == 2520, best
 
 
+# --------- viewmodel window-independent near-field candidate (GH #67, ADR-0490)
+# The `near` sample is the interval's largest decodable array draw whose bounds are
+# inside the near-field box, regardless of the window, plus ` inside=0|1`. The
+# interval line's `nearSample=` marker is what identifies a #0490+ hook.
+_VM_NEAR_WINDOW_INDEPENDENT = (
+    "[INFO] ViewmodelProbe submission [#300]: arrayIn=19 arrayOut=89 listIn=0 "
+    "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1 nearSample=1\n"
+    "[INFO] ViewmodelProbe submission fp: first=(0.400,-0.400,0.000) "
+    "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+    "indexType=5123 vertexType=5126 valid=1\n"
+    "[INFO] ViewmodelProbe submission near: first=(0.450,-0.400,0.050) "
+    "min=(-0.400,-0.445,0.000) max=(0.450,0.400,0.300) n=24 count=14688 "
+    "indexType=5123 vertexType=5126 valid=1 inside=0\n")
+
+
+def test_viewmodel_near_field_sample_is_parsed(td):
+    """GH #67 (ADR-0490): the `near` label parses like `fp`/`world` plus its
+    ` inside=` window tag, the `nearSample=` marker identifies a #0490+ hook, and
+    the near-field predicate mirrors the hook's constant."""
+    probe = xrsim.viewmodel_probe_stats(_VM_NEAR_WINDOW_INDEPENDENT)
+    sub = probe["submission"]
+    near = sub["near"]
+    assert near["count"] == 14688 and near["inside_window"] == 0, near
+    assert sub["fp"]["inside_window"] is None, sub["fp"]  # only `near` carries it
+    assert xrsim.viewmodel_sample_is_near_field(near) is True, near
+    assert xrsim.viewmodel_sample_is_near_field(
+        {"min": [-3518.0, -1663.0, 2032.0], "max": [3518.0, 1663.0, 2032.0],
+         "valid": True}) is False
+    assert xrsim.viewmodel_sample_is_near_field(
+        {"min": [-1.0, -1.0, -1.0], "max": [1.0, 1.0, 1.0], "valid": False}) is False
+    # The near and fp streams are selected independently.
+    assert xrsim.viewmodel_candidate_best(sub["samples"], "near")["best"]["count"] == 14688
+    assert xrsim.viewmodel_candidate_best(sub["samples"], "fp")["best"]["count"] == 2520
+    # A pre-0490 log has no marker: the run must be SKIPPED, not failed.
+    cov = xrsim.viewmodel_near_field_coverage(probe)
+    assert cov == {"supported": True, "intervals": 1, "in_window_intervals": 1,
+                   "near_intervals": 1}, cov
+    old = xrsim.viewmodel_probe_stats(_VM_SUBMISSION_PLANAR)
+    assert old["submission"]["near"] is None, old["submission"]["near"]
+    assert xrsim.viewmodel_near_field_coverage(old)["supported"] is False
+
+
+def test_viewmodel_near_field_check_grades_the_candidate(td):
+    """GH #67 (ADR-0490): the window-independent candidate is graded as a claim --
+    the near-field draw *is* the viewmodel -- so it passes only when the near-field
+    candidate covers every interval in which the window drew AND is volumetric; a
+    sparse candidate (the live level: 3/15) FAILs, and a planar one FAILs."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    passed, checks = xrsim.evaluate(_args(), art, "", _VM_NEAR_WINDOW_INDEPENDENT)
+    rec = [c for c in checks if c["check"] == "viewmodel_near_field_candidate_identifies_pass"][0]
+    assert rec["ok"] is True and not rec.get("skip"), rec
+    assert "1/1 in-window interval(s) also produced a near-field candidate" in rec["detail"], rec
+    assert "count=14688" in rec["detail"], rec
+    # The STRICT in-window gate still fails on the same run (the window's largest
+    # draw is the 2520 plane) -- the two checks are deliberately independent.
+    strict = [c for c in checks if c["check"] == "viewmodel_candidate_is_volumetric"][0]
+    assert strict["ok"] is False, strict
+    # A planar near-field candidate must FAIL the near check.
+    planar_near = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=19 arrayOut=89 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0 nearSample=1\n"
+        "[INFO] ViewmodelProbe submission near: first=(0.400,-0.400,0.000) "
+        "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+        "indexType=5123 vertexType=5126 valid=1 inside=1\n")
+    passed, checks = xrsim.evaluate(_args(), art, "", planar_near)
+    rec = [c for c in checks if c["check"] == "viewmodel_near_field_candidate_identifies_pass"][0]
+    assert rec["ok"] is False and not rec.get("skip"), rec
+    assert "planar/screen-space" in rec["detail"], rec
+    assert passed is False, [c for c in checks if not c.get("skip") and not c["ok"]]
+    # A #0490 hook whose near-field candidate covers only some window intervals (the
+    # live measurement: 3 of 18) must FAIL: "the viewmodel is the near-field draw"
+    # is not supported when the window drew where no near-field candidate appeared.
+    sparse = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=19 arrayOut=89 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1 nearSample=1\n"
+        "[INFO] ViewmodelProbe submission near: first=(0.450,-0.400,0.050) "
+        "min=(-0.400,-0.445,0.000) max=(0.450,0.400,0.300) n=24 count=44064 "
+        "indexType=5123 vertexType=5126 valid=1 inside=0\n"
+        "[INFO] ViewmodelProbe submission [#600]: arrayIn=3600 arrayOut=220800 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1 nearSample=0\n"
+        "[INFO] ViewmodelProbe submission fp: first=(107.750,52.430,6.250) "
+        "min=(107.750,39.930,6.250) max=(120.250,52.430,6.250) n=12 count=12 "
+        "indexType=5123 vertexType=5126 valid=1\n")
+    passed, checks = xrsim.evaluate(_args(), art, "", sparse)
+    rec = [c for c in checks if c["check"] == "viewmodel_near_field_candidate_identifies_pass"][0]
+    assert rec["ok"] is False and not rec.get("skip"), rec
+    assert "1/2 in-window interval(s)" in rec["detail"], rec
+    assert "is NOT supported" in rec["detail"], rec
+    assert passed is False, [c for c in checks if not c.get("skip") and not c["ok"]]
+
+
+def test_viewmodel_near_field_check_skipped_without_a_near_sample(td):
+    """A pre-#0490 hook (no `nearSample=` marker) must SKIP the near-field check,
+    never fail it -- even when the window drew and an `fp` sample exists."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "viewmodel_near_field_candidate_identifies_pass"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
+    # An fp sample from a pre-0490 hook does not create a near sample.
+    _, checks = xrsim.evaluate(_args(), art, "", _VM_SUBMISSION_MESH)
+    rec = [c for c in checks if c["check"] == "viewmodel_near_field_candidate_identifies_pass"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+
+
 
 def test_viewmodel_candidate_check_skipped_without_a_sample(td):
     """A run without ViewmodelObserve=1 (or a pre-#67 host) must skip the

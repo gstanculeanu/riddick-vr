@@ -375,6 +375,20 @@ static void LogVertexSubmissionSample(const char* label, const VertexSample& s) 
         s.read, s.count, s.indexType, s.vertexType, s.valid ? 1u : 0u);
 }
 
+// GH #67 step 1 (eighth correction, ADR-0490): the window-independent candidate
+// (the interval's largest decodable *near-field* array draw, label `near`) also
+// carries whether the first-person window happened to be open at that draw, so a
+// run can state directly whether the window mattered at all.
+static void LogVertexSubmissionCandidate(const char* label, const VertexSample& s, bool insideWindow) {
+    VR_LOG_INFO("ViewmodelProbe submission %s: first=(%.3f,%.3f,%.3f) min=(%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f) n=%u count=%u indexType=%u vertexType=%u valid=%u inside=%u",
+        label,
+        s.first[0], s.first[1], s.first[2],
+        s.min[0], s.min[1], s.min[2],
+        s.max[0], s.max[1], s.max[2],
+        s.read, s.count, s.indexType, s.vertexType, s.valid ? 1u : 0u,
+        insideWindow ? 1u : 0u);
+}
+
 BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
     RiddickVR_EnsureHookInitialized();
     s_swapFrameCount++;
@@ -431,17 +445,19 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
     // GH #67 step 1 (second/third corrections, ADR-0482/0483): the submitted-vertex
     // sample -- the surface the transform is actually applied on. One counts line
     // plus, on the same sampled frames, the window's largest in-window array draw
-    // (the arms candidate) and the first outside draw (the world control). Inert
-    // unless ViewmodelObserve=1.
+    // (the arms candidate), the first outside draw (the world control) and (ADR-0490)
+    // the window-independent near-field candidate. Inert unless ViewmodelObserve=1.
     if (s_vertexSubmissionObserver.Observing() && (s_swapFrameCount % 300) == 0) {
         const VertexSubmissionSnapshot vs = s_vertexSubmissionObserver.ComputeSnapshot();
-        VR_LOG_INFO("ViewmodelProbe submission [#%llu]: arrayIn=%u arrayOut=%u listIn=%u listOut=%u ptrSize=%u ptrType=%u ptrStride=%d inSample=%u outSample=%u",
+        VR_LOG_INFO("ViewmodelProbe submission [#%llu]: arrayIn=%u arrayOut=%u listIn=%u listOut=%u ptrSize=%u ptrType=%u ptrStride=%d inSample=%u outSample=%u nearSample=%u",
             static_cast<unsigned long long>(s_swapFrameCount),
             vs.arrayInside, vs.arrayOutside, vs.listInside, vs.listOutside,
             vs.pointerSize, vs.pointerType, vs.pointerStride,
-            vs.hasInsideSample ? 1u : 0u, vs.hasOutsideSample ? 1u : 0u);
+            vs.hasInsideSample ? 1u : 0u, vs.hasOutsideSample ? 1u : 0u,
+            vs.hasNearSample ? 1u : 0u);
         if (vs.hasInsideSample) LogVertexSubmissionSample("fp", vs.insideSample);
         if (vs.hasOutsideSample) LogVertexSubmissionSample("world", vs.outsideSample);
+        if (vs.hasNearSample) LogVertexSubmissionCandidate("near", vs.nearSample, vs.nearSampleInside);
     }
     s_driveCorrectionCached = false;
     StereoRenderer::Instance().OnSwapBuffers(hdc);

@@ -2,6 +2,108 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 88 — 2026-10-18 08:16 (scheduled loop)
+- **Unit:** GH **#67 step 1 (eighth correction, ADR-0490)** — the
+  **window-independent near-field discriminator** ADR-0489's "Next" #1 asked for
+  is implemented and **measured to be falsified on the live level**: the engine
+  submits the level's geometry in view space (magnitudes ≳ 100), so *no* draw is
+  within ±16 units of the origin there and the near-field test cannot separate
+  the viewmodel from the world. The graded check therefore encodes the *claim*
+  (coverage of the window's in-window intervals + shape), not "a volumetric
+  near-field mesh exists" — which would have PASSed on a title-page mesh. Real
+  C++ change → `build-all.ps1` + CTest on both architectures; two live runs on
+  read-only per-run shadows (no deploy, no install write).
+- **Why this unit:** the explicit "Next" #1 of wake 87 / ADR-0489 ("replace
+  'largest in-window array draw' with a discriminator that does not depend on the
+  window (near-field test in view space, or an engine-side identification)") and
+  the top player-visible item (#67). It closes the geometric branch of #67 step 1
+  by measurement, so the loop stops re-trying openers/thresholds.
+- **Change:**
+  - `src/hook/vertex_submission_observe.h`: `kNearFieldMaxAbs = 16.0f` (PROVISIONAL),
+    pure `IsNearFieldSample`, `VertexSubmissionSnapshot.nearSample` +
+    `hasNearSample`/`nearSampleInside`; `NoteArrayDraw` keeps the interval's
+    largest decodable near-field draw **window-independent**, tagged with whether
+    the window was open at that draw; a cheap `count > nearSample_.count` guard
+    bounds the cost (only a draw that could win is decoded).
+  - `src/hook/opengl_proxy.cpp`: logs `ViewmodelProbe submission near: … valid=..
+    inside=..` (`LogVertexSubmissionCandidate`) and adds the `nearSample=0|1`
+    marker to the interval line — the flag that separates a #0490+ hook from a
+    pre-#0490 one (which must be skipped, never failed).
+  - `tools/xrsim.py`: parses the `near` label + ` inside=` + the `nearSample=`
+    flag; mirrors the constant (`VIEWMODEL_NEAR_FIELD_MAX_ABS`,
+    `viewmodel_sample_is_near_field`) so a disagreeing hook is visible;
+    generalises `viewmodel_candidate_best(samples, label)`; adds pure
+    `viewmodel_near_field_coverage(probe)`; and the graded check
+    **`viewmodel_near_field_candidate_identifies_pass`** (SKIP without the marker;
+    else PASS only if `in_window_intervals > 0` and
+    `near_intervals >= in_window_intervals` and the best near draw is volumetric
+    and its logged bounds really are near-field).
+  - `tests/vertex_submission_observe_tests.cpp` (+7 checks incl. the far-field
+    in-window draw NOT being the candidate, largest-near-wins, undecodable-larger
+    no-clobber, the ±16 bound); `tools/test_xrsim.py` +3 tests; `xrsim --selftest`
+    +3; the #67 invariant in `tools/verify_reported_fixes.py` extended;
+    `docs/adr/0490-…`; `src/hook/README.md`; `docs/vr-scenarios.md` (wake-88
+    correction).
+- **EVIDENCE live (2 runs, same command, two builds; `RIDDICKVR_SIM=1`,
+  read-only per-run shadow, `--reach-gameplay --duration 45 --advance-menu
+  --advance-min-taps 8 --require-fresh-hook --ini ViewmodelObserve=1 --ini
+  ViewmodelTrace=1`; `deployed_hook_matches_build` PASS in both; both reached the
+  live level, `gameplay_full_bleed_reached` PASS):**
+  - build `f80d2a9b267a` (496640 B, shape-only check): 21 submission intervals,
+    **18** in-window, **3** near samples (all in the title/transition pages
+    `#1200`/`#1500`/`#1800`), **0/3 inside the window**; best near draw
+    `count=44064` bounds ±0.45 ratio 0.333 (volumetric) — and **no near sample at
+    all** from `#2100` on (the level, `arrayIn=3600` per interval). Strict
+    `viewmodel_candidate_is_volumetric` FAIL (last interval `count=12`,
+    `extent [12.5,12.5,0.0]`); `viewmodel_volumetric_candidate_sampled` PASS
+    (1/18, `count=14688`); `projection_near_extracted` PASS (332/332);
+    `XRSIM RESULT: FAIL`.
+  - build `aca02a9d1c54` (496640 B, coverage check): 22 submission intervals,
+    **19** in-window, **3** near samples, 0/3 inside; best `count=44064` ratio
+    0.3158. **`[FAIL] viewmodel: viewmodel_near_field_candidate_identifies_pass
+    (3/19 in-window interval(s) also produced a near-field candidate (22 sampled
+    interval(s); 0/3 near sample(s) landed inside the window); best count=44064
+    extent=[0.9,0.95,0.3] ratio=0.3158 -- the window drew in more intervals than
+    the window-independent near-field test found a candidate for, so 'the
+    viewmodel is the near-field draw' is NOT supported on this target)`**;
+    `viewmodel_volumetric_candidate_sampled` PASS (1/19, 14688);
+    `projection_near_extracted` PASS (336/336); `XRSIM RESULT: FAIL` (honest).
+  - The level's `fp` (in-window) sample is the 12-count plane at
+    `first=(107.750,52.430,6.250)` and its first out-of-window draw is
+    `valid=0` (undecodable) — the level's biggest in-window draw is *still* not
+    the arms, and no near-field (object-space) draw exists there at all.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x64 host + x86
+  hook, `dist\opengl32.dll` 496640 B `sha256 aca02a9d1c54`); **CTest 27/27 (x86)
+  and 25/25 (x64)**; all **12 `tools/test_*.py` exit 0** (+3 new viewmodel
+  near-field tests, incl. the sparse 1-of-2 FAIL); `xrsim --selftest` +3
+  (`viewmodel_near_field_sample_is_parsed_and_graded`,
+  `viewmodel_near_field_coverage_is_graded`, `viewmodel_near_field_bound_is_enforced`);
+  `verify_reported_fixes`, `scenario_tests.py --check`, `verify_test_artifacts`,
+  `verify_hook_init`, `validate_addresses` all PASS. Artifacts/reports:
+  `%TEMP%\oc_wake88` (`run.txt`/`report.json` on the first build,
+  `run2.txt`/`report2.json` on the second).
+- **Blocker:** none. **Limits (honest):** two runs, one install, one hook build,
+  45 s each; interval boundaries are 300-swap samples, so "no near-field draw in
+  16 level intervals" is not a per-frame proof; the ±16 box is PROVISIONAL (wide
+  vs the measured ±0.45 candidates and ≳100 view-space draws, but a viewmodel at
+  20–50 units would be missed by this threshold — the harness re-checks the
+  logged bounds); the coverage comparison is a count comparison, not positional
+  (the ` inside=` tags showed the two sets disjoint here, 0/3); the 44064-count
+  mesh's identity is unknown (measured to be a non-gameplay page element on these
+  runs); the level's state is still not established (no movement) and the branch
+  signal still cannot tell the card from a level (GH #72 req 2).
+- **Next:** (1) **#67 step 1 — engine-side identification** of the first-person
+  viewmodel pass (the geometric route is now measured to be a dead end on this
+  target): REA the RndrGL draw path / render flag (GH #66 approach 2,
+  `docs/rea/reference/RndrGL_GL_Path.txt`); (2) keep the depth-only-clear window
+  only as the #63 suppression boundary; (3) the deploy-gated ladder on a real
+  scene (#76 step 1, #79 hook half, #68 req 5); (4) a page-content discriminator
+  for `gameplay_full_bleed_reached` (GH #71 req 2); (5) `DEFAULT_GAME_DIR`
+  2004-vs-2009 retarget; (6) GH #83 manual-session blind spot.
+- **Branch:** committed on **main** (single-writer); install untouched (deployed
+  hook stayed `479232 B 12:47`, install ini `7363 B`), no leftover processes,
+  live lock released. `STATE.log` **appended** (never replaced — GH #88).
+
 ## Wake 87 — 2026-10-18 07:00 (scheduled loop)
 - **Unit:** GH **#67 step 1 (sixth + seventh corrections)** — the near-plane
   extraction was the *hook's* bug, and fixing it makes the `NearPlaneDrop` opener

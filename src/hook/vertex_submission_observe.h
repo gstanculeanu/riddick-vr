@@ -43,6 +43,20 @@
 // the in-window sample is now the window's **largest decodable array draw** (the
 // arms mesh is the pass's biggest mesh) and the draw's index `count` is logged so
 // a 4-vertex quad is distinguishable from a real mesh.
+//
+// ADR-0490 (eighth correction): both of the samples above are classified by the
+// *window*, and two live runs measured the same 14688-count volumetric mesh inside
+// BOTH window openers (ADR-0489), so the window is not what isolates the arms. This
+// adds a **window-independent** candidate: the interval's largest decodable array
+// draw whose sampled bounds are entirely *near-field* (within kNearFieldMaxAbs of
+// the origin on every axis), regardless of the window state. The measured
+// separation is wide: the near-field meshes sit at ~±0.45 while the view-space
+// world/overlay draws sit at |x| ~ 1.6e3..3.5e3, so a threshold of 16 units
+// (~0.5 m at the provisional 30.3 units/m of viewmodel_drive.h) is comfortably
+// between them. Each candidate carries whether the window happened to be open at
+// that draw (`inside`), so a run can state directly whether the window mattered.
+// The threshold is PROVISIONAL and re-measured on a headset; the harness
+// re-checks the logged bounds against its own copy of the constant.
 
 #include <cstring>
 
@@ -58,6 +72,11 @@ constexpr unsigned kGlFloat         = 0x1406u;
 // are well represented by a spread of vertices, not by every one.
 constexpr unsigned kMaxVertexSamples = 24;
 
+// GH #67 step 1 (eighth correction, ADR-0490): what counts as "near-field" for the
+// window-independent candidate. Engine units; see the header comment. PROVISIONAL
+// (measured: near-field meshes ~±0.45, view-space world/overlay draws ~1.6e3..3.5e3).
+constexpr float kNearFieldMaxAbs = 16.0f;
+
 struct VertexSample {
     bool valid = false;       // the array was decodable and at least one vertex was read
     unsigned read = 0;        // vertices actually read
@@ -68,6 +87,18 @@ struct VertexSample {
     float min[3] = {};        // axis-aligned bounds over the sampled vertices
     float max[3] = {};
 };
+
+// True when a *valid* sample's sampled bounds lie entirely within
+// [-kNearFieldMaxAbs, +kNearFieldMaxAbs] on every axis. Pure; used both by the
+// observer (to pick the candidate) and by the harness (to re-check the logged
+// bounds against its own copy of the constant).
+inline bool IsNearFieldSample(const VertexSample& s) {
+    if (!s.valid) return false;
+    for (int c = 0; c < 3; ++c) {
+        if (!(s.min[c] >= -kNearFieldMaxAbs) || !(s.max[c] <= kNearFieldMaxAbs)) return false;
+    }
+    return true;
+}
 
 // Reads a spread of up to kMaxVertexSamples vertices from a client array draw.
 // `vertices` is the glVertexPointer pointer, `indices` the glDrawElements index
@@ -139,7 +170,7 @@ inline VertexSample SampleClientVertices(unsigned count, unsigned indexType, con
 // One sampled frame's submitted-geometry tallies (interval counts) plus the
 // first array-draw sample taken outside the first-person window (the World
 // control) and the window's largest decodable array draw (the arms candidate,
-// ADR-0483).
+// ADR-0483), plus the window-independent near-field candidate (ADR-0490).
 struct VertexSubmissionSnapshot {
     unsigned arrayInside = 0;     // glDrawElements calls with the window open
     unsigned arrayOutside = 0;    // glDrawElements calls with the window closed
@@ -153,6 +184,10 @@ struct VertexSubmissionSnapshot {
     bool hasOutsideSample = false;
     VertexSample insideSample;    // the first-person candidate (largest in-window mesh)
     VertexSample outsideSample;   // world geometry (the control)
+    // GH #67 step 1 (eighth correction, ADR-0490): window-independent.
+    bool hasNearSample = false;   // a decodable *near-field* array draw was sampled
+    bool nearSampleInside = false;// ... and the window happened to be open for it
+    VertexSample nearSample;      // the interval's largest near-field decodable draw
 };
 
 class VertexSubmissionObserver {
@@ -205,6 +240,20 @@ public:
                 hasOutsideSample_ = true;
             }
         }
+        // GH #67 step 1 (eighth correction, ADR-0490): the window-independent
+        // candidate -- the interval's largest decodable *near-field* array draw.
+        // The cheap `count >` guard means only a draw that could win is decoded,
+        // so sampling every draw costs almost nothing once one has been found.
+        if (!hasNearSample_ || count > nearSample_.count) {
+            const VertexSample ns = SampleClientVertices(count, indexType, indices,
+                                                         pointerSize_, pointerType_, pointerStride_, pointer_);
+            if (IsNearFieldSample(ns) &&
+                (!hasNearSample_ || ns.count > nearSample_.count)) {
+                nearSample_ = ns;
+                nearSampleInside_ = insideWindow;
+                hasNearSample_ = true;
+            }
+        }
     }
 
     // One glCallList call, tagged the same way. A display list's vertices are
@@ -232,10 +281,16 @@ public:
         snap.hasOutsideSample = hasOutsideSample_;
         snap.insideSample = insideSample_;
         snap.outsideSample = outsideSample_;
+        snap.hasNearSample = hasNearSample_;
+        snap.nearSampleInside = nearSampleInside_;
+        snap.nearSample = nearSample_;
         arrayInside_ = arrayOutside_ = listInside_ = listOutside_ = 0u;
         hasInsideSample_ = hasOutsideSample_ = false;
         insideSample_ = VertexSample{};
         outsideSample_ = VertexSample{};
+        hasNearSample_ = false;
+        nearSampleInside_ = false;
+        nearSample_ = VertexSample{};
         return snap;
     }
 
@@ -244,6 +299,9 @@ public:
         hasInsideSample_ = hasOutsideSample_ = false;
         insideSample_ = VertexSample{};
         outsideSample_ = VertexSample{};
+        hasNearSample_ = false;
+        nearSampleInside_ = false;
+        nearSample_ = VertexSample{};
         pointerSize_ = pointerType_ = 0u;
         pointerStride_ = 0;
         pointer_ = nullptr;
@@ -260,6 +318,9 @@ private:
     bool hasOutsideSample_ = false;
     VertexSample insideSample_;
     VertexSample outsideSample_;
+    bool hasNearSample_ = false;
+    bool nearSampleInside_ = false;
+    VertexSample nearSample_;
     unsigned pointerSize_ = 0;
     unsigned pointerType_ = 0;
     int pointerStride_ = 0;

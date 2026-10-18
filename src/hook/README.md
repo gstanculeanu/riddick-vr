@@ -224,6 +224,28 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   but *not* the viewmodel. XRSIM derives the sample's axis extents and grades
   `viewmodel_candidate_is_volumetric` (FAIL for a planar sample); the hook, its
   log line and its default are unchanged.
+- **ADR-0490 — the window-independent near-field candidate; the near-field
+  hypothesis is falsified on the live level.** ADR-0489's "Next" #1 was a
+  discriminator that does not depend on the window, so the observer now also
+  keeps the interval's largest decodable array draw whose sampled bounds are
+  entirely within `kNearFieldMaxAbs = 16.0` engine units of the origin, chosen
+  regardless of the window and logged as `ViewmodelProbe submission near: …
+  inside=..` (the trailing flag says whether the window happened to be open at
+  that draw); the interval line gains a `nearSample=0|1` marker that identifies a
+  #0490+ hook (a pre-#0490 log is SKIPPED, not failed). Measured live (two runs,
+  wake 88): the near-field candidate exists only on the title/transition pages
+  (intervals `#1200`/`#1500`/`#1800`, best `count=44064`, bounds ±0.45,
+  volumetric, **0/3 inside the window**), and the live level (16 consecutive
+  intervals, ~2 M array draws) submits **no** draw within ±16 units at all —
+  this engine submits the level's geometry in view space (magnitudes ≳ 100), so
+  a near-field/object-space test cannot separate the viewmodel from the world.
+  XRSIM grades the *claim* (`viewmodel_near_field_candidate_identifies_pass`):
+  PASS only when a near-field candidate was found in at least as many intervals
+  as the window had in-window draws **and** the best one is volumetric **and**
+  its logged bounds are really near-field (the harness mirrors the constant);
+  the measured 3/18 and 3/19 runs FAIL. The remaining route to GH #67 step 1 is
+  the engine-side identification of the viewmodel pass, not another geometric
+  heuristic.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

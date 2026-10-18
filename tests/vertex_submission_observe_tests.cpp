@@ -14,6 +14,9 @@
 //     the arms mesh, not the window's first flat 2-D draw) and carries the draw's
 //     index count; the first array draw outside the window is the world control;
 //     display-list draws are counted by side,
+//   - ADR-0490: the window-independent near-field candidate is the interval's
+//     largest decodable array draw whose bounds are within kNearFieldMaxAbs on
+//     every axis, tagged with whether the window happened to be open at it,
 //   - ComputeSnapshot publishes + re-bases but keeps the client pointer state.
 #include "vertex_submission_observe.h"
 
@@ -24,6 +27,8 @@ using RiddickVR::VertexSample;
 using RiddickVR::VertexSubmissionObserver;
 using RiddickVR::VertexSubmissionSnapshot;
 using RiddickVR::SampleClientVertices;
+using RiddickVR::IsNearFieldSample;
+using RiddickVR::kNearFieldMaxAbs;
 using RiddickVR::kGlFloat;
 using RiddickVR::kGlUnsignedByte;
 using RiddickVR::kGlUnsignedShort;
@@ -61,6 +66,7 @@ int main() {
               "an inert observer must not count draws");
         Check(!s.hasInsideSample && !s.hasOutsideSample,
               "an inert observer must not sample geometry");
+        Check(!s.hasNearSample, "an inert observer must not sample the near-field candidate");
     }
 
     // A float array with ubyte indices: first vertex + bounds, spread sampling.
@@ -198,6 +204,82 @@ int main() {
         const VertexSubmissionSnapshot s = o.ComputeSnapshot();
         Check(s.hasInsideSample && s.insideSample.valid && s.insideSample.count == 3,
               "an undecodable larger draw must not replace a valid in-window sample");
+    }
+
+    // ADR-0490: the window-independent near-field candidate.
+    // A far-field (view-space world/overlay) draw inside the window is NOT the
+    // candidate; a near-field mesh drawn outside the window IS, and it is
+    // tagged as outside so a run can state whether the window mattered.
+    {
+        const float farMesh[12] = {-3518.739f, -1663.154f, 2032.0f,
+                                   3518.739f, 1663.154f, 2032.0f,
+                                   -3000.0f, 1500.0f, 2032.0f,
+                                   3000.0f, -1500.0f, 2032.0f};
+        const float nearMesh[18] = {0.45f, -0.40f, 0.05f, -0.40f, -0.445f, 0.0f, 0.45f, 0.40f, 0.30f,
+                                    0.0f, 0.0f, 0.0f, 0.40f, 0.40f, 0.30f, -0.40f, -0.40f, 0.0f};
+        VertexSubmissionObserver o;
+        o.Configure(true);
+        o.NoteVertexPointer(3, kGlFloat, 0, farMesh);
+        o.NoteArrayDraw(true, 4, kGlUnsignedShort, nullptr);    // window's biggest, far-field
+        o.NoteVertexPointer(3, kGlFloat, 0, nearMesh);
+        o.NoteArrayDraw(false, 6, kGlUnsignedShort, nullptr);   // near-field, outside the window
+        const VertexSubmissionSnapshot s = o.ComputeSnapshot();
+        Check(s.hasInsideSample && s.insideSample.count == 4,
+              "the in-window sample stays the window's largest draw");
+        Check(s.hasNearSample && s.nearSample.count == 6,
+              "the near-field candidate must be the largest near-field draw");
+        Check(!s.nearSampleInside,
+              "the near-field candidate must record that the window was closed at that draw");
+        Check(IsNearFieldSample(s.nearSample) && !IsNearFieldSample(s.insideSample),
+              "the near-field predicate must separate the near mesh from the far one");
+    }
+
+    // ADR-0490: among near-field draws the LARGEST count wins, and an
+    // undecodable larger draw must not clobber a valid smaller one.
+    {
+        const float small[9] = {0.1f, 0.0f, 0.0f, 0.2f, 0.0f, 0.0f, 0.0f, 0.1f, 0.0f};
+        const float big[18] = {1.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.0f,
+                               0.0f, 0.0f, 0.0f, 2.0f, 3.0f, 0.0f, 1.0f, 1.0f, 0.0f};
+        VertexSubmissionObserver o;
+        o.Configure(true);
+        o.NoteVertexPointer(3, kGlFloat, 0, small);
+        o.NoteArrayDraw(false, 3, kGlUnsignedShort, nullptr);
+        o.NoteVertexPointer(3, kGlFloat, 0, big);
+        o.NoteArrayDraw(false, 6, kGlUnsignedShort, nullptr);
+        const VertexSubmissionSnapshot s = o.ComputeSnapshot();
+        Check(s.hasNearSample && s.nearSample.count == 6,
+              "the near-field candidate must be the largest near-field draw, not the first");
+        Check(VecIs(s.nearSample.min, 0.0f, 0.0f, 0.0f) &&
+              VecIs(s.nearSample.max, 2.0f, 3.0f, 0.0f),
+              "the winning near-field draw's bounds must be the sample");
+    }
+    {
+        const float mesh[9] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
+        VertexSubmissionObserver o;
+        o.Configure(true);
+        o.NoteVertexPointer(3, kGlFloat, 0, mesh);
+        o.NoteArrayDraw(false, 3, kGlUnsignedShort, nullptr);        // valid, count 3
+        o.NoteVertexPointer(3, 0x1402u /* GL_SHORT */, 0, mesh);     // undecodable type
+        o.NoteArrayDraw(false, 900, kGlUnsignedShort, nullptr);      // larger, invalid
+        const VertexSubmissionSnapshot s = o.ComputeSnapshot();
+        Check(s.hasNearSample && s.nearSample.valid && s.nearSample.count == 3,
+              "an undecodable larger draw must not replace a valid near-field candidate");
+    }
+    // The near-field bound itself: a draw exactly on the bound is inside, one
+    // vertex beyond it is not.
+    {
+        VertexSample onBound;
+        onBound.valid = true;
+        onBound.min[0] = -kNearFieldMaxAbs; onBound.min[1] = 0.0f; onBound.min[2] = 0.0f;
+        onBound.max[0] = kNearFieldMaxAbs; onBound.max[1] = 1.0f; onBound.max[2] = 1.0f;
+        VertexSample beyond = onBound;
+        beyond.max[0] = kNearFieldMaxAbs + 0.01f;
+        VertexSample invalidSample = onBound;
+        invalidSample.valid = false;
+        Check(IsNearFieldSample(onBound), "a draw exactly on the near-field bound is near-field");
+        Check(!IsNearFieldSample(beyond), "a draw beyond the near-field bound is not near-field");
+        Check(!IsNearFieldSample(invalidSample), "an invalid sample is never near-field");
+        Check(!IsNearFieldSample(VertexSample{}), "a default sample is invalid, not near-field");
     }
 
     // ComputeSnapshot re-bases the interval but keeps the client pointer state.

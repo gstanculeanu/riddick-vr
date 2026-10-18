@@ -382,7 +382,38 @@ def main():
             "viewmodel_candidate_best_falls_back_to_last" in xrsim_tool and
             "test_viewmodel_volumetric_sample_is_reported_apart_from_the_strict_gate" in
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
-            (ROOT / "docs/adr/0489-gh67-all-sampled-intervals.md").exists(),
+            (ROOT / "docs/adr/0489-gh67-all-sampled-intervals.md").exists() and
+            # GH #67 step 1 (eighth correction, ADR-0490): the window-independent
+            # near-field candidate. The observer must keep it (window-independent,
+            # tagged with whether the window was open), the interval line must carry
+            # the `nearSample=` marker that separates a #0490+ hook from a pre-0490
+            # one, and XRSIM must parse the `near` label, mirror the near-field
+            # constant, and grade the *claim* (coverage of the window's in-window
+            # intervals + shape) so a menu-page mesh cannot pass as the arms.
+            "kNearFieldMaxAbs" in vs_observer.read_text(encoding="utf-8") and
+            "IsNearFieldSample" in vs_observer.read_text(encoding="utf-8") and
+            "hasNearSample" in vs_observer.read_text(encoding="utf-8") and
+            "nearSampleInside" in vs_observer.read_text(encoding="utf-8") and
+            "LogVertexSubmissionCandidate" in proxy and
+            "nearSample=%u" in proxy and
+            "inside=%u" in proxy and
+            "VIEWMODEL_NEAR_FIELD_MAX_ABS" in xrsim_tool and
+            "viewmodel_sample_is_near_field" in xrsim_tool and
+            "viewmodel_near_field_coverage" in xrsim_tool and
+            "(fp|world|near)" in xrsim_tool and
+            "nearSample=" in xrsim_tool and
+            '"viewmodel_near_field_candidate_identifies_pass"' in xrsim_tool and
+            "viewmodel_near_field_sample_is_parsed_and_graded" in xrsim_tool and
+            "viewmodel_near_field_coverage_is_graded" in xrsim_tool and
+            "viewmodel_near_field_bound_is_enforced" in xrsim_tool and
+            "test_viewmodel_near_field_sample_is_parsed" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "test_viewmodel_near_field_check_grades_the_candidate" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "test_viewmodel_near_field_check_skipped_without_a_near_sample" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "ADR-0490" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0490-gh67-window-independent-near-field-candidate-falsified.md").exists(),
             "GH #67: the submitted-vertex capture (client array sampled at "
             "glDrawElements, array vs display-list split by the FP window, the "
             "window's largest decodable draw as the arms candidate) must be "

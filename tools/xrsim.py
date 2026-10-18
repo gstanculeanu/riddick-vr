@@ -412,17 +412,21 @@ VIEWMODEL_PROGRAM_MATRIX_RE = re.compile(r"ViewmodelProbe program matrix:")
 VIEWMODEL_SUBMISSION_RE = re.compile(
     r"ViewmodelProbe submission \[#(\d+)\]: arrayIn=(\d+) arrayOut=(\d+) "
     r"listIn=(\d+) listOut=(\d+) ptrSize=(\d+) ptrType=(\d+) ptrStride=(-?\d+) "
-    r"inSample=([01]) outSample=([01])")
+    r"inSample=([01]) outSample=([01])(?: nearSample=([01]))?")
 # `fp` = the first-person window's largest decodable array draw (the arms
-# candidate, ADR-0483); `world` = the first draw outside it (the control).
-# `count` (ADR-0483) is the draw's index count (a 4-6 vertex quad vs a real mesh);
-# `n` is how many vertices were sampled. `valid=0` means the array was not a
-# decodable float array (the type/stride is logged, not guessed). `count` is
-# optional so a pre-0483 hook log still parses.
+# candidate, ADR-0483); `world` = the first draw outside it (the control);
+# `near` (ADR-0490) = the interval's largest decodable *near-field* array draw,
+# window-independent, with a trailing ` inside=0|1` saying whether the window
+# happened to be open at that draw. `count` (ADR-0483) is the draw's index count
+# (a 4-6 vertex quad vs a real mesh); `n` is how many vertices were sampled.
+# `valid=0` means the array was not a decodable float array (the type/stride is
+# logged, not guessed). `count` and ` inside=` are optional so a pre-0483 /
+# pre-0490 hook log still parses.
 VIEWMODEL_SUBMISSION_SAMPLE_RE = re.compile(
-    r"ViewmodelProbe submission (fp|world): first=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
+    r"ViewmodelProbe submission (fp|world|near): first=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
     r"min=\(([-\d.]+),([-\d.]+),([-\d.]+)\) max=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
-    r"n=(\d+)(?: count=(\d+))? indexType=(\d+) vertexType=(\d+) valid=([01])")
+    r"n=(\d+)(?: count=(\d+))? indexType=(\d+) vertexType=(\d+) valid=([01])"
+    r"(?: inside=([01]))?")
 # GH #67 step 1 (sixth correction, ADR-0488): the projection matrix behind each
 # sampled perspective load, so the engine's near-plane convention is auditable
 # (the pass trace's `P?` was a hook-side extraction failure). `classic` is the
@@ -1223,6 +1227,29 @@ def viewmodel_projection_stats(log_text):
     }
 
 
+def viewmodel_near_field_coverage(probe):
+    """GH #67 step 1 (eighth correction, ADR-0490): how far the window-independent
+    near-field candidate covers the run.
+
+    Pure. ``probe`` is :func:`viewmodel_probe_stats` output. Returns
+    ``{"supported", "intervals", "in_window_intervals", "near_intervals"}``.
+    ``supported`` is False for a pre-#0490 hook (no ``nearSample=`` marker on the
+    interval line) so callers SKIP rather than fail. ``in_window_intervals`` counts
+    the sampled intervals whose window had at least one in-window draw -- the
+    available per-interval proxy for "the engine drew the first-person pass"; the
+    discriminator claim under test is "the viewmodel *is* the near-field draw", so a
+    run where the window drew in N intervals but a near-field candidate appeared in
+    fewer than N of them does not support that claim.
+    """
+    lines = (probe or {}).get("submission_lines") or []
+    return {
+        "supported": any(ln.get("near_sampled") is not None for ln in lines),
+        "intervals": len(lines),
+        "in_window_intervals": sum(1 for ln in lines if int(ln.get("array_inside") or 0) > 0),
+        "near_intervals": sum(1 for ln in lines if ln.get("near_sampled") == 1),
+    }
+
+
 def viewmodel_probe_stats(log_text):
     """GH #67 step 2: summarise the observation-only first-person viewmodel probe.
 
@@ -1297,6 +1324,11 @@ def viewmodel_probe_stats(log_text):
             "pointer_size": int(m.group(6)), "pointer_type": int(m.group(7)),
             "pointer_stride": int(m.group(8)),
             "inside_sampled": m.group(9) == "1", "outside_sampled": m.group(10) == "1",
+            # GH #67 (ADR-0490): present only on a #0490+ hook -- it is the marker
+            # that distinguishes "this hook reports a near-field candidate, and here
+            # is whether it found one" from "this hook has no near-field candidate
+            # at all" (a pre-#0490 build must be skipped, never failed).
+            "near_sampled": int(m.group(11)) if m.group(11) is not None else None,
         })
     submission_samples = {}
     submission_sample_list = []
@@ -1310,6 +1342,9 @@ def viewmodel_probe_stats(log_text):
             "count": int(m.group(12)) if m.group(12) else None,
             "index_type": int(m.group(13)),
             "vertex_type": int(m.group(14)), "valid": m.group(15) == "1",
+            # GH #67 (ADR-0490): `near` samples carry whether the window was open
+            # at that draw (null on `fp`/`world`/pre-0490 logs).
+            "inside_window": int(m.group(16)) if m.group(16) is not None else None,
         }
         # GH #67 (ADR-0484): the sample's geometry -- planar (a screen-space
         # element) or volumetric (a mesh, the required shape of an arms mesh).
@@ -1338,23 +1373,26 @@ def viewmodel_probe_stats(log_text):
                 "list_outside": sum(s["list_outside"] for s in submission),
                 "fp": submission_samples.get("fp"),
                 "world": submission_samples.get("world"),
+                "near": submission_samples.get("near"),
                 "samples": submission_sample_list,
             } if submission else None}
 
 
-def viewmodel_candidate_best(samples):
+def viewmodel_candidate_best(samples, label="fp"):
     """GH #67 step 1 (seventh correction, ADR-0489): the run's best first-person
     candidate, over *every* sampled interval.
 
     Pure. ``samples`` is the parsed ``submission.samples`` list (each entry
-    carries ``label``/``count``/``geometry``). Returns
+    carries ``label``/``count``/``geometry``); ``label`` selects which sample
+    stream to grade (``fp`` = the in-window candidate, ``near`` = the
+    window-independent near-field candidate of ADR-0490). Returns
     ``{"sampled", "volumetric", "best", "geometry", "last"}`` where ``best`` is
     the largest-count *volumetric* sample when any interval sampled one, else the
     last sample (so a plain run still reports its most recent observation). The
     graded shape question is "did the window ever hold a 3-D mesh", so it must not
     be decided by the arbitrary last interval of the run.
     """
-    fps = [s for s in (samples or []) if s.get("label") == "fp"]
+    fps = [s for s in (samples or []) if s.get("label") == label]
     vols = [s for s in fps if (s.get("geometry") or {}).get("volumetric")]
     pick = max(vols, key=lambda s: s.get("count") or 0) if vols else (fps[-1] if fps else None)
     return {
@@ -1364,6 +1402,27 @@ def viewmodel_candidate_best(samples):
         "geometry": (pick or {}).get("geometry"),
         "last": fps[-1] if fps else None,
     }
+
+
+# GH #67 step 1 (eighth correction, ADR-0490): the near-field bound the hook uses
+# for the window-independent candidate. Mirrored here so the harness can re-check
+# the logged bounds (a hook whose threshold disagreed would be visible, not
+# silently trusted). Measured separation on the 2009 target: near-field meshes at
+# ~±0.45, the view-space world/overlay draws at |x| ~ 1.6e3..3.5e3.
+VIEWMODEL_NEAR_FIELD_MAX_ABS = 16.0
+
+
+def viewmodel_sample_is_near_field(sample, max_abs=VIEWMODEL_NEAR_FIELD_MAX_ABS):
+    """Pure. True when a *valid* sample's logged bounds lie entirely inside
+    ``±max_abs`` on every axis -- the same predicate the hook applies to pick the
+    window-independent candidate (ADR-0490)."""
+    if not sample or not sample.get("valid"):
+        return False
+    lo = sample.get("min")
+    hi = sample.get("max")
+    if not lo or not hi or len(lo) < 3 or len(hi) < 3:
+        return False
+    return all(-max_abs <= lo[c] and hi[c] <= max_abs for c in range(3))
 
 
 
@@ -2847,6 +2906,52 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
                        "ok": True, "skip": True,
                        "detail": "no first-person submission sample (ViewmodelObserve=0)"})
 
+    # GH #67 step 1 (eighth correction, ADR-0490): the window *is not* what
+    # isolates the arms -- two live runs measured the same 14688-count volumetric
+    # mesh inside both openers (ADR-0489), so the run also tests a
+    # **window-independent** discriminator: the interval's largest decodable
+    # *near-field* array draw (label `near`, ADR-0490), regardless of the window,
+    # tagged with whether the window happened to be open. The claim under test is
+    # "the viewmodel *is* the near-field draw", so the check passes only when the
+    # near-field candidate covers the intervals in which the window drew the
+    # first-person pass AND is volumetric AND its logged bounds really are
+    # near-field (the harness's own copy of the hook's constant). A pre-#0490 hook
+    # has no `nearSample=` marker and is skipped, never failed.
+    cov = viewmodel_near_field_coverage(probe)
+    near_best = viewmodel_candidate_best(sub.get("samples") or [], "near")
+    if not cov["supported"]:
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_near_field_candidate_identifies_pass",
+                       "ok": True, "skip": True,
+                       "detail": ("no `nearSample=` marker (pre-#0490 hook or "
+                                  "ViewmodelObserve=0)")})
+    else:
+        pick = near_best["best"]
+        geo = near_best["geometry"] or {}
+        near_field = viewmodel_sample_is_near_field(pick)
+        volumetric = bool(geo.get("volumetric"))
+        covers = cov["in_window_intervals"] > 0 and cov["near_intervals"] >= cov["in_window_intervals"]
+        inside = sum(1 for s in (sub.get("samples") or [])
+                     if s.get("label") == "near" and s.get("inside_window") == 1)
+        detail = (f"{cov['near_intervals']}/{cov['in_window_intervals']} in-window interval(s) also "
+                  f"produced a near-field candidate ({cov['intervals']} sampled interval(s); "
+                  f"{inside}/{near_best['sampled']} near sample(s) landed inside the window); "
+                  f"best count={pick.get('count') if pick else None} "
+                  f"extent={geo.get('extent')} ratio={geo.get('thickness_ratio')}")
+        if not covers:
+            detail += (" -- the window drew in more intervals than the window-independent "
+                       "near-field test found a candidate for, so 'the viewmodel is the "
+                       "near-field draw' is NOT supported on this target")
+        if near_best["sampled"] and not volumetric:
+            detail += " -- the largest near-field draw is planar/screen-space"
+        if near_best["sampled"] and not near_field:
+            detail += (f" -- a near sample's logged bounds exceed the near-field bound "
+                       f"(+/-{VIEWMODEL_NEAR_FIELD_MAX_ABS}), so the hook's threshold "
+                       f"disagrees with the harness")
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_near_field_candidate_identifies_pass",
+                       "ok": covers and volumetric and near_field, "detail": detail})
+
     # GH #67 step 1 (sixth correction, ADR-0488): the near-plane extraction the
     # NearPlaneDrop opener depends on. The pass trace read `P?` on every
     # projection load because the classic `m[14]/(m[10]-1)` returns -far on the
@@ -3152,6 +3257,63 @@ def cmd_selftest(require_image_deps=False):
         viewmodel_candidate_best(planar_only)["volumetric"] == 0 and
         viewmodel_candidate_best([])["sampled"] == 0 and
         viewmodel_candidate_best([])["best"] is None)
+
+    # GH #67 step 1 (eighth correction, ADR-0490): the window-independent near-field
+    # candidate. The `near` label is parsed like `fp`/`world` plus its ` inside=`
+    # tag, the near-field predicate mirrors the hook's constant, the best-of-run
+    # selection is per-label (so the `fp` and `near` streams never mix), and the
+    # `nearSample=` marker on the interval line separates a #0490+ hook from a
+    # pre-0490 one (which must SKIP, not fail).
+    near_text = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=1 arrayOut=9 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0 nearSample=1\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.400,-0.400,0.000) "
+        "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+        "indexType=5123 vertexType=5126 valid=1\n"
+        "[INFO] ViewmodelProbe submission near: first=(0.450,-0.400,0.050) "
+        "min=(-0.400,-0.445,0.000) max=(0.450,0.400,0.300) n=24 count=14688 "
+        "indexType=5123 vertexType=5126 valid=1 inside=0\n"
+        "[INFO] ViewmodelProbe submission [#600]: arrayIn=1 arrayOut=9 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0 nearSample=0\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.400,-0.400,0.000) "
+        "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+        "indexType=5123 vertexType=5126 valid=1\n")
+    nprobe = viewmodel_probe_stats(near_text)
+    nsub = nprobe["submission"]
+    nbest = viewmodel_candidate_best(nsub["samples"], "near")
+    fbest = viewmodel_candidate_best(nsub["samples"], "fp")
+    ncov = viewmodel_near_field_coverage(nprobe)
+    results["viewmodel_near_field_sample_is_parsed_and_graded"] = (
+        nsub["near"]["count"] == 14688 and nsub["near"]["inside_window"] == 0 and
+        nbest["sampled"] == 1 and nbest["volumetric"] == 1 and
+        nbest["best"]["count"] == 14688 and nbest["best"]["inside_window"] == 0 and
+        # The two streams are selected independently (fp has two samples here).
+        fbest["sampled"] == 2 and fbest["best"]["count"] == 2520 and
+        viewmodel_sample_is_near_field(nbest["best"]) is True)
+    # A #0490 hook covers the run only when the near-field test found a candidate in
+    # every interval in which the window drew (measured: 3/15 on the live level, so
+    # the claim is NOT supported); a pre-#0490 log has no marker at all.
+    results["viewmodel_near_field_coverage_is_graded"] = (
+        ncov == {"supported": True, "intervals": 2, "in_window_intervals": 2,
+                 "near_intervals": 1} and
+        viewmodel_near_field_coverage(viewmodel_probe_stats(""))["supported"] is False and
+        viewmodel_near_field_coverage(viewmodel_probe_stats(
+            "[INFO] ViewmodelProbe submission [#300]: arrayIn=1 arrayOut=9 listIn=0 "
+            "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0\n")
+        )["supported"] is False)
+
+    # A sample whose logged bounds exceed the near-field bound is rejected by the
+    # predicate (the harness's copy of the hook's constant), so a disagreeing hook
+    # cannot pass the graded check.
+    far = {"min": [-3518.739, -1663.154, 2032.0], "max": [3518.739, 1663.154, 2032.0],
+           "valid": True}
+    results["viewmodel_near_field_bound_is_enforced"] = (
+        viewmodel_sample_is_near_field(far) is False and
+        viewmodel_sample_is_near_field({"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0],
+                                        "valid": False}) is False and
+        viewmodel_sample_is_near_field(None) is False and
+        viewmodel_sample_is_near_field({"min": [-16.0, 0.0, 0.0], "max": [16.0, 16.0, 16.0],
+                                        "valid": True}) is True)
 
     skipped = []
     if not have_image_deps():
