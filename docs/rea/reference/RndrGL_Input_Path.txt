@@ -195,3 +195,36 @@ already land in RndrGL's image.)
   mouse, bit3, bit6, bit7, bit9 are the other window-state flags) gate all of the
   above; a run must therefore also be *active* (the flags are written by the
   window-activation/focus cases of the same procedure).
+
+## 8. The player profile maps scan codes to actions (and in-level posting did not act on them)
+
+The engine binds actions to **scan codes** in the player profile
+(`%APPDATA%\Starbreeze\Riddick\Content\Save\<profile>\_profile`, read-only), as
+plain `*ACTION_<NAME> <scancode>` lines. Measured on the local profile (2026-10-18):
+
+```
+*ACTION_FORWARD 17      (W)   *ACTION_USE 18        (E)   *ACTION_JUMP 57   (Space)
+*ACTION_BACKWARD 31     (S)   *ACTION_CROUCHTOGGLE 46 (C)  *ACTION_LEAN 29  (Ctrl)
+*ACTION_STRAFELEFT 30   (A)   *ACTION_RELOAD 19     (R)   *ACTION_WALK 42   (Shift)
+*ACTION_STRAFERIGHT 32  (D)   *ACTION_CYCLEWEAPON 47 (V)  *ACTION_EYESHINE 16 (Q)
+*ACTION_WEAPON_UNARMED 2 ('1')  *ACTION_WEAPON_SHIV 3 ('2')  *ACTION_WEAPON_CLUB 4 ('3')
+*ACTION_WEAPON_PISTOL 5 ('4')   *ACTION_WEAPON_SHOTGUN 6 ('5') *ACTION_WEAPON_ASSAULT 7 ('6')
+*ACTION_PRIMARYFIRE 240 (mouse)  *ACTION_SECONDARYFIRE 241  *ACTION_PAUSE 1 (Escape)
+```
+
+So a scripted run can post a *weapon select* / *fire* / *move* by packing the
+profile's scan code into the message's `lParam` (the same encoding the confirm
+tap uses, §4). XRSIM does exactly this (`--drive-keys`, ADR-0499).
+
+**But the in-level engine did not act on them** (autoloop wake 98, measured
+read-only, `RIDDICKVR_SIM=1`, current build): after reaching a live level the
+harness posted `WEAPON_PISTOL, PRIMARYFIRE ×2, WEAPON_SHOTGUN, PRIMARYFIRE,
+CYCLEWEAPON, PRIMARYFIRE, FORWARD:2500` — the drive was **delivered** (`posted=16
+windows=1`) yet the captured frames show **no weapon, no HUD/ammo change, no
+locomotion** over the remaining ~55 s; a discriminating `PAUSE` (Escape) post
+produced **no pause menu**. The *same* route walks the front-end
+splash/menu (ADR-0485/ADR-0497) in the same runs. So on this target the posted
+message queue drives the **front-end** but **not** the in-level player
+controller — or the reached checkpoint has no player control. Not distinguished
+here (see ADR-0499).
+

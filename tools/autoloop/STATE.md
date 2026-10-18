@@ -2,6 +2,83 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 98 — 2026-10-18 12:00 (scheduled loop)
+- **Unit:** GH **#67 state question (ADR-0499)** — XRSIM gains a sim-safe
+  **in-level key drive**, posting the *player profile's own scan codes* to the
+  game's window (`--drive-keys`), and measures it live. **Harness-only; no C++,
+  no deploy, no install write.**
+- **Why this unit:** wake 97's explicit Next #1 — the #67 state question needs an
+  **armed/fighting** state, and its two named routes (the engine console,
+  `--game-arg +loadgame`) are measured dead. The missing lever: the engine keys
+  on the message's `lParam` **scan code** (RndrGL `0x10042817`), and the *player
+  profile* maps scan codes to actions, so a run can post weapon-select / fire /
+  move without any hook change.
+- **MEASURED (read-only profile, `%APPDATA%\Starbreeze\Riddick\Content\Save\Gigel\_profile`):**
+  the `*ACTION_<NAME> <scancode>` map — `FORWARD=17`(W), `USE=18`(E),
+  `JUMP=57`, `CROUCHTOGGLE=46`, `RELOAD=19`, `CYCLEWEAPON=47`, `EYESHINE=16`,
+  `WEAPON_UNARMED..ASSAULT=2..7` (keys '1'..'7'), `PRIMARYFIRE=240`,
+  `SECONDARYFIRE=241`, `PAUSE=1` (Escape).
+- **Change:** `tools/xrsim.py` — general `post_key_to_game_windows` (the confirm
+  poster now delegates), `scan_key_message`/`post_scan_to_game_windows`,
+  `parse_action_profile`/`profile_action_path`/`parse_drive_keys`, the pure
+  `KeyScriptDriver` (down → hold → up → gap, thread-free, one edge per poll), and
+  CLI `--drive-keys/--drive-gap-ms/--drive-after/--action-profile`; the drive
+  starts `--drive-after` s **past** the gameplay-reached stop, and the report
+  records `key_drive` (steps, resolved action map, posted, windows, done).
+  `tools/test_xrsim.py` (+2 cases), `xrsim --selftest` (+2 cases),
+  `tools/verify_reported_fixes.py` (new #67/#80 invariant), **NEW
+  `docs/adr/0499-…`**, `docs/rea/reference/RndrGL_Input_Path.txt` §8,
+  `docs/vr-scenarios.md`.
+- **EVIDENCE offline:** `xrsim --selftest` PASS (+`drive_keys_parse_profile`,
+  `drive_keys_driver_orders_edges`), `test_xrsim.py` PASS (+2),
+  `verify_reported_fixes` PASS (new invariant), `scenario_tests.py --check` PASS,
+  `verify_hook_init` PASS, `validate_addresses` PASS, `verify_test_artifacts`
+  PASS, all 12 `tools/test_*.py` exit 0. **No C++ → no `build-all`/CTest**.
+- **EVIDENCE live (2 read-only per-run shadows, `RIDDICKVR_SIM=1`, current build
+  `opengl32.dll` sha256 `a8897b5d5d9b` = repo build, `deployed_hook_matches_build`
+  PASS, `--require-fresh-hook`):**
+  - **Run A** `--reach-gameplay --duration 110 --advance-menu --advance-min-taps 8
+    --drive-keys "WEAPON_PISTOL,PRIMARYFIRE,PRIMARYFIRE,WEAPON_SHOTGUN,
+    PRIMARYFIRE,CYCLEWEAPON,PRIMARYFIRE,FORWARD:2500" --drive-after 10
+    --ini ViewmodelObserve=1`: reached gameplay (35/0 gameplay/cinema,
+    `gameplay_full_bleed_reached` fill 1.00), window foreground, **drive completed
+    `posted=16 windows=1 done=True`** (profile `FORWARD=17 PRIMARYFIRE=240
+    WEAPON_PISTOL=5 WEAPON_SHOTGUN=6 CYCLEWEAPON=47`). Frames: 2700 = front-end
+    **main menu** (cube-stack `Continue/New Game/…`), 6300→33300 = the dark
+    in-level corridor → the drive fired **in-level**. **No weapon, no HUD/ammo
+    change, no locomotion** across the post-drive frames (unchanged for ~55 s).
+  - **Run B** (discriminator) `--drive-keys "PAUSE"` (Escape `PAUSE=1`) in-level:
+    drive completed (`posted=2 windows=1`) and **no pause menu** appeared in any
+    captured frame.
+  - The **same** route *does* advance the front-end (the confirm tap reached the
+    menu in both runs, ADR-0485/ADR-0497), so the negative is **in-level**, not a
+    delivery/focus failure.
+- **Verdict / consequence (honest):** "posting the profile's scan codes drives
+  **in-level** player action" is **not supported** on this target/state. The
+  state question is **not** answered by this route; the next routes are an
+  **engine-side** input injection (ADR-0412's exported `MSystem.dll`
+  `QueueScanKey`/`CInputContextCore::KeyPressed`) or a run state where the player
+  controller reads the queue. Weak (inferential) support for "the in-level
+  controller does not read the message queue": the frames are labelled
+  full-bleed gameplay (no cinema/letterbox). Also unchanged by the drive: the
+  `ViewmodelObserve` census (planar candidate; no in-window immediate geometry).
+- **Blocker / honest limit:** two hypotheses remain and are not distinguished —
+  (a) the in-level player controller does not read the posted message queue
+  (only the front-end does), or (b) the reached checkpoint is a scripted/no-control
+  state. Nothing about the 2004 build; no headset; `PRIMARYFIRE` is a *mouse*
+  binding posted as scan code 240 (moot given the negative).
+- **Install untouched:** runs used read-only per-run shadows under `%TEMP%`; no
+  game/host processes left; live lock released; the drive writes only to the
+  game's message queue.
+- **Next:** (1) if the state question is to be answered, inject the action
+  **engine-side** (ADR-0412 `MSystem.dll` input API) or find a player-control
+  state, then re-run the `ViewmodelObserve=1` probe there; (2) `ViewmodelObserve=0`
+  stays the default; (3) GH #72 content discriminator for the full-bleed menu
+  (the wake-98 frames show the main menu labelled gameplay — a remaining #72
+  hole the cold-start latch cannot separate); (4) `DEFAULT_GAME_DIR`
+  2004-vs-2009 retarget; (5) GH #83/#88.
+
+
 ## Wake 97 — 2026-10-18 11:24 (scheduled loop)
 - **Unit:** GH **#87 (extension)** — XRSIM now treats the **second** no-measurement
   signature as a non-measurement too: an attempt that stays **live** for

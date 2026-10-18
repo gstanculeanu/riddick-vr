@@ -2201,8 +2201,9 @@ def confirm_key_messages(vk=VK_RETURN, scan=None):
             (WM_KEYUP, vk, key_lparam(scan, False))]
 
 
-def post_confirm_to_game_windows(pid, vk=VK_RETURN):
-    """Post a confirm tap to every visible top-level window owned by ``pid``.
+def post_key_to_game_windows(pid, messages):
+    """Post an ordered list of ``(message, wParam, lParam)`` to every visible
+    top-level window owned by ``pid``.
 
     Returns the number of windows reached (0 when none is found, or off
     Windows). Dependency-free ctypes; guarded so a headless/non-Windows runner
@@ -2245,16 +2246,200 @@ def post_confirm_to_game_windows(pid, vk=VK_RETURN):
     except Exception:
         return 0
 
-    msgs = confirm_key_messages(vk)
     reached = 0
     for hwnd in hwnds:
         ok = True
-        for msg, wp, lp in msgs:
+        for msg, wp, lp in messages:
             if not user32.PostMessageW(hwnd, msg, wp, lp):
                 ok = False
         if ok:
             reached += 1
     return reached
+
+
+def post_confirm_to_game_windows(pid, vk=VK_RETURN):
+    """Post a confirm tap to every visible top-level window owned by ``pid``."""
+    return post_key_to_game_windows(pid, confirm_key_messages(vk))
+
+
+def scan_key_message(scan, is_down):
+    """The message one *scan-code* key edge posts.
+
+    The engine's window proc resolves a key from the **message's own scan code**
+    (``lParam >> 16 & 0x1ff``; ``RndrGL.dll`` ``0x10042817``), not from
+    ``wParam`` -- so ``wParam`` carries no virtual key here; the scan code is the
+    whole key. See ``docs/rea/reference/RndrGL_Input_Path.txt``.
+    """
+    return (WM_KEYDOWN if is_down else WM_KEYUP, 0, key_lparam(scan, is_down))
+
+
+def post_scan_to_game_windows(pid, scan, is_down):
+    """Post one scan-code key edge (down/up) to the game's own top-level windows.
+
+    Same targeted window messaging as the confirm tap (never desktop input), so
+    it stays inside the #68 simulator exception.
+    """
+    return post_key_to_game_windows(pid, [scan_key_message(scan, is_down)])
+
+
+# --------------------------------------------- in-level key drive (GH #67/#80)
+# The engine's window proc takes the scan code from the message's lParam (see
+# docs/rea/reference/RndrGL_Input_Path.txt), and the *player profile* maps scan
+# codes to actions, e.g.
+#   %APPDATA%\Starbreeze\Riddick\Content\Save\<profile>\_profile
+#     *ACTION_FORWARD 17        *ACTION_USE 18        *ACTION_JUMP 57
+#     *ACTION_WEAPON_SHIV 3     *ACTION_WEAPON_CLUB 4 *ACTION_WEAPON_PISTOL 5
+#     *ACTION_CYCLEWEAPON 47    *ACTION_PRIMARYFIRE 240 (mouse)
+# So a scripted run can select a weapon / fire / move by posting the profile's
+# own scan codes to the game window -- still targeted window messaging (never
+# desktop input), so it stays inside the #68 simulator exception. This is the
+# input route the #67 state question needs: reach an ARMED/FIGHTING state, the
+# one in which the engine is known to draw its first-person arms, so the
+# existing ViewmodelObserve probe can observe them.
+DEFAULT_DRIVE_HOLD_MS = 120
+DEFAULT_DRIVE_GAP_MS = 250
+PROFILE_ACTION_PREFIX = "*ACTION_"
+
+
+def parse_action_profile(text):
+    """Parse a profile's ``*ACTION_<NAME> <scancode>`` lines.
+
+    Returns ``{NAME: scancode}`` with upper-cased names (``FORWARD``,
+    ``PRIMARYFIRE``, ``WEAPON_SHIV``, ...). Unparsable lines are skipped so a
+    profile change cannot crash the runner.
+    """
+    actions = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith(PROFILE_ACTION_PREFIX):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0][len(PROFILE_ACTION_PREFIX):].upper()
+        try:
+            scan = int(parts[1], 0)
+        except ValueError:
+            continue
+        if name and 0 <= scan <= 0x1FF:
+            actions[name] = scan
+    return actions
+
+
+def profile_action_path(explicit=None):
+    """The player profile that maps actions to scan codes.
+
+    ``explicit`` (``--action-profile``) wins; otherwise the first ``_profile``
+    under ``%APPDATA%\\Starbreeze\\Riddick\\Content\\Save`` is used. Returns
+    ``None`` when none exists (the drive then accepts raw scan codes only).
+    """
+    if explicit:
+        return Path(explicit)
+    base = (Path(os.environ.get("APPDATA", "")) / "Starbreeze" / "Riddick"
+            / "Content" / "Save")
+    try:
+        candidates = sorted(base.glob("*/_profile"))
+    except OSError:
+        candidates = []
+    return candidates[0] if candidates else None
+
+
+def parse_drive_keys(spec, actions=None):
+    """Parse a ``--drive-keys`` spec into ordered ``(scan, hold_ms)`` steps.
+
+    Comma-separated; each step is ``SCAN`` or ``SCAN:HOLD_MS`` or an action name
+    (``FORWARD``, ``PRIMARYFIRE``, ``WEAPON_SHIV``) resolved through ``actions``
+    (``parse_action_profile``). Raises ``ValueError`` on an unparsable step so a
+    typo fails loudly instead of posting the wrong key.
+    """
+    steps = []
+    for raw in str(spec or "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        name, _, hold_s = item.partition(":")
+        name = name.strip()
+        held = hold_s.strip()
+        try:
+            scan = int(name, 0)
+        except ValueError:
+            key = name.upper()
+            if not actions or key not in actions:
+                raise ValueError(f"unknown key {name!r} (not a scan code and not "
+                                 f"in the action profile)")
+            scan = actions[key]
+        if not (0 <= scan <= 0x1FF):
+            raise ValueError(f"scan code {scan} out of range (0..0x1FF)")
+        hold = DEFAULT_DRIVE_HOLD_MS
+        if held:
+            try:
+                hold = int(held, 0)
+            except ValueError:
+                raise ValueError(f"bad hold milliseconds {held!r} in {item!r}")
+            if hold < 0:
+                raise ValueError(f"negative hold milliseconds in {item!r}")
+        steps.append((scan, hold))
+    return steps
+
+
+class KeyScriptDriver:
+    """Post an ordered scan-code script to the game once gameplay is reached.
+
+    Pure scheduling: an injected ``poster(scan, is_down) -> windows`` callable
+    and clock make the down/hold/up/gap sequence unit-testable without a
+    Windows handle. There is no thread -- the orchestration loop drives
+    ``poll``; at most one key edge fires per ``poll``. Each step posts its
+    key-down, holds for ``hold_ms``, then posts its key-up; steps are separated
+    by ``gap_s``.
+    """
+
+    def __init__(self, poster, steps, gap_s=DEFAULT_DRIVE_GAP_MS / 1000.0,
+                 clock=time.monotonic, start=None):
+        self._poster = poster
+        self._steps = [(int(s), int(h)) for s, h in steps]
+        self.gap_s = max(0.0, float(gap_s))
+        self._clock = clock
+        self.posted = 0
+        self.windows = 0
+        self._i = 0
+        self._down = True
+        self._next = (self._clock() if start is None else start)
+
+    @property
+    def done(self):
+        return self._i >= len(self._steps)
+
+    @property
+    def steps(self):
+        return list(self._steps)
+
+    def _post(self, scan, is_down):
+        try:
+            reached = int(self._poster(scan, is_down) or 0)
+        except (TypeError, ValueError):
+            reached = 0
+        self.posted += 1
+        if reached > self.windows:
+            self.windows = reached
+
+    def poll(self, now=None):
+        """Fire one key edge when due. Returns 1 if a message was posted."""
+        if self.done:
+            return 0
+        now = self._clock() if now is None else now
+        if now < self._next:
+            return 0
+        scan, hold_ms = self._steps[self._i]
+        if self._down:
+            self._post(scan, True)
+            self._down = False
+            self._next = now + hold_ms / 1000.0
+        else:
+            self._post(scan, False)
+            self._i += 1
+            self._down = True
+            self._next = now + self.gap_s
+        return 1
 
 
 # ------------------------------------------------- game-window activation (GH #80)
@@ -2771,6 +2956,49 @@ def _run_attempt(args, artifacts: Path, attempt: int):
               f"to pid {game.pid} (GH #71; stop after >= "
               f"{menu_stats['min_taps']} tap(s))")
 
+    # GH #67/#80: drive the engine in-level with the profile's own scan codes once
+    # gameplay is reached (weapon select / fire / move) so a run can reach the
+    # armed/fighting state in which the engine draws its first-person arms, and
+    # the existing ViewmodelObserve probe can observe them.
+    drive_stats = {"enabled": False, "spec": None, "actions": {}, "steps": [],
+                   "posted": 0, "windows": 0, "done": False, "started": False,
+                   "profile": None}
+    driver = None
+    drive_start_after = float(getattr(args, "drive_after", None) or 12.0)
+    # With an advancer we only know the level is loading once the gameplay stop
+    # fires, so the drive waits *past* that; without one it waits from the start.
+    drive_ready_at = float("inf") if getattr(args, "advance_menu", False) \
+        else drive_start_after
+    drive_spec = getattr(args, "drive_keys", None)
+    if drive_spec:
+        prof = profile_action_path(getattr(args, "action_profile", None))
+        actions = {}
+        if prof is not None and Path(prof).exists():
+            try:
+                actions = parse_action_profile(
+                    Path(prof).read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                actions = {}
+        drive_stats["profile"] = str(prof) if prof else None
+        drive_stats["actions"] = actions
+        try:
+            steps = parse_drive_keys(drive_spec, actions)
+        except ValueError as exc:
+            print(f"[xrsim] key drive: ignoring --drive-keys {drive_spec!r}: {exc}")
+            steps = []
+        if steps:
+            drive_stats.update(enabled=True, spec=str(drive_spec),
+                               steps=[[s, h] for s, h in steps])
+            gap_ms = float(getattr(args, "drive_gap_ms", DEFAULT_DRIVE_GAP_MS)
+                           or 0)
+            driver = KeyScriptDriver(
+                lambda scan, down: post_scan_to_game_windows(game.pid, scan, down),
+                steps, gap_s=gap_ms / 1000.0)
+            print(f"[xrsim] key drive: {len(steps)} step(s) "
+                  f"{[f'{s}:{h}ms' for s, h in steps]} "
+                  f"profile={Path(prof).name if prof else '<none>'} (GH #67; "
+                  f"scan codes from the action profile, targeted messaging)")
+
     # GH #80 wake-96: the engine resolves its input procs but does not poll them
     # until its own window is active. Activate it (window management only) and
     # let the OS say whether that succeeded; the result is measured, not assumed.
@@ -2817,8 +3045,25 @@ def _run_attempt(args, artifacts: Path, attempt: int):
                                      advancer.taps, menu_stats["min_taps"]):
                 advancer.stop()
                 menu_stats["reached"] = True
+                drive_ready_at = min(drive_ready_at, elapsed + drive_start_after)
                 print(f"[xrsim] menu advance: stopped after {advancer.taps} tap(s) "
                       "-- gameplay branch reached")
+        # GH #67/#80: once in-level, drive the engine so it reaches an armed /
+        # fighting state. With an advancer, wait --drive-after seconds past the
+        # gameplay-reached stop (the level keeps loading after the last confirm);
+        # without one, start after --drive-after seconds so a mis-set run does
+        # not fire action keys into the splash/menu.
+        if driver is not None and not drive_stats["done"] and elapsed >= drive_ready_at:
+            drive_stats["started"] = True
+            if driver.poll():
+                drive_stats["posted"] = driver.posted
+                drive_stats["windows"] = max(drive_stats["windows"],
+                                             driver.windows)
+                drive_stats["done"] = driver.done
+                if driver.done:
+                    print(f"[xrsim] key drive: script complete "
+                          f"({driver.posted} messages to "
+                          f"{driver.windows} window(s))")
         line = host.stdout.readline()
         if line:
             host_log.append(line.rstrip())
@@ -2845,6 +3090,15 @@ def _run_attempt(args, artifacts: Path, attempt: int):
         reach = "reached" if menu_stats["reached"] else "not reached"
         print(f"[xrsim] menu advance summary: taps={advancer.taps} "
               f"windows_reached={advancer.windows} gameplay {reach}")
+
+    if driver is not None:
+        drive_stats["posted"] = driver.posted
+        drive_stats["windows"] = max(drive_stats["windows"], driver.windows)
+        drive_stats["done"] = driver.done
+        state = "started" if drive_stats["started"] else "not started"
+        print(f"[xrsim] key drive summary: {state} posted={drive_stats['posted']} "
+              f"windows={drive_stats['windows']} done={drive_stats['done']}")
+    args.drive_stats = drive_stats
 
     if not window_stats["foreground"]:
         print("[xrsim] game window NOT foreground: hwnd={hwnd} found={found} "
@@ -3754,6 +4008,34 @@ def cmd_selftest(require_image_deps=False):
         viewmodel_immediate_census(viewmodel_probe_stats(""))["ran"] is False and
         viewmodel_immediate_census(viewmodel_probe_stats(""))["vertex3_inside"] == 0)
 
+    # GH #67: the in-level key drive is a pure schedule over the profile's own
+    # scan codes -- the parser resolves action names, and the driver posts each
+    # step's key-down then its key-up (ordered, bounded, one edge per poll).
+    profile_text = ("*ACTION_FORWARD 17\n*ACTION_USE 18\n"
+                    "*ACTION_WEAPON_SHIV 3\n*ACTION_PRIMARYFIRE 240\n"
+                    "*ACTION_JUMP 57\n")
+    acts = parse_action_profile(profile_text)
+    keys = parse_drive_keys("WEAPON_SHIV,PRIMARYFIRE:80,17:1500", acts)
+    results["drive_keys_parse_profile"] = (
+        acts.get("FORWARD") == 17 and acts.get("PRIMARYFIRE") == 240 and
+        acts.get("WEAPON_SHIV") == 3 and
+        keys == [(3, DEFAULT_DRIVE_HOLD_MS), (240, 80), (17, 1500)])
+    posted = []
+    drv = KeyScriptDriver(lambda scan, down: posted.append((scan, down)) or 1,
+                          keys, gap_s=0.0, start=0.0)
+    t = 0.0
+    for _ in range(200):
+        drv.poll(now=t)
+        if drv.done:
+            break
+        t += 0.05
+    results["drive_keys_driver_orders_edges"] = (
+        drv.done and
+        posted == [(3, True), (3, False), (240, True), (240, False),
+                   (17, True), (17, False)] and drv.windows == 1 and
+        parse_drive_keys("", acts) == [] and
+        scan_key_message(240, True) == (WM_KEYDOWN, 0, key_lparam(240, True)))
+
     skipped = []
     if not have_image_deps():
         skipped = ["shifted_pair_passes", "identical_pair_fails",
@@ -3899,6 +4181,23 @@ def main(argv=None):
                          "transition already emits a cinema->full-bleed pair, so a "
                          "bare branch check stops the advance before it is attempted; "
                          "default 8, 0 restores the pre-wake-85 branch-only stop)")
+    ap.add_argument("--drive-keys", default=None, metavar="SPEC",
+                    help="GH #67: once gameplay is reached, post this scan-code "
+                         "script to the game window (targeted messaging, never "
+                         "desktop input) to reach an armed/fighting state. "
+                         "Comma-separated steps, each SCAN or SCAN:HOLD_MS or an "
+                         "action name from the player profile (FORWARD, "
+                         "PRIMARYFIRE, WEAPON_SHIV, ...). Example: "
+                         "\"WEAPON_PISTOL,PRIMARYFIRE,PRIMARYFIRE,FORWARD:2000\"")
+    ap.add_argument("--drive-gap-ms", type=int, default=DEFAULT_DRIVE_GAP_MS,
+                    help=f"gap between --drive-keys steps (default {DEFAULT_DRIVE_GAP_MS})")
+    ap.add_argument("--drive-after", type=float, default=12.0,
+                    help="seconds before --drive-keys starts when there is no "
+                         "--advance-menu to gate on (default 12)")
+    ap.add_argument("--action-profile", default=None, metavar="PATH",
+                    help="player profile that maps actions to scan codes "
+                         "(default: the first _profile under the Starbreeze "
+                         "Riddick Content Save folder in AppData)")
     ap.add_argument("--artifacts", help="capture directory (default tests/xrsim/artifacts)")
     ap.add_argument("--report-file", help="report path (default tests/xrsim/report.json)")
     ap.add_argument("--hook-log", help="hook log to scan for markers (default: game log)")
@@ -4082,6 +4381,7 @@ def main(argv=None):
                         "comfort_vignette": parse_comfort(host_log),
                         "menu_advance": menu_stats,
                         "window_activation": window_stats,
+                        "key_drive": getattr(args, "drive_stats", None),
                         "game_args": list(getattr(args, "game_arg", None) or []),
                         "sim_confirm": sim_confirm_env(
                             getattr(args, "sim_confirm", None),

@@ -562,6 +562,23 @@ broken". A launch with evidence — including a short host-bounded `--frames` ru
 where the game is still alive — is never retried. `--evaluate-only` has no launch
 record and grades exactly as before.
 
+**In-level key drive (GH #67, ADR-0499):** the engine binds actions to **scan
+codes** in the player profile
+(`%APPDATA%\Starbreeze\Riddick\Content\Save\<profile>\_profile`,
+`*ACTION_FORWARD 17`, `*ACTION_PRIMARYFIRE 240`, `*ACTION_WEAPON_SHIV 3`, …), and
+`RndrGL.dll`'s window proc takes the scan code from the message's `lParam` — so
+XRSIM can post a weapon-select / fire / move script to the game's own window with
+`--drive-keys "WEAPON_PISTOL,PRIMARYFIRE,FORWARD:2000"` (opt-in; targeted
+messaging, never desktop input). **Measured (wake 98): the drive is delivered
+(`posted=16 windows=1`) but the in-level engine did not act on it** — no weapon,
+no HUD/ammo change, no locomotion over the rest of the run, and a discriminating
+`PAUSE` (Escape) post produced no pause menu — while the *same* route still walks
+the front-end splash/menu (ADR-0485/ADR-0497). So "posting the profile's scan
+codes drives in-level player action" is **not supported** on this target; the
+route to an armed state moves to an engine-side input injection (ADR-0412's
+`MSystem.dll` `QueueScanKey`/`CInputContextCore`) or a player-control state. See
+`docs/adr/0499-…` and `docs/rea/reference/RndrGL_Input_Path.txt` §8.
+
 **Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
 `tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and
 stay untracked — `.gitignore` excludes the directory and only the small,

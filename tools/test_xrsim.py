@@ -2400,6 +2400,61 @@ def test_ini_overrides_reach_the_shadow_and_the_report(td):
     assert manifest["ini_overrides"] == {"ViewmodelObserve": "1"}
 
 
+def test_drive_keys_parse_and_resolve_the_action_profile(td):
+    """GH #67: a run can drive the engine in-level by posting the *player
+    profile's* own scan codes (the window proc keys on the message's lParam scan
+    code). The spec accepts raw scan codes, a hold, or an action name resolved
+    through the profile -- and a typo fails loudly instead of posting a key."""
+    import xrsim
+    text = ("*SND_VOLUMESFX 1.000000\n*ACTION_FORWARD 17\n*ACTION_USE 18\n"
+            "*ACTION_WEAPON_SHIV 3\n*ACTION_WEAPON_PISTOL 5\n"
+            "*ACTION_PRIMARYFIRE 240\n*ACTION_JUMP 57\n")
+    acts = xrsim.parse_action_profile(text)
+    assert acts == {"FORWARD": 17, "USE": 18, "WEAPON_SHIV": 3,
+                    "WEAPON_PISTOL": 5, "PRIMARYFIRE": 240, "JUMP": 57}
+    assert xrsim.parse_drive_keys("WEAPON_PISTOL,PRIMARYFIRE:80,17:1500", acts) == [
+        (5, xrsim.DEFAULT_DRIVE_HOLD_MS), (240, 80), (17, 1500)]
+    assert xrsim.parse_drive_keys("", acts) == []
+    assert xrsim.parse_drive_keys("7:0", acts) == [(7, 0)]
+    # the encoding is the scan code in lParam's bits 16-23, not wParam
+    assert xrsim.scan_key_message(240, True) == (
+        xrsim.WM_KEYDOWN, 0, xrsim.key_lparam(240, True))
+    assert xrsim.scan_key_message(240, False) == (
+        xrsim.WM_KEYUP, 0, xrsim.key_lparam(240, False))
+    for bad in ("NOSUCHACTION", "FORWARD:abc", "FORWARD:-1", "9999"):
+        try:
+            xrsim.parse_drive_keys(bad, acts)
+        except ValueError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"{bad!r} should have raised")
+
+
+def test_key_drive_orders_down_hold_up_gap_without_a_thread(td):
+    """GH #67: the in-level drive posts each step's key-down, holds for its hold,
+    then posts the key-up, with a gap between steps -- one edge per ``poll``, so
+    the orchestration loop (not a thread) delivers the whole script in order."""
+    import xrsim
+    posted = []
+    drv = xrsim.KeyScriptDriver(
+        lambda scan, down: (posted.append((scan, down)), 1)[1],
+        [(3, 120), (240, 80), (17, 1000)], gap_s=0.25, start=0.0)
+    assert not drv.done
+    t = 0.0
+    for _ in range(200):
+        drv.poll(now=t)
+        if drv.done:
+            break
+        t += 0.05
+    assert drv.done, "script did not finish"
+    assert posted == [(3, True), (3, False), (240, True), (240, False),
+                      (17, True), (17, False)]
+    assert drv.posted == 6 and drv.windows == 1
+    # nothing fires before it is due, and a finished script stays finished
+    assert xrsim.KeyScriptDriver(lambda s, d: 1, [(3, 10)], start=0.0).poll(now=0.0)
+    assert drv.poll(now=999.0) == 0
+
+
 def test_game_window_target_is_largest_visible_of_the_pid(td):
     """GH #80 wake 96: the harness activates the engine's render window before
     it can poll the bridged input. The target is the largest *visible* top-level
@@ -2530,6 +2585,8 @@ def main() -> int:
              test_launch_reliability_flags_parse,
              test_ini_flag_parses_and_refuses_without_a_shadow,
              test_ini_overrides_reach_the_shadow_and_the_report,
+             test_drive_keys_parse_and_resolve_the_action_profile,
+             test_key_drive_orders_down_hold_up_gap_without_a_thread,
              test_game_window_target_is_largest_visible_of_the_pid,
              test_viewmodel_probe_program_lines_are_parsed,
              test_viewmodel_probe_submission_lines_are_parsed,

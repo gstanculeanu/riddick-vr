@@ -1359,6 +1359,34 @@ def main():
             "attached -- must be retried once and, if it repeats, reported as one "
             "distinct game_started failure rather than as broken captures")
 
+    # GH #67 (+ #80) state question, wake 98: step 1 has no engine-side route left
+    # (ADR-0496), so the only way to learn whether the engine draws its
+    # first-person arms is to observe it in the state where it does -- armed /
+    # fighting. The engine's window proc keys on the message's lParam scan code
+    # and the *player profile* maps scan codes to actions (`*ACTION_FORWARD 17`,
+    # `*ACTION_PRIMARYFIRE 240`, `*ACTION_WEAPON_SHIV 3`, ...), so XRSIM carries a
+    # sim-safe in-level key drive: post the profile's own scan codes to the game's
+    # own window once gameplay is reached. Pure parser + schedule, opt-in, outcome
+    # recorded in the report as `key_drive`.
+    require("class KeyScriptDriver" in xrsim_tool and
+            "def parse_drive_keys" in xrsim_tool and
+            "def parse_action_profile" in xrsim_tool and
+            "def profile_action_path" in xrsim_tool and
+            "def scan_key_message" in xrsim_tool and
+            "def post_scan_to_game_windows" in xrsim_tool and
+            "def post_key_to_game_windows" in xrsim_tool and
+            "PROFILE_ACTION_PREFIX = \"*ACTION_\"" in xrsim_tool and
+            '"--drive-keys"' in xrsim_tool and
+            '"--action-profile"' in xrsim_tool and
+            '"key_drive": getattr(args, "drive_stats", None)' in xrsim_tool and
+            "test_drive_keys_parse_and_resolve_the_action_profile" in _xrsim_tests and
+            "test_key_drive_orders_down_hold_up_gap_without_a_thread" in _xrsim_tests and
+            "drive_keys_parse_profile" in xrsim_tool and
+            (ROOT / "docs/adr/0499-xrsim-drives-the-engine-in-level-with-profile-scan-codes.md").exists(),
+            "GH #67/#80: XRSIM must be able to drive the engine in-level with the "
+            "profile's own scan codes (weapon select / fire / move) so a scripted "
+            "run can reach the armed/fighting state the #67 state question needs")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
           "#62, #64-68, #69, #71-73, #75-81, #83, #85, #86, #87)")
     return 0
