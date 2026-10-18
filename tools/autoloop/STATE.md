@@ -2,6 +2,88 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 85 — 2026-10-18 06:00 (scheduled loop)
+- **Unit:** GH **#71 requirement 1 (train 2)** — the `--advance-menu` loop's stop
+  signal was satisfied by the engine's **own startup transition**, so the confirm
+  taps were cut short (3 taps this wake vs 6 in wake 84) and the run never left the
+  start card; with the tap floor the **default run reaches the live level**, and
+  the **GH #67 step-3 datum** was finally taken *on a real scene*. Harness-only
+  (`tools/xrsim.py` + `tools/test_xrsim.py` + `--selftest` case +
+  `tools/verify_reported_fixes.py` #71 invariant + `docs/vr-scenarios.md` +
+  ADR-0486); **no C++ change, no build, no deploy, no install write**.
+- **Why this unit:** it is the explicit "Next" of wake 84 ("take the #67 step-3
+  datum on a real scene") and the top player-visible item (#67); the first attempt
+  exposed the blocker.
+- **DECISIVE root cause (measured, live, read-only shadow):** the first attempt of
+  this wake (`--advance-menu`, default stop) reported
+  `menu_advance={taps:3, windows:1, reached:true}` and **all 51 dumped frames were
+  the start card** (`PRESS ENTER`, mean luma `86 ↔ 100`, byte-identical `fp`
+  sample to wakes 82/83). The hook log shows why: the engine emits its **own**
+  `DisplayMode: CINEMA` → `3D Gameplay projection intercepted` → `DisplayMode:
+  FULL-BLEED` pair at **`Frame 1`** (before any tap), so
+  `gameplay_reached_from_sequence` is satisfied by the startup page and the loop
+  stops the taps as soon as the (buffered) log is readable — a race, not a
+  gameplay measurement (that is why wake 84 got 6 and this run 3).
+- **Change (pure + CLI):** `ADVANCE_STOP_MIN_TAPS = 8` and
+  `advance_stop_decision(branch_seq, taps, min_taps) = taps >= min_taps and
+  gameplay_reached_from_sequence(branch_seq)`; `--advance-min-taps N` (default 8,
+  `0` = the pre-wake-85 branch-only stop); the report's `menu_advance` gains
+  `min_taps`. 8 > the 5-6 taps wake 84 measured as the point the card is left.
+- **EVIDENCE (live, `RIDDICKVR_SIM=1`, read-only per-run shadow,
+  `--require-fresh-hook`, NO deploy, hook `sha256=e82a2dee526e` 495616 B = the
+  repo build, `deployed_hook_matches_build` PASS, `ini[ViewmodelObserve=1
+  ViewmodelTrace=1]`):**
+  | run | default vs floor | taps | `menu_advance` | page of 51 dumps |
+  |---|---|---|---|---|
+  | pre-85 | branch-only stop | 3 | reached=true | **start card** the whole run (mean 86↔100) |
+  | wake-85 | `--advance-min-taps 8` | 8 | taps=8 min_taps=8 reached=true | card (2400-3000) → transition (3300-3600) → **dark level** (3900-15600) |
+  Per-frame mean luma of the second run: 85.7/86.5/84.8 (card), 47.7/41.6
+  (transition), then **8-10 for the remaining 47 frames**; frame 15600 shows
+  interior geometry + a lit hatch + HUD blocks (the wake-84 "live scene, not a
+  plate" page).
+- **GH #67 STEP-3 DATUM (on a real scene — the point of the unit):** the `fp`
+  submission (largest decodable in-window array draw) is now
+  **scene-dependent** — card `first=(0.400,-0.400,0.000) min=(-0.450,-0.450,-0.050)
+  max=(0.450,0.450,0.000) read=24 count=2520` (extent `[0.9,0.9,0.05]`) vs level
+  `first=(107.750,52.430,6.250) min=(107.750,39.930,6.250) max=(120.250,52.430,6.250)
+  read=12 count=12` (extent `[12.5,12.5,0.0]`) — but on the live scene the window's
+  largest in-window draw is **still planar** (`thickness_ratio=0.0`, constant
+  `z=6.25`), so the depth-only-clear opener still does **not** isolate the engine's
+  FP viewmodel. `viewmodel_candidate_is_volumetric` **FAIL** (honest: the #67 window
+  is not the arms), `viewmodel_pass_identified` PASS (25 probe lines); the `world`
+  control sample is now `read=0 valid=false`. **XRSIM RESULT: FAIL** → the correct
+  verdict for a run that grades the window as not-the-arms.
+- **Evidence (offline):** `tools/test_xrsim.py` **PASS** (+
+  `test_advance_stop_waits_for_delivered_taps`); `xrsim --selftest` **PASS** (+
+  `advance_stop_requires_delivered_taps`); all **12 `tools/test_*.py` exit 0**;
+  `verify_reported_fixes` (extended #71 invariant: `advance_stop_decision` +
+  `ADVANCE_STOP_MIN_TAPS = 8` + `--advance-min-taps` + the test + ADR-0486),
+  `scenario_tests.py --check`, `verify_test_artifacts`, `verify_hook_init`,
+  `validate_addresses` (PASS) all PASS. **No C++ → no `build-all`/CTest**
+  (documented). Artifacts/reports in `%TEMP%\oc_wake85` (committed `tests/xrsim/*`
+  untouched).
+- **Blocker / honest limit:** the floor (8) is calibrated to this title's startup
+  and the default 2 s interval (wake 84 left the card at tap 5-6); it is a safety
+  margin, not a constant. Extra confirms can be posted after the level loads
+  (bounded by the floor / `--advance-max-taps`); `VK_RETURN` is the engine's own
+  interact key and the harness kills the game at the cap, but the surplus confirm's
+  in-game effect is not measured. The branch signal still cannot tell the card from
+  a level (GH #72 req 2 open); the tap floor bounds the *tap loop*, it does not fix
+  the label. The reached level's *state* is still not established (the run drives
+  no movement).
+- **Next:** (1) **#67 step 1** — the opener must isolate the FP pass: the live-scene
+  `fp` sample is a 12-vertex planar draw at constant `z=6.25`, so classify by
+  submitted geometry (camera-relative/near-field) or drop the depth-only-clear
+  opener that is provably contaminated on the card *and* the level; (2) the
+  deploy-gated ladder is now validatable on a real scene with the default flags
+  (#76 step 1, #79 hook half, #68 req 5); (3) a page-content discriminator so
+  `gameplay_full_bleed_reached` cannot PASS on the card (GH #71 req 2); (4)
+  `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (5) GH #83 manual-session blind spot.
+- **Branch:** committed on **main** (single-writer); install untouched (read-only
+  shadow only: deployed hook stayed `479232 B 12:47`, install ini `7363 B`, install
+  log `7635 B 00:25`), no leftover processes, live lock released. `STATE.log`
+  **appended** (never replaced — GH #88).
+
 ## Wake 84 — 2026-10-18 05:52 (scheduled loop)
 - **Unit:** GH **#71 requirement 1** — the confirm tap the harness posted was
   **malformed** (scan code 0), and with the real scan code the same targeted

@@ -452,6 +452,9 @@ def main():
             "KEY_SCANCODE_FALLBACK" in xrsim_tool and
             "KEY_LPARAM_NO_SCANCODE = 0x100" in xrsim_tool and
             "def gameplay_reached_from_sequence" in xrsim_tool and
+            "def advance_stop_decision" in xrsim_tool and
+            "ADVANCE_STOP_MIN_TAPS = 8" in xrsim_tool and
+            '"--advance-min-taps"' in xrsim_tool and
             '"--advance-menu"' in xrsim_tool and
             "set_defaults(advance_menu=False)" in xrsim_tool and
             '"menu_advance": menu_stats' in xrsim_tool and
@@ -459,7 +462,10 @@ def main():
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
             "test_confirm_scancode_fallback_is_pure" in
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "test_advance_stop_waits_for_delivered_taps" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
             (ROOT / "docs/adr/0485-gh71-confirm-tap-scan-code-and-live-level-reach.md").exists() and
+            (ROOT / "docs/adr/0486-gh71-advance-stop-tap-floor.md").exists() and
             (ROOT / "docs/rea/reference/RndrGL_Input_Path.txt").exists(),
             "GH #71 req 1: XRSIM must carry the sim-safe (opt-in) menu-advance "
             "attempt, pack the confirm key's real scan code (lParam >> 16), and "

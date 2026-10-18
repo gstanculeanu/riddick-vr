@@ -120,6 +120,15 @@ no-tap controls sat on the card for the whole 45-60 s run (ADR-0485). The flag s
 still cannot tell the card from a level (`scene_advanced` and
 `gameplay_full_bleed_reached` pass on both, GH #72).
 
+**Correction (wake 85, ADR-0486):** that ~6th-tap count is *not* a fixed floor the
+engine imposes — it was the point at which the hook-log write buffer happened to
+flush, because the tap loop's stop signal is satisfied by the engine's **own**
+startup transition (`DisplayMode: CINEMA` → `FULL-BLEED` at frame 1). A run can
+therefore stop after as few as 3 taps and stay on the card. The stop now also
+requires `--advance-min-taps` (**default 8**) delivered taps first; with it, the
+default run reaches the live level (card → transition at frame ~3300 → dark level
+from frame ~3900).
+
 **Update (wake 64, ADR-0466 addendum):** the *command-line* route is dead too.
 The engine's console surface is real (`loadgame`/`savegame`/`changemap`/
 `cg_newgame` in `Content/GameClasses_Win32_x86.dll` + `GameWorld_Win32_x86.dll`)

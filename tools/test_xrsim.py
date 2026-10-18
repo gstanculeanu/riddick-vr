@@ -1577,6 +1577,27 @@ def test_gameplay_reached_requires_menu_then_gameplay(td):
     assert not xrsim.gameplay_reached_from_sequence([])
 
 
+def test_advance_stop_waits_for_delivered_taps(td):
+    """GH #71 req 1 (wake 85): the engine's *own* startup transition emits a
+    cinema->full-bleed pair (measured at frame 1), so the branch signal alone
+    reads the card as gameplay and stops the confirm taps before they are
+    attempted (the wake-84 measurement leaves the card at tap 5-6). The stop must
+    therefore wait for at least ADVANCE_STOP_MIN_TAPS delivered taps; 0 restores
+    the pre-wake-85 branch-only stop."""
+    startup = xrsim.display_branch_sequence(
+        "DisplayMode: CINEMA screen (menus/cinematics) (menuCursor=1)\n"
+        "DisplayMode: FULL-BLEED gameplay (3Dfresh=1 menuCursor=0)\n")
+    assert startup == [True, False], startup
+    assert xrsim.gameplay_reached_from_sequence(startup)          # branch alone: yes
+    floor = xrsim.ADVANCE_STOP_MIN_TAPS
+    assert floor >= 6                                             # > wake-84's 5-6
+    assert not xrsim.advance_stop_decision(startup, floor - 1)    # not yet delivered
+    assert xrsim.advance_stop_decision(startup, floor)
+    assert xrsim.advance_stop_decision(startup, floor, 0)         # old behaviour
+    assert not xrsim.advance_stop_decision([False], 99)           # splash only
+    assert not xrsim.advance_stop_decision([], 99)
+
+
 def test_post_confirm_is_a_noop_without_a_pid(td):
     assert xrsim.post_confirm_to_game_windows(0) == 0
 
@@ -2084,6 +2105,7 @@ def main() -> int:
              test_menu_advancer_stop_is_honoured,
              test_menu_advancer_has_no_catchup_burst,
              test_gameplay_reached_requires_menu_then_gameplay,
+             test_advance_stop_waits_for_delivered_taps,
              test_post_confirm_is_a_noop_without_a_pid,
              test_advance_menu_flags_parse,
              test_game_command_passes_tokens_verbatim,

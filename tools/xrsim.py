@@ -82,9 +82,15 @@ The 21 taps of the earlier attempt were posted with ``lParam = 1`` -- scan code
 route stays **off by default** (opt-in, GH #71) until a run measures it; the
 report records it as ``menu_advance`` including the packed ``scan``. The taps
 auto-stop once the hook's ``DisplayMode`` log shows the full-bleed branch *after*
-a cinema/menu branch (the splash is full-bleed-labelled, so the transition --
-not a bare full-bleed -- is the signal). Tune with
-``--advance-interval``/``--advance-max-taps``.
+a cinema/menu branch, **and** at least ``--advance-min-taps`` taps have been
+delivered. **CORRECTED (wake 85):** the branch signal alone cannot bound the
+taps. The engine emits its *own* startup transition as ``CINEMA`` -> ``FULL-BLEED``
+at **frame 1** (measured, card-only run), so a bare branch check reads the
+startup page as gameplay and stops the advance before it has been attempted --
+wake 84 got 6 taps and this run only 3 purely through hook-log write buffering.
+Wake 84 measured the card being left at the **5th-6th** tap, so the default
+floor is 8. Tune with ``--advance-interval``/``--advance-max-taps``/
+``--advance-min-taps`` (0 restores the branch-only stop).
 
 **Raw Input is mouse-only here (so it cannot carry a keyboard confirm):**
 ``RndrGL.dll`` calls ``RegisterRawInputDevices`` once with exactly **one**
@@ -2071,6 +2077,34 @@ def gameplay_reached_from_sequence(branch_seq):
     return False
 
 
+# GH #71 req 1 (wake 85): the branch signal alone cannot bound the confirm taps.
+# MEASURED (wake 85, card-only run): the engine emits its *own* startup transition
+# as `DisplayMode: CINEMA ...` -> `3D Gameplay projection intercepted` ->
+# `DisplayMode: FULL-BLEED ...` at **frame 1**, i.e. a cinema->full-bleed pair is
+# in the log before any confirm has been delivered. So
+# `gameplay_reached_from_sequence` is satisfied by the startup page, and the only
+# reason wake 84 got 6 taps (and this run only 3) is hook-log write buffering --
+# the stop is a race that cuts the advance off before the taps the wake-84
+# measurement shows are needed (the card was left at the ~5th-6th tap, ~11-14 s at
+# the default 2 s interval). Require the taps to have actually been delivered
+# first: `ADVANCE_STOP_MIN_TAPS` (8) is > the 6 wake 84 measured, so the branch
+# stop can never fire before the advance has had its taps.
+ADVANCE_STOP_MIN_TAPS = 8
+
+
+def advance_stop_decision(branch_seq, taps, min_taps=ADVANCE_STOP_MIN_TAPS):
+    """Pure (GH #71 req 1, wake 85): may the confirm taps stop now?
+
+    ``True`` only once at least ``min_taps`` taps have been delivered *and* the
+    hook log shows a full-bleed branch after a cinema one. The tap-count floor
+    exists because the engine's own startup transition already produces that
+    branch pair (measured at frame 1, wake 85), so a bare branch check stops the
+    advance before it has been attempted (wake 84: the card is left at tap 5-6).
+    ``min_taps <= 0`` restores the pre-wake-85 behaviour (branch signal only).
+    """
+    return int(taps) >= int(min_taps) and gameplay_reached_from_sequence(branch_seq)
+
+
 # ------------------------------------------------------------------ orchestration
 # GH #87: a live run can end with DarkAthena.exe exiting within ~2 s -- no hook log
 # (or one that stops during renderer init), the mock host logging
@@ -2279,16 +2313,21 @@ def _run_attempt(args, artifacts: Path, attempt: int):
     # Measured ineffective against this engine (ADR-0466), so opt-in only.
     advancer = None
     menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False,
-                  "vk": VK_RETURN, "scan": vk_to_scancode(VK_RETURN)}
+                  "vk": VK_RETURN, "scan": vk_to_scancode(VK_RETURN),
+                  "min_taps": 0}
     if getattr(args, "advance_menu", False):
         menu_stats["enabled"] = True
+        min_taps = int(getattr(args, "advance_min_taps", ADVANCE_STOP_MIN_TAPS)
+                       or 0)
+        menu_stats["min_taps"] = max(0, min_taps)
         advancer = GameMenuAdvancer(
             lambda: post_confirm_to_game_windows(game.pid),
             interval_s=float(getattr(args, "advance_interval", 2.0) or 2.0),
             max_taps=int(getattr(args, "advance_max_taps", 0) or 0))
         print(f"[xrsim] menu advance: confirm VK=0x{menu_stats['vk']:02X} "
               f"scan=0x{menu_stats['scan']:02X} every {advancer.interval_s:.1f}s "
-              f"to pid {game.pid} (GH #71)")
+              f"to pid {game.pid} (GH #71; stop after >= "
+              f"{menu_stats['min_taps']} tap(s))")
 
     duration = getattr(args, "duration", None)
     host_log = []
@@ -2307,7 +2346,8 @@ def _run_attempt(args, artifacts: Path, attempt: int):
             break
         if advancer is not None and advancer.poll() and not advancer.stopped:
             fresh_now = read_fresh_hook_log(log_file, log_mark)
-            if gameplay_reached_from_sequence(display_branch_sequence(fresh_now)):
+            if advance_stop_decision(display_branch_sequence(fresh_now),
+                                     advancer.taps, menu_stats["min_taps"]):
                 advancer.stop()
                 menu_stats["reached"] = True
                 print(f"[xrsim] menu advance: stopped after {advancer.taps} tap(s) "
@@ -2365,7 +2405,8 @@ def run_sim(args, artifacts: Path):
     attempts = []
     host_log, log_mark = "", 0
     menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False,
-                  "vk": VK_RETURN, "scan": vk_to_scancode(VK_RETURN)}
+                  "vk": VK_RETURN, "scan": vk_to_scancode(VK_RETURN),
+                  "min_taps": 0}
     state, detail = "started", "game still live at run end"
     for i in range(1, max_attempts + 1):
         if i > 1:
@@ -2770,6 +2811,25 @@ def cmd_selftest(require_image_deps=False):
         ((down[2] >> 16) & 0x1FF) != KEY_LPARAM_NO_SCANCODE and
         key_lparam(0, True) == 1)
 
+    # GH #71 req 1 (wake 85): the tap-count floor. The engine emits its own
+    # startup transition as a cinema->full-bleed pair (frame 1, measured), so the
+    # branch signal alone reads the startup page as gameplay and stops the advance
+    # before it is attempted. The stop must wait for at least
+    # ADVANCE_STOP_MIN_TAPS taps -- and that floor must exceed the 5-6 taps wake 84
+    # measured as the point the start card is actually left.
+    startup_pair = display_branch_sequence(
+        "DisplayMode: CINEMA screen (menus/cinematics) (3Dfresh=0 menuCursor=1)\n"
+        "DisplayMode: FULL-BLEED gameplay (3Dfresh=1 menuCursor=0)\n")
+    results["advance_stop_requires_delivered_taps"] = (
+        startup_pair == [True, False] and
+        gameplay_reached_from_sequence(startup_pair) is True and
+        advance_stop_decision(startup_pair, ADVANCE_STOP_MIN_TAPS - 1) is False and
+        advance_stop_decision(startup_pair, ADVANCE_STOP_MIN_TAPS) is True and
+        advance_stop_decision(startup_pair, ADVANCE_STOP_MIN_TAPS, 0) is True and
+        advance_stop_decision([False], 99) is False and
+        advance_stop_decision([], 99) is False and
+        ADVANCE_STOP_MIN_TAPS >= 6)
+
     # GH #67 live tuning: `--ini` sets a hook flag in the *shadow's* riddick_vr.ini
     # (the file the hook resolves beside its module) so a deploy-free run can flip
     # it. The parser is pure and the merge is section/case-aware + idempotent -- the
@@ -2962,6 +3022,12 @@ def main(argv=None):
                          "(default 2.0; only with --advance-menu)")
     ap.add_argument("--advance-max-taps", type=int, default=0,
                     help="stop confirming after N taps (0 = bounded only by the run)")
+    ap.add_argument("--advance-min-taps", type=int, default=ADVANCE_STOP_MIN_TAPS,
+                    help="deliver at least N confirm taps before the gameplay-branch "
+                         "stop may fire (GH #71 req 1: the engine's own startup "
+                         "transition already emits a cinema->full-bleed pair, so a "
+                         "bare branch check stops the advance before it is attempted; "
+                         "default 8, 0 restores the pre-wake-85 branch-only stop)")
     ap.add_argument("--artifacts", help="capture directory (default tests/xrsim/artifacts)")
     ap.add_argument("--report-file", help="report path (default tests/xrsim/report.json)")
     ap.add_argument("--hook-log", help="hook log to scan for markers (default: game log)")
