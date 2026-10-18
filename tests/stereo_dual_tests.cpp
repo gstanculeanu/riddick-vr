@@ -13,11 +13,20 @@
 
 using RiddickVR::DualColourMaskNibble;
 using RiddickVR::DualColourMaskWritesColour;
+using RiddickVR::DualDarkSide;
+using RiddickVR::DualDarkSideName;
 using RiddickVR::DualDrawState;
 using RiddickVR::DualDrawStateWritesNoColour;
+using RiddickVR::DualEyeColourNibble;
+using RiddickVR::DualEyeFrameState;
+using RiddickVR::DualEyeFrameWritesNoColour;
 using RiddickVR::DualFrameUsable;
 using RiddickVR::DualMeanLuminance;
+using RiddickVR::DualModelviewIsIdentity;
+using RiddickVR::DualModelviewTranslation;
 using RiddickVR::DualNonBlackFraction;
+using RiddickVR::ClassifyDualDarkSide;
+using RiddickVR::kDualDarkLumaCeiling;
 using RiddickVR::kDualDrawBufferNone;
 using RiddickVR::DualRejectReasonName;
 using RiddickVR::DualRenderDrawEligible;
@@ -353,6 +362,75 @@ int main() {
         census.Reset();
         Check(census.eligibleColourOn == 0u && census.eligibleColourOff == 0u,
               "Reset clears the colour split");
+    }
+
+    // 13. GH #76/#90 (ADR-0511): "who is dark?". ADR-0510 left the re-issue as the
+    //     remaining cause; the eye-frame reading alone cannot separate an empty
+    //     re-issue from a genuinely dark scene, so the verdict compares the *engine's*
+    //     frame (sampled in the same swap) to the eye frame. Also: the eye
+    //     framebuffer's own state (a GL_NONE draw buffer or an off colour mask would
+    //     discard every re-issued fragment) and the modelview the draw arrived with
+    //     (ADR-0504's identity assumption, which the pass's translate rests on).
+    {
+        // Both dark: the scene is dark, so the fixed coverage floor is the reading at
+        // fault -- not the pass. The luma tie-break counts a dim-but-real engine frame
+        // as an image even under the 14/255 content floor.
+        Check(ClassifyDualDarkSide(0.0f, 0.0f, 0.0f, 0.0f) == DualDarkSide::BothDark,
+              "both frames dark is the calibration case");
+        Check(ClassifyDualDarkSide(0.29f, 10.3f, 0.29f, 10.3f) == DualDarkSide::BothDark,
+              "the measured in-level range (cover~0.29, luma~10) is the calibration case");
+
+        // Engine lit, eye dark: the re-issue produced no image.
+        Check(ClassifyDualDarkSide(1.0f, 120.0f, 0.0f, 0.0f) == DualDarkSide::EyeOnlyDark,
+              "a lit engine frame with a black eye frame is the re-issue case");
+        Check(ClassifyDualDarkSide(0.2f, 30.0f, 0.1f, 2.0f) == DualDarkSide::EyeOnlyDark,
+              "the luma tie-break counts a dim engine frame as an image");
+
+        // The eye frame meeting the gate is lit, whatever the engine frame reads.
+        Check(ClassifyDualDarkSide(0.0f, 0.0f, kDualMinEyeCoverage, 0.0f) == DualDarkSide::EyeLit,
+              "an eye frame at the gate floor is lit");
+        Check(ClassifyDualDarkSide(0.0f, 0.0f, 0.1f, kDualDarkLumaCeiling + 1.0f) ==
+                  DualDarkSide::EyeLit,
+              "an eye frame above the darkness ceiling is lit");
+
+        Check(DualDarkSideName(DualDarkSide::BothDark)[0] == 'b' &&
+                  DualDarkSideName(DualDarkSide::EyeOnlyDark)[0] == 'e' &&
+                  DualDarkSideName(DualDarkSide::Unknown)[0] == 'u',
+              "the dark verdicts have stable short names");
+
+        // The eye framebuffer's own state: the eye-side twin of the engine's no-colour
+        // test -- an unread state is never blamed, GL_NONE and a fully-off mask are.
+        DualEyeFrameState eye;
+        Check(!DualEyeFrameWritesNoColour(eye), "an unread eye state is not blamed");
+        Check(DualEyeColourNibble(eye) == 0xFu, "the eye frame's default mask is 0xF");
+        eye.captured = true;
+        Check(!DualEyeFrameWritesNoColour(eye), "a normal eye state writes colour");
+        eye.drawBuffer = kDualDrawBufferNone;
+        Check(DualEyeFrameWritesNoColour(eye), "a GL_NONE eye draw buffer writes no colour");
+        eye.drawBuffer = 0x8CE0u;  // GL_COLOR_ATTACHMENT0
+        eye.colourWrite[0] = eye.colourWrite[1] = eye.colourWrite[2] = eye.colourWrite[3] = false;
+        Check(DualEyeFrameWritesNoColour(eye) && DualEyeColourNibble(eye) == 0u,
+              "a fully-off eye colour mask writes no colour");
+        eye.colourWrite[2] = true;
+        Check(DualEyeColourNibble(eye) == 0x4u && !DualEyeFrameWritesNoColour(eye),
+              "one live eye channel writes colour");
+
+        // The modelview probe: identity is the ADR-0504 assumption the translate needs.
+        float identity[16];
+        for (int i = 0; i < 16; ++i) identity[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        Check(DualModelviewIsIdentity(identity), "the GL default modelview is identity");
+        float trans[16];
+        for (int i = 0; i < 16; ++i) trans[i] = identity[i];
+        trans[12] = -0.0325f; trans[13] = 0.5f; trans[14] = -3.0f;
+        Check(!DualModelviewIsIdentity(trans),
+              "a translated modelview is not identity (the offset would be in engine space)");
+        float t[3] = {0.0f, 0.0f, 0.0f};
+        DualModelviewTranslation(trans, t);
+        Check(t[0] == -0.0325f && t[1] == 0.5f && t[2] == -3.0f,
+              "the column-major translation is elements 12..14");
+        float zeroed[16] = {0};
+        Check(!DualModelviewIsIdentity(zeroed), "an all-zero matrix is not identity");
+        Check(!DualModelviewIsIdentity(nullptr), "a null matrix is not identity");
     }
 
     if (g_failures == 0) {

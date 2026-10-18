@@ -2,6 +2,103 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 109 - 2026-10-18 17:15 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the eye
+  frames are compared to the ENGINE'S OWN presented frame, the eye FBO's state and the
+  per-eye modelview are probed, and the measurement makes the CALIBRATION (not the
+  re-issue) the blocker for the in-level span (ADR-0511)**, implementing ADR-0510's
+  Next 1 verbatim ("compare the eye frame's content in the same span to the engine's own
+  presented frame ... log the eye FBO's own glColorMask/glDrawBuffer/glViewport/
+  GL_DEPTH_TEST after the pass rebinds it, and the per-eye modelview in force").
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0510's explicit Next 1.
+  ADR-0510 concluded "the re-issue is at fault" from the eye-frame reading alone
+  (`coverL=0.289`, `use=0`), which cannot tell an *empty* re-issue from a *dark scene*;
+  its own Next split the two cases on the engine's frame, which had never been read.
+- **Change (evidence + pure policy; opt-in, gated):**
+  - `stereo_renderer.cpp`: NEW `SampleEngineFrame` (the engine's own presented frame,
+    default read FBO / `GL_BACK`, same 8-row / frame-width estimator as the eye frames,
+    called from the **same coverage tick** so the pair is one swap);
+    `CaptureDualEyeState` (the state a re-issued draw runs under **while the eye FBO is
+    bound**: its draw buffer, viewport, `GL_DEPTH_TEST`, colour mask); a
+    `GL_MODELVIEW_MATRIX` probe before and after `translate(-offset)` on the first eye
+    (`DualGlFns` gains `glGetFloatv`, `kDualModelviewMatrix`); the `DualRender:` line
+    gains `engine=[cover=%.3f luma=%.1f] dark=%s`,
+    `eyeFbo=[cap=%d drawbuf=0x%X vp=%d,%d,%dx%d dt=%d cmask=0x%X]` and
+    `mv=[cap=%d id=%d pre=%.3f,%.3f,%.3f post=%.3f,%.3f,%.3f]`; per-frame reset.
+  - `stereo_dual.h`: `kDualDarkLumaCeiling`, `DualDarkSide` + `DualDarkSideName` +
+    `ClassifyDualDarkSide` (both-dark -> the coverage floor is the fault;
+    engine-lit/eye-dark -> the re-issue produced no image), `DualEyeFrameState` +
+    `DualEyeFrameWritesNoColour` + `DualEyeColourNibble`, `DualModelviewIsIdentity` +
+    `DualModelviewTranslation`.
+  - `tests/stereo_dual_tests.cpp` new section 13; NEW
+    `docs/adr/0511-gh76-engine-frame-control-and-eye-fbo-probe.md`; `docs/adr/README.md`
+    (head -> 0511, curated range -> 0457-0511), `docs/vr-scenarios.md`,
+    `src/hook/README.md`; `verify_reported_fixes.py` new #76/#90/ADR-0511 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 527360 B
+  `9466e77fd51b` + x64 host); CTest **32/32 (x86)** and **30/30 (x64)**;
+  `verify_reported_fixes.py`, `scenario_tests.py --check`, `xrsim --selftest`,
+  `verify_hook_init.py`, `validate_addresses.py`, `verify_test_artifacts.py` PASS; all
+  `tools/test_*.py` exit 0.
+- **EVIDENCE live** (RIDDICKVR_SIM=1, read-only per-run shadow `riddickvr-shadow-14012`,
+  `--shadow-install "F:\The Chronicles of Riddick - Assault on Dark Athena"
+  --reach-gameplay --duration 80 --advance-menu --advance-min-taps 8 --require-fresh-hook
+  --require-parallax --dump-branch any --downscale 4 --ini StereoDualRender=1`;
+  `deployed_hook_matches_build` PASS, hook `9466e77fd51b` = repo build; 80.1 s, 53
+  frames, `gameplay_full_bleed_reached` fill **1.00**): the new tokens are decisive. The
+  **in-level** span (ADR-0510's: `unknown=675 world=58 reject=29 rc=[noarray..] gen=646
+  gbacked=640 cw=[on=549 off=159 calls=18877]`) reads
+  `coverL=0.285 coverR=0.285 luma=[L=10.4 R=10.4] use=0 engine=[cover=0.294 luma=10.6]
+  dark=both-dark eyeFbo=[cap=1 drawbuf=0x8CE0 vp=0,0,1280x605 dt=1 cmask=0x0]
+  mv=[cap=1 id=1 pre=0.000,0.000,0.000 post=0.032,0.000,0.000]`.
+  **DECISIVE:** the engine's **own** presented frame in the in-level span is as dark as
+  the eye frames (20 in-level ticks: engine `cover 0.276..0.300`, `luma 10.3..10.6`; eye
+  `0.267..0.294`, `10.1..10.5`), so `~0.28 / ~10.3` is the **scene**, not an empty eye
+  frame. The eye FBO's own draw buffer is `0x8CE0` (`GL_COLOR_ATTACHMENT0`, not
+  `GL_NONE`) and its viewport is exactly the frame size; the modelview is **identity**
+  with the expected `translate(-offset)` applied. On the bright pre-level spans
+  (`engine=[cover=1.000 luma=107.6] dark=eye-only-dark`, eye black) the log reads
+  `cw=[on=59 off=0]` beside `sstate=[.. cmask=0x0 ..]`.
+- **VERDICT (honest):** ADR-0510's conclusion is **refuted for the in-level span** - it
+  read `coverL=0.289` as "the eye frame is mostly-empty" and named the re-issue, but the
+  control shows the engine's own frame is the same dark reading, so with
+  `kDualMinEyeCoverage=0.5` the pass **cannot pass its own gate on this level even when
+  it produces a faithful frame** -> the **calibration** is a blocker (ADR-0510's Next-1
+  *first* branch, not its second). The re-issue's own state is **not** the fault (correct
+  eye FBO draw buffer/viewport, identity modelview + expected translate). New measured
+  fault: the **ADR-0510 per-draw mask tracker disagrees with the driver's real
+  `GL_COLOR_WRITEMASK`** (`cw=[on=59 off=0]` beside `cmask=0x0`) - `s_colourMaskNibble`
+  is updated only by `Hook_glColorMask`, while the mask is also changed by the hook's own
+  `OpenGLProxy::glColorMask` calls (`stereo_renderer.cpp:2116-2126`) and by any
+  `glPushAttrib`/`glPopAttrib` restore, which the tracker does not observe. Native stereo
+  is **NOT** achieved: `--require-parallax` still FAILs (`stereo_kind=shift-only`,
+  `spread=0`, 0 gameplay-labelled frames - the GH #72 label flake). `StereoDualRender=0`
+  is the default and the pass is inert on its own gate -> **NO REGRESSION**
+  (`gameplay_full_bleed_reached` fill 1.00, `eye_views_scene_faithful` PASS,
+  `both_eyes_non_black`/`same_eye_resolution`/`no_vertical_disparity` PASS).
+- **LIMITS:** the engine-frame sample is the same 8-row/frame-width estimator of the
+  *presented backbuffer*, so the verdict rests on its order of magnitude and mean
+  luminance (both ~0.28/~10.3, matching the eye frames and ADR-0505/0508/0510), not on
+  exact per-tick equality (on ticks with no re-issued draw the eye reading can coincide
+  with the engine's exactly - reported as a pair + verdict token rather than graded); the
+  eye-FBO state is read once per span at the *first* re-issued draw (the span's masked
+  opening), and the eye frame reads black on some in-level ticks and faithful on others
+  (recorded, not yet explained); one live run whose frames are the flaky
+  `cinema`-labelled ones (GH #72); the modelview probe is once per span; the 2004 build
+  is untouched; no headset.
+- **Next:** (1) **recalibrate the gate against the engine frame** - grade each eye
+  relative to the engine's own frame (each eye carries at least a fraction of the engine
+  frame's coverage, plus a low absolute floor so a bright engine frame still refuses a
+  black eye), so a dark level is accepted while an empty re-issue is not; (2) gate on the
+  **queried** mask (`glGetBooleanv(GL_COLOR_WRITEMASK)` at the draw) or reconcile the
+  tracker (observe the hook's own mask writes + attrib restores); (3) re-run
+  `--require-parallax` and require a non-zero per-tile spread; (4) keep
+  `StereoDualRender=0`/`StereoParallaxDibr=0`/`StereoReplayProbe=0` defaults; (5) the
+  player-visible queue GH #63/#64/#61 then the P1 bugs #45/#49/#50/#51/#65; (6)
+  `DEFAULT_GAME_DIR` 2004-vs-2009; (7) GH #83/#88/#89/#74.
+- **OPS:** install untouched (READ-ONLY per-run shadow, removed after the run; no deploy,
+  no install write), no leftover game/host processes, live lock released,
+  `tests/xrsim/report.json` reverted to the committed baseline.
+
 ## Wake 108 - 2026-10-18 17:05 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the
   per-eye pass now CLASSIFIES AT EACH DRAW by the engine's colour-write mask, and the

@@ -528,5 +528,27 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   colour world pass (547) is **not**, so the boundary need not move and the blocker is
   the re-issue (`coverL=0.289`, `use=0`).
 
+- **The eye frames get a control, and the calibration is the measured blocker (ADR-0511,
+  wake 109; GH #76 / GH #90).** ADR-0510's "the re-issue is at fault" came from the
+  eye-frame reading alone, which cannot tell an empty re-issue from a dark scene, so
+  `SampleEngineFrame` samples the **engine's own presented frame** (`GL_BACK`) with the
+  same 8-row estimator in the *same swap*, `CaptureDualEyeState` reads the eye
+  framebuffer's **own** state while it is bound (draw buffer, viewport, depth test,
+  colour mask — the per-framebuffer twin of `CaptureDualDrawState`), and `OnSceneDraw`
+  probes `GL_MODELVIEW_MATRIX` before and after the per-eye translate.
+  `stereo_dual.h::ClassifyDualDarkSide` grades the pair (both-dark → the coverage floor
+  is the fault; engine-lit/eye-dark → the re-issue produced no image);
+  `DualEyeFrameState`/`DualEyeFrameWritesNoColour`/`DualEyeColourNibble` are the eye-side
+  no-colour test and `DualModelviewIsIdentity`/`DualModelviewTranslation` the modelview
+  probe. The `DualRender:` line gains `engine=[cover=… luma=…] dark=…`,
+  `eyeFbo=[cap=… drawbuf=0x… vp=… dt=… cmask=0x…]` and `mv=[cap=… id=… pre=… post=…]`.
+  Measured live (wake 109): the in-level span's **engine frame is as dark as the eye
+  frames** (`engine=[cover=0.294 luma=10.6]` vs `coverL=0.285 luma=[L=10.4 …]`,
+  `dark=both-dark`), the eye FBO's own state is correct (`drawbuf=0x8CE0`, the frame-size
+  viewport) and the modelview is identity with the expected translate — so the fixed
+  `0.5` floor, not an empty re-issue, keeps `use=0`; and the ADR-0510 tracker is measured
+  to disagree with the driver's real `GL_COLOR_WRITEMASK`. Evidence only: no draw
+  decision changes, `StereoDualRender=0` stays the default.
+
 
 

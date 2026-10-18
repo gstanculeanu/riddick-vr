@@ -90,6 +90,16 @@ private:
     // GH #76/#90 (ADR-0509): read the engine's output GL state once per span, at the
     // first eligible draw, so the run can say whether the span can produce colour.
     void CaptureDualDrawState();
+    // GH #76/#90 (ADR-0511): the engine's own presented frame, sampled in the *same
+    // swap* with the same sampler as the eye frames, so a dark engine frame (a dark
+    // scene -> the coverage floor is at fault) is separable from a dark eye frame (the
+    // re-issue produced no image). Returns the non-black fraction; `lumaOut` gets the
+    // mean luminance when non-null. Read-only.
+    float SampleEngineFrame(float* lumaOut = nullptr);
+    // GH #76/#90 (ADR-0511): read the state a re-issued draw runs under *while the eye
+    // FBO is bound* (its draw buffer, viewport, depth test, colour mask), so
+    // "engine lit / eye dark" can be attributed to the eye framebuffer. Read-only.
+    void CaptureDualEyeState();
 
     bool InitD3D11Interop(uint32_t width, uint32_t height);
     void ReleaseD3D11Interop();
@@ -179,6 +189,19 @@ private:
     DualDrawState m_dualState;
     float m_dualMeanL = 0.0f;
     float m_dualMeanR = 0.0f;
+    // GH #76/#90 (ADR-0511): the engine's own frame at the coverage sample, the state
+    // the re-issued draw ran under inside the eye framebuffer, and the modelview probe
+    // -- together they say whether the dark eye frames are "a dark scene" (the fixed
+    // coverage floor) or "the re-issue produced no image" (the eye FBO's own state or a
+    // non-identity modelview). All evidence only.
+    float m_dualEngineCover = 0.0f;
+    float m_dualEngineLuma = 0.0f;
+    DualEyeFrameState m_dualEyeState;
+    bool m_dualMvCaptured = false;
+    bool m_dualMvPostCaptured = false;
+    bool m_dualMvIdentity = false;
+    float m_dualMvPre[3] = {0.0f, 0.0f, 0.0f};
+    float m_dualMvPost[3] = {0.0f, 0.0f, 0.0f};
     bool m_dualOffValid = false;
     float m_dualOff[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
     unsigned m_dualDraws = 0;

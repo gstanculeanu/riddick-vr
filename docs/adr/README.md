@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0510` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0511` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -60,7 +60,16 @@ every ADR names the epic #57 subsystem it advances.
   `cmask=0x0` span ever turns colour back on. The measured in-level span **does** (547 colour-on /
   159 colour-off of 706), so the boundary need not move and the blocker is the
   re-issue; the pass now re-issues 547 per eye, not 706.
-  **Head = `0510`; the next new ADR is `0511`.**
+  ADR-0511 tests that conclusion against a control: it samples the **engine's own
+  presented frame** in the same swap as the eye frames, reads the eye framebuffer's own
+  state (draw buffer / viewport / depth test / colour mask) and probes the modelview at
+  the draw. The in-level engine frame is measured **as dark as** the eye frames
+  (`cover ~0.28`, `luma ~10.3`), so the fixed `0.5` coverage floor — not an empty
+  re-issue — is what keeps `use=0`; the eye FBO's own state and the per-eye modelview
+  (identity + the expected translate) are both correct; and the ADR-0510 tracker is
+  measured to disagree with the driver's real `GL_COLOR_WRITEMASK` (`cw off=0` beside
+  `cmask=0x0`), so the gate must move to the queried mask.
+  **Head = `0511`; the next new ADR is `0512`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

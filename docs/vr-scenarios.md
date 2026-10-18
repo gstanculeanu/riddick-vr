@@ -398,6 +398,27 @@ colour-masked (159 draws) but its colour world pass (547) is not** — so the sp
 does **not** need to move and the remaining blocker is the re-issue (`coverL=0.289`,
 `use=0`, the shipped shifted capture kept).
 
+**ADR-0511 (wake 109; GH #76 / GH #90) puts a control beside the eye frames.** ADR-0510
+named the re-issue from the eye-frame reading alone, which cannot tell an *empty*
+re-issue from a *dark scene*, so the pass now samples the **engine's own presented frame**
+(default read framebuffer / `GL_BACK`) with the same 8-row estimator and in the *same
+swap* as the eye frames (`SampleEngineFrame`), reads the eye framebuffer's **own** state
+while it is bound (draw buffer, viewport, depth test, colour mask —
+`CaptureDualEyeState`), and probes `GL_MODELVIEW_MATRIX` at the draw before and after the
+per-eye translate. The `DualRender:` line gains `engine=[cover=… luma=…] dark=…`,
+`eyeFbo=[cap=… drawbuf=0x… vp=… dt=… cmask=0x…]` and `mv=[cap=… id=… pre=… post=…]`,
+graded by `stereo_dual.h::ClassifyDualDarkSide` (both-dark → the coverage floor is the
+fault; engine-lit/eye-dark → the re-issue produced no image). Measured live (wake 109) the
+in-level span's **engine frame is as dark as the eye frames** (`engine=[cover=0.294
+luma=10.6]` beside `coverL=0.285 luma=[L=10.4 …]`, `dark=both-dark`), the eye FBO's own
+state is correct (`drawbuf=0x8CE0` = `GL_COLOR_ATTACHMENT0`, `vp=0,0,1280x605` = the frame
+size) and the modelview is identity with the expected translate
+(`mv=[cap=1 id=1 pre=0.000,0.000,0.000 post=0.032,0.000,0.000]`) — so the fixed `0.5`
+coverage floor, not an empty re-issue, is what keeps `use=0` on this level; and the
+ADR-0510 per-draw mask tracker is measured to disagree with the driver's real
+`GL_COLOR_WRITEMASK` (`cw=[on=59 off=0]` beside `sstate=[… cmask=0x0 …]`). Evidence only;
+`StereoDualRender=0` stays the default.
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

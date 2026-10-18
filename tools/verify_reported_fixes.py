@@ -1258,6 +1258,31 @@ def main():
             "only draws that can colour an eye frame -- ADR-0509 read the mask once per "
             "span and could not tell a depth-only stage from a mask that turns back on")
 
+    # GH #76 / GH #90 / ADR-0511: ADR-0510 concluded "the re-issue is at fault" from the
+    # eye-frame reading alone, which cannot tell an empty re-issue from a dark scene.
+    # The pass must therefore carry the control -- the engine's own presented frame
+    # sampled in the same swap -- plus the eye FBO's own state (draw buffer / viewport /
+    # depth test / colour mask, read while it is bound) and the per-eye modelview in
+    # force, so the two-frame verdict is measured rather than assumed.
+    require("ClassifyDualDarkSide" in stereo_dual_h and
+            "DualDarkSideName" in stereo_dual_h and
+            "struct DualEyeFrameState" in stereo_dual_h and
+            "DualEyeFrameWritesNoColour" in stereo_dual_h and
+            "DualEyeColourNibble" in stereo_dual_h and
+            "DualModelviewIsIdentity" in stereo_dual_h and
+            "DualModelviewTranslation" in stereo_dual_h and
+            "SampleEngineFrame" in stereo_renderer_cpp and
+            "CaptureDualEyeState" in stereo_renderer_cpp and
+            "kDualModelviewMatrix" in stereo_renderer_cpp and
+            "engine=[cover=%.3f luma=%.1f]" in stereo_renderer_cpp and
+            "eyeFbo=[cap=%d drawbuf=0x%X" in stereo_renderer_cpp and
+            "mv=[cap=%d id=%d pre=%.3f,%.3f,%.3f post=%.3f,%.3f,%.3f]" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0511-gh76-engine-frame-control-and-eye-fbo-probe.md").exists(),
+            "GH #76 / GH #90 / ADR-0511: the per-eye pass must compare the eye frames to "
+            "the engine's own presented frame in the same swap (a dark eye frame alone "
+            "cannot be told from a dark scene) and read the eye FBO's own state plus the "
+            "per-eye modelview -- ADR-0510 named the re-issue on the eye reading alone")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

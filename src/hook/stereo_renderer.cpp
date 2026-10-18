@@ -1142,6 +1142,9 @@ constexpr unsigned kDualScissorBoxQuery = 0x0C10u;
 constexpr unsigned kDualScissorTest     = 0x0C11u;
 constexpr unsigned kDualDepthTest       = 0x0B71u;
 constexpr unsigned kDualBlend           = 0x0BE2u;
+// GH #76/#90 (ADR-0511): the modelview in force at the draw (the identity assumption
+// ADR-0504 measured the pass rests on).
+constexpr unsigned kDualModelviewMatrix = 0x0BA6u;
 
 // A pathologically large frame must not turn the pass into a time sink; the cap
 // only ever *reduces* the work (the gate then falls back if too little was done).
@@ -1164,6 +1167,7 @@ typedef void (WINAPI *DualPixelStore_t)(GLenum, GLint);
 typedef void (WINAPI *DualGetIntegerv_t)(GLenum, GLint*);
 typedef void (WINAPI *DualGetBooleanv_t)(GLenum, GLboolean*);
 typedef GLboolean (WINAPI *DualIsEnabled_t)(GLenum);
+typedef void (WINAPI *DualGetFloatv_t)(GLenum, GLfloat*);
 
 struct DualGlFns {
     DualMatrixMode_t matrixMode = nullptr;
@@ -1176,6 +1180,7 @@ struct DualGlFns {
     DualGetIntegerv_t getIntegerv = nullptr;
     DualGetBooleanv_t getBooleanv = nullptr;
     DualIsEnabled_t isEnabled = nullptr;
+    DualGetFloatv_t getFloatv = nullptr;
 };
 
 // Resolved from the SYSTEM opengl32 so a re-issued draw bypasses the hook layer
@@ -1201,6 +1206,8 @@ const DualGlFns& DualGl() {
         if (!fns.getIntegerv)  fns.getIntegerv  = (DualGetIntegerv_t)GetProcAddress(real, "glGetIntegerv");
         if (!fns.getBooleanv)  fns.getBooleanv  = (DualGetBooleanv_t)GetProcAddress(real, "glGetBooleanv");
         if (!fns.isEnabled)    fns.isEnabled    = (DualIsEnabled_t)GetProcAddress(real, "glIsEnabled");
+        // GH #76/#90 (ADR-0511): the modelview probe.
+        if (!fns.getFloatv)    fns.getFloatv    = (DualGetFloatv_t)GetProcAddress(real, "glGetFloatv");
     }
     return fns;
 }
@@ -1328,6 +1335,29 @@ void StereoRenderer::CaptureDualDrawState() {
     m_dualState.captured = true;
 }
 
+// GH #76/#90 (ADR-0511): the state a re-issued draw runs under *inside* the eye
+// framebuffer, read while that FBO is bound -- the eye-side twin of
+// CaptureDualDrawState. The draw buffer and viewport are per-framebuffer, so unlike the
+// engine's state these are the pass's own; a `GL_NONE`/masked draw buffer or a viewport
+// that does not cover the frame would discard every re-issued fragment and is exactly
+// what "engine lit / eye dark" narrows to. Evidence only -- nothing here changes a draw.
+void StereoRenderer::CaptureDualEyeState() {
+    m_dualEyeState = DualEyeFrameState{};
+    const DualGlFns& gl = DualGl();
+    if (!gl.getIntegerv || !gl.getBooleanv || !gl.isEnabled) return;
+    GLint drawBuffer = 0;
+    gl.getIntegerv(kDualDrawBuffer, &drawBuffer);
+    m_dualEyeState.drawBuffer = static_cast<unsigned>(drawBuffer);
+    GLint viewport[4] = {0, 0, 0, 0};
+    gl.getIntegerv(kDualViewportQuery, viewport);
+    for (int i = 0; i < 4; ++i) m_dualEyeState.viewport[i] = viewport[i];
+    m_dualEyeState.depthTestEnabled = gl.isEnabled(kDualDepthTest) != 0;
+    GLboolean colour[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    gl.getBooleanv(kDualColourWritemask, colour);
+    for (int i = 0; i < 4; ++i) m_dualEyeState.colourWrite[i] = colour[i] != 0;
+    m_dualEyeState.captured = true;
+}
+
 // Mirrors one engine clear into both per-eye frames, and tracks the frame's
 // world span. The measured frame topology (ADR-0439/0483) is: the 3-D world pass,
 // then a mid-frame **depth-only** clear that opens the first-person window, then
@@ -1408,6 +1438,18 @@ void StereoRenderer::OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const 
     if (!m_dualOffValid) RefreshDualEyeOffsets();
     if (!m_dualOffValid) return;
 
+    // GH #76/#90 (ADR-0511): probe the modelview the engine's draw arrives with, once
+    // per span. ADR-0504 measured it identity (eye-space vertices), and the pass's
+    // `translate(-offset)` is only the correct per-eye camera *because* of that; a
+    // non-identity matrix means the offset lands in the engine's space instead.
+    if (!m_dualMvCaptured && gl.getFloatv) {
+        float mv[16];
+        gl.getFloatv(kDualModelviewMatrix, mv);
+        m_dualMvIdentity = DualModelviewIsIdentity(mv);
+        DualModelviewTranslation(mv, m_dualMvPre);
+        m_dualMvCaptured = true;
+    }
+
     const GLuint engineFbo = OpenGLProxy::GetCurrentDrawFramebuffer();
     const GLenum engineMode = OpenGLProxy::GetCurrentMatrixMode();
     for (int eye = 0; eye < 2; ++eye) {
@@ -1415,6 +1457,18 @@ void StereoRenderer::OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const 
         gl.matrixMode(kDualModelview);
         gl.pushMatrix();
         gl.translatef(-m_dualOff[eye][0], -m_dualOff[eye][1], -m_dualOff[eye][2]);
+        // GH #76/#90 (ADR-0511): read the eye FBO's own state (per-framebuffer, so the
+        // pass's) and the post-translate modelview once, from the first eye, while the
+        // frame's draw buffer is bound and the translate is on the stack.
+        if (eye == 0) {
+            if (!m_dualEyeState.captured) CaptureDualEyeState();
+            if (m_dualMvCaptured && !m_dualMvPostCaptured && gl.getFloatv) {
+                float mv[16];
+                gl.getFloatv(kDualModelviewMatrix, mv);
+                DualModelviewTranslation(mv, m_dualMvPost);
+                m_dualMvPostCaptured = true;
+            }
+        }
         gl.drawElements(mode, count, type, indices);
         gl.popMatrix();
     }
@@ -1470,6 +1524,34 @@ float StereoRenderer::SampleDualCoverage(bool isLeftEye, float* meanLumaOut) {
     }
     const unsigned pixels = static_cast<unsigned>(width) * kDualCoverageRows;
     if (meanLumaOut) *meanLumaOut = DualMeanLuminance(rows, pixels);
+    return DualNonBlackFraction(rows, pixels);
+}
+
+// GH #76/#90 (ADR-0511): the *engine's own* presented frame, sampled with the same
+// rows and width as the eye frames and (deliberately) called from the same coverage
+// tick, so the two readings describe the same swap. The eye-frame number alone cannot
+// separate "an empty re-issue" from "a dark level" -- the engine frame is the control.
+// Read-only: it binds the default read framebuffer/GL_BACK (as the swap path already
+// has) and restores nothing else.
+float StereoRenderer::SampleEngineFrame(float* lumaOut) {
+    const DualGlFns& gl = DualGl();
+    if (lumaOut) *lumaOut = 0.0f;
+    if (!gl.readPixels || m_dualW < 8 || m_dualH < 8 || m_dualW > 4096) return 0.0f;
+    static unsigned char rows[4096 * kDualCoverageRows * 4];
+    const int width = m_dualW;
+    OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, 0);
+    if (OpenGLProxy::glReadBuffer) {
+        OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+    }
+    if (gl.pixelStorei) gl.pixelStorei(kDualPackAlignment, 1);
+    for (int i = 1; i <= kDualCoverageRows; ++i) {
+        const int y = (m_dualH * i) / (kDualCoverageRows + 1);
+        gl.readPixels(0, y, width, 1, kDualRgba, kDualUnsignedByte,
+                      rows + static_cast<size_t>(i - 1) * width * 4);
+    }
+    OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, 0);
+    const unsigned pixels = static_cast<unsigned>(width) * kDualCoverageRows;
+    if (lumaOut) *lumaOut = DualMeanLuminance(rows, pixels);
     return DualNonBlackFraction(rows, pixels);
 }
 
@@ -1786,6 +1868,11 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             if (m_dualEnabled) {
                 if (m_dualCoverCountdown <= 0) {
                     m_dualCoverCountdown = kDualCoverageEverySwaps;
+                    // GH #76/#90 (ADR-0511): the engine's own frame at the *same*
+                    // swap, so the eye reading has a control (dark scene vs empty
+                    // re-issue) -- sampled only on the coverage tick, so the cost
+                    // stays bounded to the existing throttle.
+                    m_dualEngineCover = SampleEngineFrame(&m_dualEngineLuma);
                     m_dualCoverL = SampleDualCoverage(true, &m_dualMeanL);
                     m_dualCoverR = SampleDualCoverage(false, &m_dualMeanR);
                     m_dualCoverOk = DualFrameUsable(m_dualCoverL, m_dualCoverR);
@@ -1811,7 +1898,10 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     "gen=%u gbacked=%u gsig=[enabled=%u buf=%u] "
                                     "cw=[on=%u off=%u calls=%u] "
                                     "sstate=[cap=%d cmask=0x%X dmask=%d drawbuf=0x%X "
-                                    "vp=%d,%d,%dx%d sc=%d scissor=%d,%d,%dx%d dt=%d blend=%d]",
+                                    "vp=%d,%d,%dx%d sc=%d scissor=%d,%d,%dx%d dt=%d blend=%d] "
+                                    "engine=[cover=%.3f luma=%.1f] dark=%s "
+                                    "eyeFbo=[cap=%d drawbuf=0x%X vp=%d,%d,%dx%d dt=%d cmask=0x%X] "
+                                    "mv=[cap=%d id=%d pre=%.3f,%.3f,%.3f post=%.3f,%.3f,%.3f]",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
                                     m_dualEligible, m_dualCensus.skipped, m_dualMirrorClears,
                                     (int)m_dualFrameActive, m_dualCoverL, m_dualCoverR,
@@ -1840,7 +1930,20 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     m_dualState.scissorBox[0], m_dualState.scissorBox[1],
                                     m_dualState.scissorBox[2], m_dualState.scissorBox[3],
                                     (int)m_dualState.depthTestEnabled,
-                                    (int)m_dualState.blendEnabled);
+                                    (int)m_dualState.blendEnabled,
+                                    m_dualEngineCover, m_dualEngineLuma,
+                                    DualDarkSideName(ClassifyDualDarkSide(
+                                        m_dualEngineCover, m_dualEngineLuma,
+                                        m_dualCoverL, m_dualMeanL)),
+                                    (int)m_dualEyeState.captured, m_dualEyeState.drawBuffer,
+                                    m_dualEyeState.viewport[0], m_dualEyeState.viewport[1],
+                                    m_dualEyeState.viewport[2], m_dualEyeState.viewport[3],
+                                    (int)m_dualEyeState.depthTestEnabled,
+                                    DualEyeColourNibble(m_dualEyeState),
+                                    (int)m_dualMvCaptured, (int)m_dualMvIdentity,
+                                    (double)m_dualMvPre[0], (double)m_dualMvPre[1], (double)m_dualMvPre[2],
+                                    (double)m_dualMvPost[0], (double)m_dualMvPost[1],
+                                    (double)m_dualMvPost[2]);
                     } else {
                         --s_dualLogCountdown;
                     }
@@ -2082,6 +2185,13 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         m_dualCensus.Reset();
         // GH #76/#90 (ADR-0509): the next span re-reads the engine's output state.
         m_dualState = DualDrawState{};
+        // GH #76/#90 (ADR-0511): and its own eye-frame state / modelview probe.
+        m_dualEyeState = DualEyeFrameState{};
+        m_dualMvCaptured = false;
+        m_dualMvPostCaptured = false;
+        m_dualMvIdentity = false;
+        m_dualMvPre[0] = m_dualMvPre[1] = m_dualMvPre[2] = 0.0f;
+        m_dualMvPost[0] = m_dualMvPost[1] = m_dualMvPost[2] = 0.0f;
     }
 }
 

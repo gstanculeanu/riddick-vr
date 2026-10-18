@@ -176,6 +176,115 @@ inline bool DualColourMaskWritesColour(unsigned colourNibble) {
     return (colourNibble & 0x7u) != 0u;
 }
 
+// --- GH #76/#90 (ADR-0511): who is dark, and under what eye-frame state? ------
+//
+// ADR-0510 closed the span-boundary question by measurement: the in-level span's
+// *colour* world pass is inside the span (col 547/706 draws colour-on), so moving the
+// boundary is not the fix and the remaining cause is ADR-0509's cause (2) -- the
+// re-issue itself. Two readings separate the two ways a re-issue can leave the eye
+// frames unusable, and neither needs a new hypothesis:
+//
+//   * the **calibration**: the fixed `kDualMinEyeCoverage` floor refusing a scene that
+//     is genuinely dark (the level measured mean luma ~10/255) -- the *engine's* own
+//     frame is dark in the same swap, so the pass is not the blocker; and
+//   * the **re-issue**: the engine frame is lit but the eye frame mostly empty, which
+//     narrows to the eye framebuffer's own state (its draw buffer, viewport, ...) and
+//     the modelview actually in force.
+//
+// The first is read by sampling the engine's own presented frame in the *same swap*
+// with the same sampler (otherwise a "dark eye frame" cannot be told from "a dark
+// scene"); the second by reading the state *while the eye framebuffer is bound*.
+constexpr float kDualDarkLumaCeiling = 16.0f;
+
+enum class DualDarkSide : unsigned {
+    Unknown = 0,     // no sample taken (or the pass did not run this swap)
+    BothDark,        // both frames dark: the scene is dark, so the floor is at fault
+    EyeOnlyDark,     // engine frame lit, eye frame not: the re-issue produced no image
+    EyeLit,          // eye frame carries as much content as the gate asks of it
+};
+
+inline const char* DualDarkSideName(DualDarkSide side) {
+    switch (side) {
+        case DualDarkSide::BothDark:    return "both-dark";
+        case DualDarkSide::EyeOnlyDark: return "eye-only-dark";
+        case DualDarkSide::EyeLit:      return "eye-lit";
+        default:                        return "unknown";
+    }
+}
+
+// The verdict compares what each frame *carries*: coverage at the gate's own floor,
+// or a mean luminance above the darkness ceiling (the tie-break for a dim-but-real
+// scene whose sampled rows sit under the 14/255 content floor yet are clearly not
+// black). Both frames dark -> the floor is rejecting a dark scene; engine lit and eye
+// dark -> the eye pass produced no image. Symmetric in the two frames on purpose: the
+// same helper grades either side, so a mis-sampled engine frame cannot silently become
+// "the pass is fine".
+inline DualDarkSide ClassifyDualDarkSide(float engineCoverage, float engineLuma,
+                                         float eyeCoverage, float eyeLuma,
+                                         float minCoverage = kDualMinEyeCoverage,
+                                         float lumaCeiling = kDualDarkLumaCeiling) {
+    const bool eyeHasImage = eyeCoverage >= minCoverage || eyeLuma > lumaCeiling;
+    if (eyeHasImage) return DualDarkSide::EyeLit;
+    const bool engineHasImage = engineCoverage >= minCoverage || engineLuma > lumaCeiling;
+    return engineHasImage ? DualDarkSide::EyeOnlyDark : DualDarkSide::BothDark;
+}
+
+// The state a re-issued draw actually ran under *inside the eye framebuffer*, read
+// while that framebuffer is bound (so it is the pass's own per-framebuffer state, not
+// the engine's). The two are the ones that can discard every re-issued fragment
+// without touching the geometry: the draw buffer (a user FBO defaults to
+// GL_COLOR_ATTACHMENT0, but a `GL_NONE` draw buffer or a fully-off colour mask renders
+// nothing) and the viewport (a re-issued world draw is clipped to it).
+struct DualEyeFrameState {
+    bool captured = false;
+    unsigned drawBuffer = 0;                    // glDrawBuffer while the eye FBO is bound
+    int viewport[4] = {0, 0, 0, 0};             // x, y, w, h
+    bool depthTestEnabled = false;              // GL_DEPTH_TEST (a depth-only stage)
+    bool colourWrite[4] = {true, true, true, true};
+    bool ColourWriteEnabled() const {
+        return colourWrite[0] || colourWrite[1] || colourWrite[2] || colourWrite[3];
+    }
+};
+
+// True when the eye framebuffer's own state cannot accept colour: no colour
+// attachment named, or the colour mask fully off. This is the eye-side twin of
+// `DualDrawStateWritesNoColour` and the first thing "engine lit / eye dark" narrows to.
+inline bool DualEyeFrameWritesNoColour(const DualEyeFrameState& s) {
+    return s.captured && (s.drawBuffer == kDualDrawBufferNone || !s.ColourWriteEnabled());
+}
+
+// The eye frame's colour mask as the same 4-bit nibble `DualColourMaskNibble` reports,
+// so the engine's and the eye frame's masks are comparable in one log line.
+inline unsigned DualEyeColourNibble(const DualEyeFrameState& s) {
+    return (s.colourWrite[0] ? 1u : 0u) | (s.colourWrite[1] ? 2u : 0u) |
+           (s.colourWrite[2] ? 4u : 0u) | (s.colourWrite[3] ? 8u : 0u);
+}
+
+// The per-eye modelview in force at the draw. ADR-0504 measured the engine's world
+// draws arriving with an *identity* `GL_MODELVIEW` in eye space, and the pass applies
+// `translate(-offset)` on exactly that assumption; probing the matrix at the draw site
+// turns the assumption into a measurement. Column-major, so the translation is
+// elements 12..14; an identity modelview means the engine left no view transform on the
+// stack this frame (a non-identity one would make `translate(-offset)` an offset in the
+// *engine's* space, not eye space -- a concrete, checkable fault).
+inline bool DualModelviewIsIdentity(const float m[16], float tolerance = 1.0e-4f) {
+    if (!m) return false;
+    for (int i = 0; i < 16; ++i) {
+        if (!(m[i] == m[i])) return false;  // NaN is not identity
+        const float expect = (i % 5 == 0) ? 1.0f : 0.0f;
+        const float d = m[i] - expect;
+        if (d > tolerance || d < -tolerance) return false;
+    }
+    return true;
+}
+
+inline void DualModelviewTranslation(const float m[16], float out[3]) {
+    if (!out) return;
+    out[0] = m ? m[12] : 0.0f;
+    out[1] = m ? m[13] : 0.0f;
+    out[2] = m ? m[14] : 0.0f;
+}
+
 // --- GH #76/#90 (ADR-0506): name what the world span actually contains ---------
 //
 // ADR-0505's live census measured that only ~8% of the draws inside the world span
