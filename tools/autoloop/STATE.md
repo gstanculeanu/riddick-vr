@@ -2,6 +2,79 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 74 — 2026-10-18 02:06 (scheduled loop)
+- **Unit:** GH **#83** — the autoloop can no longer run two agents in one checkout:
+  the runner now guards on **liveness** (not just the mutex), every wake is
+  **attributed** by a run id, and a live XRSIM run is **isolated per run** (own
+  shadow dir + a single-live-run lock). Harness/runner + tests + docs; **no C++
+  change, no build, no deploy, no game/input run**.
+- **Why this unit:** it is the loop's own top non-deploy-gated blocker, and it is
+  the *meta-prerequisite of every other unit*: the loop's evidence rules assume a
+  sole writer, but wake 71 measured that assumption already broken (two sessions
+  in one tree: a torn `build-all.ps1`, a shadow rebuilt under a live run that
+  deleted its hook log, a second `DarkAthena.exe`, one run's frames partly
+  borrowed, and a killed wake's unit recovered from the worktree instead of git).
+  Wakes 72/73 landed tooling fixes around it; the guard itself was still missing.
+- **Root cause (measured, from #83's record):** `run-autoloop.ps1`'s
+  `Local\RiddickVRAutoloop` mutex guards only the **runner** process. The 00:59
+  runner was killed by a harness restart while its `opencode run` child kept
+  working, so the mutex was free when the 01:09 scheduled wake started
+  (`STATE.log`: a `start run` with no matching `end run`). Nothing else checked
+  whether an agent was already alive in the checkout.
+- **Change 1 (new `tools/autoloop/loop_guard.ps1`, dotted into the runner):**
+  `Test-LiveWakeProcess` (pure: a process whose command line carries the marker
+  `RiddickVR autoloop` *and* this checkout, excluding the caller itself),
+  `Get-AutoloopProcesses` (`Get-CimInstance Win32_Process`, never fails the loop),
+  `Get-AutoloopRunId` (1 + start lines; a higher id in a stale lock wins),
+  `Write-AutoloopLock`/`Read-AutoloopLock`/`Remove-AutoloopLock` (atomic temp +
+  `Move-Item`; a missing/empty/half-written file reads as *no* lock), and a
+  `-SelfTest` with 15 assertions. It never kills a process (the loop must not touch
+  what it did not start).
+- **Change 2 (`run-autoloop.ps1`):** before launching, scan for a live peer →
+  `skip: live wake pid=<n> (previous runner gone; mutex free) - GH #83` and exit 0;
+  take the lock (only removes a lock it wrote); `start run id=<n> checkout=<path>
+  pid=<pid>` / `end run id=<n> exit=<c> log=<file>`, the `end run` emitted from
+  `finally` so every exit path closes the record.
+- **Change 3 (`tools/xrsim.py`):** the `--shadow-install` scratch dir defaults to
+  `%TEMP%\riddickvr-shadow-<pid>` (`default_shadow_dir`, one per run) instead of the
+  shared path the two sessions collided in; a real run takes a **single-live-run
+  lock** (`%TEMP%\riddickvr-live.lock`; `live_lock_decision` is pure — `free` /
+  `owned` / **`stale`** (dead holder → taken over) / `held` (live peer → refuse with
+  exit 3, overridable by `--ignore-live-lock`); release via `atexit`; a non-owner
+  never deletes a lock, so a takeover is never clobbered); the run report gains a
+  `live_lock` key.
+- **Evidence (offline):** `loop_guard.ps1 -SelfTest` **PASS (15 assertions)**;
+  `tools/autoloop/run-autoloop.ps1` and `loop_guard.ps1` parse clean
+  (`Parser::ParseFile`); `tools/test_xrsim.py` +5 cases → full suite PASS;
+  `tools/xrsim.py --selftest` +3 cases (`live_lock_free_held_stale_owned`,
+  `shadow_dir_is_per_run`, `live_lock_round_trip`) PASS; full **`tools/test_*.py`
+  = 11/11 PASS**; `verify_reported_fixes` (new #83 invariant, summary now `#83`),
+  `scenario_tests.py --check`, `verify_test_artifacts`, `verify_hook_init`,
+  `validate_addresses` PASS. **No C++ → no `build-all`/CTest** (documented).
+- **Evidence (live detection, read-only, no launch, no input):** dot-sourcing the
+  guard and running `Test-LiveWakeProcess (Get-AutoloopProcesses)` on this machine
+  returned **exactly 1** hit for this checkout — pid 2476,
+  `cmd /c ""C:\Program Files\nodejs\opencode.cmd" run --auto --standalone --model
+  opencode-go/deepseek-v4.1-flash --tit…` — i.e. the guard sees **this very wake**
+  as the live peer the next scheduled run must refuse to join. That is the same
+  datum the 01:09 overlap lacked.
+- **Blocker / honest limit:** (a) the scan matches on the marker + checkout in a
+  command line, so an agent invoked *without* the autoloop title (a manual
+  `opencode` session) is still undetected; (b) a runner now only *skips* while a
+  long wake runs, so a wake may be missed — acceptable at the 10-minute cadence and
+  strictly better than two writers; (c) the guard's pure decisions are covered by
+  the PowerShell self-test, not by `tools/test_*.py` (recorded in ADR-0475);
+  (d) the change is harness bookkeeping and cannot affect a run's rendering, so no
+  live game run was taken.
+- **Next:** (1) GH #85 — REA the 2009 loader (`MCCDyn`/`MXR` equivalent) for the
+  `0x205` `VERTEXFRAMES` layout + the `CLUSTERDATA`/`VERTEXBUFFERS` hierarchy, then
+  re-grade `--check` on `F:`; (2) decide whether `DEFAULT_GAME_DIR` should point at
+  the 2009 target (tools still default to the 2004 install; xrsim defaults to `F:`);
+  (3) the deploy-gated ladder is otherwise unchanged and live-capable via
+  `--shadow-install` (#72 req 1 latch A/B, #67 step 3, #68 req 5, #79 hook half,
+  #76 step 1); (4) a future wake could adopt the per-wake `git worktree` variant
+  (#83 option 4) if a per-checkout lock proves too coarse.
+
 ## Wake 73 — 2026-10-18 01:48 (scheduled loop)
 - **Unit:** GH **#84** — `Xmd.skeleton()` now selects the **skeleton** `NODES`
   (child of `SKELETON`, or the `NODES` with a `NODEINDICES` sibling / 34-byte

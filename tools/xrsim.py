@@ -105,6 +105,15 @@ prompt), ``gamepad`` (XInput ``START|A``) or ``both``; tuning lives in
 ``--sim-confirm-max-taps``/``-period-ms``/``-hold-ms``. The report records the
 env it passed as ``sim_confirm``. The mechanism is in ADR-0468.
 
+A live run is *isolated per run* (GH #83). The loop can have a second agent in
+the same checkout when a runner is killed by a harness restart, and two live runs
+then rebuild each other's shadow tree and hold the same ``dist`` binaries. So the
+``--shadow-install`` scratch directory defaults to
+``%TEMP%\riddickvr-shadow-<pid>`` (never one shared path), and a live-run lock
+file (``%TEMP%\riddickvr-live.lock``) makes "at most one live harness" explicit:
+a second run refuses (``--ignore-live-lock`` overrides on purpose). A lock whose
+pid is gone is *stale* and is taken over, so a killed run never wedges the loop.
+
 GH #71 req 1 / #80 follow-up: the bridge also *reports what it observed*, so a
 run is decidable instead of inferred. Its log lines name every input proc the
 engine resolved through the swapped ``GetProcAddress`` (``owned`` by the bridge
@@ -179,6 +188,7 @@ re-merged.
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import math
@@ -1539,6 +1549,132 @@ def deployed_hook_check(ident, require_fresh=False):
     return rec
 
 
+# ----------------------------------------- live-run lock + isolation (GH #83)
+# The autoloop can have more than one agent in one checkout: a runner killed by a
+# harness restart leaves its `opencode run` child alive while the runner's mutex is
+# free (GH #83). Two live XRSIM runs then collide -- the *shared* default shadow
+# directory gets rebuilt under a run in progress (deleting its hook log), and two
+# `DarkAthena.exe`/`riddickvr-host.exe` instances hold the same `dist` binaries.
+# Two cheap, checkable rules remove that class of damage:
+#   1. the shadow scratch directory is per run (keyed by this pid), so no run can
+#      rebuild another run's tree; and
+#   2. a live-run lock makes "at most one live harness" explicit -- a second run
+#      refuses instead of racing, and a lock whose pid is gone is stale and taken
+#      over, so a killed run never wedges the loop.
+DEFAULT_LIVE_LOCK_NAME = "riddickvr-live.lock"
+
+
+def default_shadow_dir(pid, root=None):
+    """The per-run ``--shadow-install`` scratch directory (GH #83)."""
+    base = Path(root) if root else Path(tempfile.gettempdir())
+    return base / f"riddickvr-shadow-{int(pid)}"
+
+
+def live_lock_path(root=None):
+    base = Path(root) if root else Path(tempfile.gettempdir())
+    return base / DEFAULT_LIVE_LOCK_NAME
+
+
+def read_live_lock(path):
+    """Parse the live-run lock; a missing / empty / half-written file reads None."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def live_lock_decision(lock, is_alive, pid):
+    """Pure: classify the on-disk lock -> ``(state, other_pid)``.
+
+    ``free``  -- no lock (or no usable pid in it): safe to take.
+    ``owned`` -- the lock is already ours.
+    ``stale`` -- the recorded holder is gone: safe to take over.
+    ``held``  -- a live peer holds it: do not start a second live run.
+    """
+    if not lock:
+        return "free", None
+    try:
+        other = int(lock.get("pid"))
+    except (TypeError, ValueError):
+        return "free", None
+    if other == int(pid):
+        return "owned", other
+    return ("held" if is_alive(other) else "stale"), other
+
+
+def process_alive(pid):
+    """Best-effort liveness probe (only used to decide a *stale* lock)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    import ctypes
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
+def acquire_live_lock(path, pid, is_alive=None, started=None):
+    """Take the live-run lock. Returns ``(ok, state, message)``.
+
+    Writes the lock when it is free / stale / already ours; refuses (``ok`` False)
+    when a live peer holds it.
+    """
+    is_alive = is_alive or process_alive
+    path = Path(path)
+    state, other = live_lock_decision(read_live_lock(path), is_alive, pid)
+    if state == "held":
+        return False, state, (
+            f"another live XRSIM run holds {path} (pid {other}); only one live "
+            "harness at a time (GH #83) -- wait for it or pass --ignore-live-lock")
+    payload = {
+        "pid": int(pid),
+        "started": started or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        return False, state, f"cannot write the live-run lock {path}: {exc}"
+    taken = "taken over (stale pid %s)" % other if state == "stale" else "acquired"
+    return True, state, f"live lock {taken}: {path}"
+
+
+def release_live_lock(path, pid):
+    """Remove the lock only if we still own it (never clobber a takeover)."""
+    lock = read_live_lock(path)
+    try:
+        other = int(lock.get("pid")) if lock else None
+    except (TypeError, ValueError):
+        other = None
+    if other != int(pid):
+        return False
+    try:
+        Path(path).unlink()
+    except OSError:
+        return False
+    return True
+
+
 # ----------------------------------------------------- menu advance (GH #71)
 # The scripted run stalls on the game's startup splash/menu: the mock host
 # publishes controller state but *nothing reaches the game*, because (a)
@@ -2168,6 +2304,31 @@ def cmd_selftest(require_image_deps=False):
     results["budget_requires_percentiles"] = (not ok_b3) and rec3["check"] == "frame_budget_reported"
     results["budget_accepts_gameplay_only_suffix"] = ok_b4 and rec4.get("p50_ms") == 7.0
 
+    # GH #83: the live-run lock is a pure decision over (lock contents, liveness)
+    # and the shadow dir is per run, so both are checkable without launching
+    # anything -- and the takeover path proves a killed run cannot wedge the loop.
+    results["live_lock_free_held_stale_owned"] = (
+        live_lock_decision(None, lambda _p: True, 1) == ("free", None) and
+        live_lock_decision({}, lambda _p: True, 1) == ("free", None) and
+        live_lock_decision({"pid": "x"}, lambda _p: True, 1) == ("free", None) and
+        live_lock_decision({"pid": 1}, lambda _p: True, 1) == ("owned", 1) and
+        live_lock_decision({"pid": 2}, lambda _p: True, 1) == ("held", 2) and
+        live_lock_decision({"pid": 2}, lambda _p: False, 1) == ("stale", 2))
+    results["shadow_dir_is_per_run"] = (
+        default_shadow_dir(11) != default_shadow_dir(22) and
+        default_shadow_dir(11).name == "riddickvr-shadow-11")
+    import tempfile as _tempfile  # the image block below rebinds `tempfile` locally
+    with _tempfile.TemporaryDirectory() as lock_dir:
+        lk = Path(lock_dir) / DEFAULT_LIVE_LOCK_NAME
+        ok_l, s_l, _ = acquire_live_lock(lk, 101, is_alive=lambda _p: False)
+        held, s_h, _ = acquire_live_lock(lk, 202, is_alive=lambda p: p == 101)
+        ok_t, s_t, _ = acquire_live_lock(lk, 202, is_alive=lambda _p: False)
+        results["live_lock_round_trip"] = (
+            ok_l and s_l == "free" and not held and s_h == "held" and
+            ok_t and s_t == "stale" and
+            release_live_lock(lk, 101) is False and
+            release_live_lock(lk, 202) is True and not lk.exists())
+
     skipped = []
     if not have_image_deps():
         skipped = ["shifted_pair_passes", "identical_pair_fails",
@@ -2327,7 +2488,13 @@ def main(argv=None):
                          "--require-fresh-hook can finally grade a live run")
     ap.add_argument("--shadow-dir", default=None,
                     help="scratch directory for --shadow-install "
-                         "(default %%TEMP%%\\riddickvr-shadow)")
+                         "(default %%TEMP%%\\riddickvr-shadow-<pid>, one per run "
+                         "-- GH #83)")
+    ap.add_argument("--ignore-live-lock", dest="ignore_live_lock",
+                    action="store_true",
+                    help="do not take the single-live-run lock (GH #83). Only for "
+                         "a deliberate parallel probe: two live runs collide on the "
+                         "shared dist\\ binaries and the game window")
     ap.add_argument("--built-hook", default=None,
                     help="path to the repo-built hook compared against the "
                          "deployed one (default dist\\opengl32.dll; env "
@@ -2382,6 +2549,21 @@ def main(argv=None):
               "(pip install numpy pillow)", file=sys.stderr)
         return 2
 
+    # GH #83: at most one live harness at a time, and never a shared shadow tree.
+    # The lock is taken before anything is built or launched (a shadow rebuild is
+    # itself one of the collisions); a stale lock (dead pid) is taken over, and
+    # the release is registered with atexit so every exit path drops it.
+    live_lock = live_lock_path()
+    live_lock_note = {"path": str(live_lock), "pid": os.getpid(),
+                      "taken": not args.ignore_live_lock}
+    if not args.ignore_live_lock:
+        ok, _state, message = acquire_live_lock(live_lock, os.getpid())
+        if not ok:
+            print("xrsim: " + message, file=sys.stderr)
+            return 3
+        print("[xrsim] " + message)
+        atexit.register(release_live_lock, live_lock, os.getpid())
+
     # GH #81: an opt-in read-only shadow install. The loader resolves
     # `opengl32.dll` from the executable's directory, so mirroring the install
     # with junctions + a real program dir (and the repo build in the hook slot)
@@ -2389,7 +2571,7 @@ def main(argv=None):
     if args.shadow_install:
         import shadow_install
         shadow_dest = (Path(args.shadow_dir) if args.shadow_dir
-                       else Path(tempfile.gettempdir()) / "riddickvr-shadow")
+                       else default_shadow_dir(os.getpid()))
         built = Path(args.built_hook) if args.built_hook else BUILT_HOOK
         manifest = shadow_install.build_shadow(args.shadow_install, shadow_dest, built)
         args.shadow_manifest = manifest
@@ -2440,6 +2622,7 @@ def main(argv=None):
                             game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
                         "input_bridge": parse_input_bridge(fresh),
                         "shadow": getattr(args, "shadow_manifest", None),
+                        "live_lock": live_lock_note,
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

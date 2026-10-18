@@ -1667,6 +1667,62 @@ def test_input_bridge_report_key_written_by_evaluate_only(td):
     assert json.loads(rep.read_text(encoding="utf-8"))["input_bridge"] is None
 
 
+# ----------------------------- live-run isolation + lock (GH #83)
+def test_default_shadow_dir_is_per_run(td):
+    a = xrsim.default_shadow_dir(11)
+    b = xrsim.default_shadow_dir(22)
+    assert a != b
+    assert a.name == "riddickvr-shadow-11"
+    assert xrsim.default_shadow_dir(11, root=td) == Path(td) / "riddickvr-shadow-11"
+
+
+def test_live_lock_decision_states(td):
+    assert xrsim.live_lock_decision(None, lambda _p: True, 1) == ("free", None)
+    assert xrsim.live_lock_decision({}, lambda _p: True, 1) == ("free", None)
+    assert xrsim.live_lock_decision({"pid": "nope"}, lambda _p: True, 1) == ("free", None)
+    assert xrsim.live_lock_decision({"pid": 1}, lambda _p: True, 1) == ("owned", 1)
+    assert xrsim.live_lock_decision({"pid": 2}, lambda _p: True, 1) == ("held", 2)
+    assert xrsim.live_lock_decision({"pid": 2}, lambda _p: False, 1) == ("stale", 2)
+
+
+def test_live_lock_refuses_while_held_and_takes_over_stale(td):
+    lock = Path(td) / xrsim.DEFAULT_LIVE_LOCK_NAME
+    ok, state, _ = xrsim.acquire_live_lock(lock, 101, is_alive=lambda _p: False)
+    assert ok and state == "free" and lock.exists()
+    held, state2, message = xrsim.acquire_live_lock(
+        lock, 202, is_alive=lambda p: p == 101)
+    assert not held and state2 == "held" and "pid 101" in message
+    # The holder's own lock is left untouched by the refusal.
+    assert xrsim.read_live_lock(lock)["pid"] == 101
+    ok3, state3, message3 = xrsim.acquire_live_lock(
+        lock, 202, is_alive=lambda _p: False)
+    assert ok3 and state3 == "stale" and "stale pid 101" in message3
+    assert xrsim.read_live_lock(lock)["pid"] == 202
+    # A non-owner never deletes a lock (so a takeover is not clobbered), and the
+    # owner's release removes it.
+    assert xrsim.release_live_lock(lock, 101) is False
+    assert xrsim.release_live_lock(lock, 202) is True
+    assert not lock.exists()
+
+
+def test_live_lock_read_tolerates_partial_and_missing(td):
+    lock = Path(td) / "half.json"
+    lock.write_text('{"pid": 1, "star', encoding="utf-8")
+    assert xrsim.read_live_lock(lock) is None
+    lock.write_text("", encoding="utf-8")
+    assert xrsim.read_live_lock(lock) is None
+    assert xrsim.read_live_lock(Path(td) / "absent.json") is None
+    assert xrsim.release_live_lock(Path(td) / "absent.json", 1) is False
+
+
+def test_live_lock_and_shadow_flags_parse(td):
+    # The flags exist and do not disturb the pure paths that run before any lock.
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert xrsim.main(["--selftest"]) == 0
+        assert xrsim.main(["--ignore-live-lock", "--selftest"]) == 0
+        assert xrsim.main(["--shadow-dir", td, "--selftest"]) == 0
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -1762,6 +1818,11 @@ def main() -> int:
              test_parse_input_bridge_reads_gate_procs_and_summary,
              test_input_bridge_stats_names_the_procs,
              test_input_bridge_report_key_written_by_evaluate_only,
+             test_default_shadow_dir_is_per_run,
+             test_live_lock_decision_states,
+             test_live_lock_refuses_while_held_and_takes_over_stale,
+             test_live_lock_read_tolerates_partial_and_missing,
+             test_live_lock_and_shadow_flags_parse,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

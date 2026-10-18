@@ -845,8 +845,48 @@ def main():
             "code, and the harness must parse them into the `input_bridge` report "
             "key (the datum that makes the reach decidable)")
 
+    # GH #83: the autoloop must not run two agents in one checkout. The runner
+    # guards on *liveness* -- a wake whose runner was killed leaves its
+    # `opencode run` child working the same tree while the runner's mutex is free
+    # -- records one attributable run id per wake, and the live harness takes a
+    # single-live-run lock plus a per-run shadow directory so a parallel or
+    # leftover run can never rebuild another run's tree or race the shared
+    # `dist\` binaries. The guard's pure decisions have their own self-test
+    # (`loop_guard.ps1 -SelfTest`), the harness lock has unit tests, and the
+    # harness lock is also exercised by `xrsim --selftest`.
+    loop_guard = (ROOT / "tools/autoloop/loop_guard.ps1").read_text(encoding="utf-8")
+    runner = (ROOT / "tools/autoloop/run-autoloop.ps1").read_text(encoding="utf-8")
+    require("function Test-LiveWakeProcess" in loop_guard and
+            "function Get-AutoloopProcesses" in loop_guard and
+            "function Get-AutoloopRunId" in loop_guard and
+            "function Write-AutoloopLock" in loop_guard and
+            "function Read-AutoloopLock" in loop_guard and
+            "function Remove-AutoloopLock" in loop_guard and
+            "Test-AutoloopGuard" in loop_guard and
+            "loop_guard.ps1" in runner and
+            "Test-LiveWakeProcess" in runner and
+            "Get-AutoloopProcesses" in runner and
+            "Write-AutoloopLock" in runner and
+            "Remove-AutoloopLock" in runner and
+            "start run id=" in runner and
+            "def default_shadow_dir" in xrsim_tool and
+            "def live_lock_decision" in xrsim_tool and
+            "def acquire_live_lock" in xrsim_tool and
+            "def release_live_lock" in xrsim_tool and
+            "--ignore-live-lock" in xrsim_tool and
+            '"live_lock"' in xrsim_tool and
+            "live_lock_round_trip" in xrsim_tool and
+            "shadow_dir_is_per_run" in xrsim_tool and
+            "test_default_shadow_dir_is_per_run" in _xrsim_tests and
+            "test_live_lock_refuses_while_held_and_takes_over_stale" in _xrsim_tests and
+            (ROOT / "docs/adr/0475-autoloop-single-instance-guard.md").exists(),
+            "GH #83: the autoloop runner must refuse to start a second agent in "
+            "one checkout (liveness scan over live processes + an attributable "
+            "run id) and the live harness must take a single-live-run lock and a "
+            "per-run shadow directory, both unit-tested")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-81)")
+          "#62, #64-68, #69, #71-73, #75-81, #83)")
     return 0
 
 
