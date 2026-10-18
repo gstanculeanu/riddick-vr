@@ -1484,16 +1484,45 @@ def test_viewmodel_probe_submission_lines_are_parsed(td):
 def test_confirm_key_messages_are_wellformed(td):
     """GH #71 req 1: the posted confirm tap must be a well-formed Win32
     keydown/WM_CHAR/keyup triple with a correct lParam (repeat bit + key-up
-    transition/previous-state bits)."""
+    transition/previous-state bits) AND the key's real scan code in bits 16-23.
+
+    Wake 84 corrected this: the engine's window proc reads the key code from
+    ``lParam >> 16`` (see docs/rea/reference/RndrGL_Input_Path.txt), so a tap
+    posted with scan code 0 reaches it as an unmapped key. The earlier test
+    pinned that malformed value.
+    """
     msgs = xrsim.confirm_key_messages()
     assert [m[0] for m in msgs] == [xrsim.WM_KEYDOWN, xrsim.WM_CHAR, xrsim.WM_KEYUP]
     assert all(m[1] == xrsim.VK_RETURN for m in msgs), msgs
     down, _char, up = msgs
-    assert down[2] == 1, msgs       # scan 0, repeat count 1
-    assert up[2] == 1 | (1 << 30) | (1 << 31), msgs
+    scan = xrsim.vk_to_scancode(xrsim.VK_RETURN)
+    assert scan == 0x1C, scan                    # Enter's real scan code
+    assert down[2] == (scan << 16) | 1, msgs     # scan packed, repeat count 1
+    assert up[2] == (scan << 16) | 1 | (1 << 30) | (1 << 31), msgs
     assert not (down[2] >> 30) & 1 and not (down[2] >> 31) & 1, down
     assert (up[2] >> 30) & 1 and (up[2] >> 31) & 1, up
+    # the engine treats 0x100 as "no scan code in lParam" -- never send it
+    assert ((down[2] >> 16) & 0x1FF) != xrsim.KEY_LPARAM_NO_SCANCODE
+    # an explicit scan still overrides (the optional argument is preserved)
+    assert xrsim.confirm_key_messages(scan=0x1C)[0][2] == (0x1C << 16) | 1
     assert xrsim.key_lparam(0x1C, True) == (0x1C << 16) | 1
+    assert xrsim.key_lparam(0, True) == 1        # the pre-wake-84 (unmapped) tap
+
+
+def test_confirm_scancode_fallback_is_pure(td):
+    """GH #71 req 1: the VK -> scan-code lookup must have a dependency-free
+    fallback so the message encoding is testable off Windows, and an unmapped
+    key must resolve to 0 (never to the 0x100 sentinel)."""
+    assert xrsim.KEY_SCANCODE_FALLBACK[xrsim.VK_RETURN] == 0x1C
+    assert xrsim.KEY_SCANCODE_FALLBACK[0x1B] == 0x01      # ESC
+    assert xrsim.KEY_SCANCODE_FALLBACK[0x20] == 0x39      # SPACE
+    # the table never contains the engine's "no scan code" sentinel
+    assert all(v != xrsim.KEY_LPARAM_NO_SCANCODE
+               for v in xrsim.KEY_SCANCODE_FALLBACK.values())
+    assert all(0 < v < 0x100 for v in xrsim.KEY_SCANCODE_FALLBACK.values())
+    # an unknown VK must be 0 (unmapped), not the sentinel
+    scan = xrsim.KEY_SCANCODE_FALLBACK.get(0xFE, 0) if os.name != "nt" else None
+    assert scan in (None, 0)
 
 
 def test_menu_advancer_fires_on_cadence_and_honours_max_taps(td):
@@ -2050,6 +2079,7 @@ def main() -> int:
              test_eye_view_scene_faithful_grades_runtime,
              test_eye_view_scene_faithful_grades_sim,
              test_confirm_key_messages_are_wellformed,
+             test_confirm_scancode_fallback_is_pure,
              test_menu_advancer_fires_on_cadence_and_honours_max_taps,
              test_menu_advancer_stop_is_honoured,
              test_menu_advancer_has_no_catchup_burst,

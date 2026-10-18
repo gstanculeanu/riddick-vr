@@ -436,26 +436,34 @@ def main():
             "GH #71: XRSIM must reach live gameplay with an unlimited, wall-clock "
             "bounded run and assert the full-bleed BarScan signal")
 
-    # GH #71 requirement 1 (input-blocker diagnosis): in simulator mode the hook
-    # never injects desktop input, so nothing advances the game's startup
-    # splash/menu. The harness carries the *sim-safe* attempt -- a targeted
-    # window-message confirm tap to the game's own HWND (never OS-global input) --
-    # but it is OPT-IN because it was measured ineffective against this engine
-    # (MSystem.dll imports DirectInput, RndrGL.dll imports Raw Input, so posted
-    # messages are ignored; see docs/adr/0466). The schedule is pure/unit-tested
-    # and its outcome is recorded in the report as `menu_advance`.
+    # GH #71 requirement 1 (input-blocker DIAGNOSIS, corrected in wake 84): in
+    # simulator mode the hook never injects desktop input, so nothing advances the
+    # game's front-end start card. The harness carries the *sim-safe* attempt -- a
+    # targeted window-message confirm tap to the game's own HWND (never OS-global
+    # input) -- OPT-IN, and it packs the key's real scan code, which is what
+    # RndrGL.dll's window proc reads from lParam (`lParam >> 16`); `lParam = 1`
+    # forwarded key code 0 and looked like "the engine ignores posted messages".
+    # See ADR-0485 and docs/rea/reference/RndrGL_Input_Path.txt. The schedule is
+    # pure/unit-tested and its outcome is recorded in the report as `menu_advance`.
     require("class GameMenuAdvancer" in xrsim_tool and
             "def post_confirm_to_game_windows" in xrsim_tool and
             "def confirm_key_messages" in xrsim_tool and
+            "def vk_to_scancode" in xrsim_tool and
+            "KEY_SCANCODE_FALLBACK" in xrsim_tool and
+            "KEY_LPARAM_NO_SCANCODE = 0x100" in xrsim_tool and
             "def gameplay_reached_from_sequence" in xrsim_tool and
             '"--advance-menu"' in xrsim_tool and
             "set_defaults(advance_menu=False)" in xrsim_tool and
             '"menu_advance": menu_stats' in xrsim_tool and
             "test_menu_advancer_fires_on_cadence_and_honours_max_taps" in
-            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8"),
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "test_confirm_scancode_fallback_is_pure" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0485-gh71-confirm-tap-scan-code-and-live-level-reach.md").exists() and
+            (ROOT / "docs/rea/reference/RndrGL_Input_Path.txt").exists(),
             "GH #71 req 1: XRSIM must carry the sim-safe (opt-in) menu-advance "
-            "attempt and record its outcome; the engine ignores posted window "
-            "messages, so it must stay off by default")
+            "attempt, pack the confirm key's real scan code (lParam >> 16), and "
+            "record its outcome; see ADR-0485")
 
     # GH #71 requirement 1 (second input-free route, measured): the engine's
     # console surface (loadgame/changemap/cg_newgame in the Content game DLLs) is

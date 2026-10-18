@@ -1,0 +1,197 @@
+# RndrGL.dll -> input path (how the shipped game actually reads a key)
+
+# purpose : GH #71 requirement 1 (reach live gameplay in a scripted XRSIM run)
+#           and GH #80 (simulator-only input bridge). Every "input-free" route to
+#           the game's startup splash was measured dead, and the record blamed
+#           "the engine reads DirectInput/Raw Input, not posted window messages".
+#           This note replaces that inference with the shipped code path.
+# target  : F:\The Chronicles of Riddick - Assault on Dark Athena
+#           System\Win32_x86\RndrGL.dll
+#             size       939248 bytes
+#             sha256     b07baac43ce4bbf6e0a73acdd31ae34e8bac76a6a4c9ca15bdd5c0de8898ead0
+#             TimeStamp  0x49ca3e26   (2009-03-26)
+#             ImageBase  0x10000000
+#           (all VAs below are absolute; subtract 0x10000000 for RVAs)
+# method  : read-only. (1) PE import tables (`pefile`); (2) targeted x86
+#           disassembly with capstone at the IAT thunk references. Reproduce the
+#           reference hunt with:
+#
+#             import pefile, struct
+#             pe = pefile.PE(r"...\RndrGL.dll")
+#             ib = pe.OPTIONAL_HEADER.ImageBase
+#             tva = None
+#             for e in pe.DIRECTORY_ENTRY_IMPORT:
+#                 for imp in e.imports:
+#                     if imp.name and imp.name.decode() == "RegisterRawInputDevices":
+#                         tva = imp.address
+#             for s in pe.sections:
+#                 if not s.Characteristics & 0x20000000: continue
+#                 d = pe.get_data(s.VirtualAddress, s.SizeOfRawData)
+#                 for i in range(len(d) - 6):
+#                     if d[i] == 0xFF and d[i+1] in (0x15, 0x25) \
+#                        and struct.unpack_from("<I", d, i + 2)[0] == tva:
+#                         print(hex(ib + s.VirtualAddress + i))
+#
+#           (or `rea inspect-binary-layout` / `rea search-bytes`.)
+
+## 1. Which shipped module owns the game window and reads input
+
+Static import tables of `System\Win32_x86`: only **RndrGL.dll** imports the
+window/raw-input surface.
+
+| module          | keyboard/mouse surface imported |
+|-----------------|---------------------------------|
+| `RndrGL.dll`    | USER32 (53 entries), incl. the window/pump/raw-input set: `RegisterClassA`, `CreateWindowExA`, `GetMessageA`, `PeekMessageA`, `TranslateMessage`, `DispatchMessageA`, `DefWindowProcA`, `RegisterRawInputDevices`, `GetRawInputData`, `MapVirtualKeyA`, `SetCapture`, `GetForegroundWindow`, `SetForegroundWindow`, `SetFocus` |
+| `MSystem.dll`   | USER32: `GetMessageA`, `TranslateMessage`, `DispatchMessageA`, `RegisterClassA` — **no** Raw Input, **no** `GetRawInputData` |
+| `MCCDyn.dll`    | same minimal USER32 set — no Raw Input |
+| `MXR.dll`       | same minimal USER32 set — no Raw Input |
+| `DarkAthena.exe`| (loads `MSystem`/`MCCDyn`/`dvm`; not the renderer) |
+
+`RndrGL.dll` is therefore the module that registers the game's window class
+(`MOS Win32/OpenGL`, measured live in GH #71 wake 63) and runs the message pump.
+
+## 2. Raw Input is registered for the MOUSE only (one device)
+
+`RegisterRawInputDevices` is called from **one** site, `0x10040b5a`, with a
+**single** `RAWINPUTDEVICE` (`cbSize = 12`, `nDevices = 1`), built on the stack
+immediately before the call (`0x10040b34`-`0x10040b56`):
+
+```
+10040b34  push 0xc                       ; cbSize = sizeof(RAWINPUTDEVICE)
+10040b36  mov  word [esp+0x18], 1        ; usUsagePage = 0x01 (Generic Desktop)
+10040b3d  mov  word [esp+0x1a], 2        ; usUsage     = 0x02 (Mouse)
+10040b44  mov  dword [esp+0x1c], 0x100   ; dwFlags     = RIDEV_INPUTSINK
+10040b4c  mov  ecx, [esi+0x18]           ; hwndTarget  = the game window
+10040b4f  push 1                         ; nDevices
+10040b51  lea  edx, [esp+0x1c]           ; pRawInputDevices
+10040b55  push edx
+10040b56  mov  dword [esp+0x28], ecx     ; hwndTarget
+10040b5a  call dword ptr [0x100b2938]    ; USER32!RegisterRawInputDevices
+10040b60  test eax, eax
+10040b62  setne al
+10040b66  mov  byte [esi+0x1e], al       ; remember success
+```
+
+**Consequence (decisive for GH #80):** there is **no raw-input keyboard device**
+(`usUsagePage = 1`, `usUsage = 6` / page `0x07` are **not** registered), so
+fabricating a keyboard confirm inside `GetRawInputData` is not available. Raw
+Input here is mouse-look/front-end-pointer input only. (For the record: the
+`RIDEV_INPUTSINK` flag means the window receives the mouse even when it is not
+foreground — it says nothing about the keyboard.)
+
+## 3. The window procedure dispatches both WM_INPUT and the legacy key messages
+
+The window procedure's message switch (`0x10042698`+) maps `msg - 0xFF` through a
+7-entry jump table at `0x10042f7c`:
+
+| message | VA | behaviour |
+|---------|----|-----------|
+| `WM_INPUT` (0x00FF) | `0x100426be` | `GetRawInputData(hRawInput, RID_INPUT, buf, &size=0x28, sizeof(RAWINPUTHEADER))`, then `if (header.dwType != RIM_TYPEMOUSE) return;` — **mouse only** |
+| `WM_KEYDOWN` (0x0100) | `0x10042817` | key-down handler (section 4) |
+| `WM_KEYUP` (0x0101) | `0x100428aa` | key-up handler |
+| `WM_CHAR` (0x0102) | `0x100427c9` | character handler |
+| `WM_DEADCHAR` (0x0103) | `0x100422c3` | `DefWindowProc` |
+| `WM_SYSKEYDOWN` (0x0104) | `0x10042817` | key-down handler |
+| `WM_SYSKEYUP` (0x0105) | `0x100428aa` | key-up handler |
+
+`WM_SYSCOMMAND` (0x0112) has its own case at `0x10042930`; anything else falls
+through to `DefWindowProcA`.
+
+The `WM_INPUT` body (mouse): `GetRawInputData` is called with `uiCommand =
+RID_INPUT (0x10000003)` and `pcbSize = 0x28` (16-byte `RAWINPUTHEADER` + 24-byte
+`RAWMOUSE`), `pData` = a zeroed stack buffer, `hRawInput` = the message's
+`lParam`; `dwType == 0` (`RIM_TYPEMOUSE`) gates the rest, which reads
+`lLastX`/`lLastY` at buffer `+0x1c`/`+0x20` — i.e. the mouse's relative motion.
+
+## 4. The key handler takes the SCAN CODE out of lParam
+
+`WM_KEYDOWN` (`0x10042817`):
+
+```
+10042817  test ebx, ebx / je DefWindowProc          ; display-context object
+1004281f  mov  ecx, [ebx+0x54]                      ; the input context
+10042824  test ecx, ecx / je DefWindowProc
+1004282a  test byte [esi+0x6d4], 1                  ; gate: bit0 of the system flags
+10042831  je   0x1004289e                           ;   (else: a different vtbl call)
+10042833  mov  eax, [ebp+0x7c]                      ; lParam
+10042838  and  eax, 0x1000000 / mov edi, eax        ; extended-key flag
+1004283f  mov  eax, [ebp+0x78]                      ; wParam = the virtual key
+10042844  sar  esi, 0x10 / and esi, 0x1ff           ; esi = (lParam >> 16) & 0x1ff
+1004284e  call dword ptr [0x100b2950]               ; USER32!MapVirtualKeyA(vk, 0)
+10042854  cmp  esi, 0x100                           ; is the packed field the sentinel?
+1004285a  je   0x10042860                           ;   yes -> use MapVirtualKeyA's result
+1004285c  mov  eax, esi                             ;   no  -> use lParam's scan code
+10042860..0x1004286b                                ; +0x100 marks an extended key
+10042872  mov  ebx, [ebx+0x54]                      ; the input context
+10042875  mov  edx, [ebx]                           ;   its vtable
+10042888  mov  eax, [edx+0xc4]                      ; slot 0xc4 = the key event
+10042890  call eax                                  ; (keycode, ...)
+10042892  mov  dword [ebp+0x54], 1                  ; return 1
+```
+
+So the engine resolves a key from the **message's own scan code**
+(`lParam >> 16 & 0x1ff`, with `0x100` as the "no scan code in lParam, ask
+MapVirtualKeyA" sentinel and `+0x100` marking extended keys), *not* from `wParam`.
+`WM_KEYUP` (`0x100428aa`) is the mirror image guarded by the same bit0;
+`WM_CHAR` (`0x100427c9`) forwards `wParam` (the character) to the same vtable slot
+guarded by **bit1** of `[esi+0x6d4]`.
+
+**Consequence:** a key message posted with `lParam = 1` (scan code **0**) — which
+is what `tools/xrsim.py`'s `--advance-menu` posted before wake 84 — reaches the
+input context as key code **0**, an unmapped key. That, not "the engine ignores
+posted messages", is the measured shape of the earlier negative. The hook's own
+gesture layer already packs a real scan code
+(`src/hook/gesture_tap.cpp`: `MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16`).
+
+## 5. The message pump DISPATCHES posted messages
+
+RndrGL's pump (`0x1001c407`):
+
+```
+1001c407  push ebx / push ebx / push ebx            ; hWnd = NULL, min = 0, max = 0
+1001c40a  lea  ecx, [esp+0x50] / push ecx           ; &msg
+1001c40f  call dword ptr [0x100b2930]               ; USER32!GetMessageA
+1001c415  cmp  eax, -1 / je exit
+1001c41e  cmp  eax, ebx / je exit                   ; WM_QUIT (GetMessage return)
+1001c426  mov  eax, [esp+0x48]                      ; msg.message
+1001c42a  cmp  eax, 0x12 / je exit                  ; WM_QUIT
+1001c433  cmp  eax, 0x400 ; jne 0x1001c50d          ; WM_USER -> an internal case
+1001c50d  lea  ecx, [esp+0x44] / push ecx
+1001c512  call dword ptr [0x100b28a0]               ; USER32!TranslateMessage
+1001c518  lea  edx, [esp+0x44] / push edx
+1001c51d  call dword ptr [0x100b28ac]               ; USER32!DispatchMessageA
+```
+
+`GetMessageA(NULL, 0, 0, &msg)` retrieves **every** message for the thread,
+including `PostMessage`d ones, and every non-`WM_QUIT`/non-`WM_USER` message is
+`TranslateMessage`d and `DispatchMessageA`d to the window procedure. Posting a
+window message to the game window therefore *does* reach this key path — the
+message content is what was wrong.
+
+## 6. The USER32 entries are also reachable through an internal jump table
+
+`0x100a7a5c`-`0x100a7b16` is an internal table of `jmp dword ptr [IAT]` stubs
+(`PeekMessageA`, `RegisterRawInputDevices`, `PostMessageA`, `MapVirtualKeyA`,
+`GetRawInputData`, `SwapBuffers`, ...). They jump *through* the same IAT entry, so
+an IAT hook on `USER32!GetRawInputData` / `RegisterRawInputDevices` /
+`MapVirtualKeyA` / `PeekMessageA` covers both the direct call sites and any stored
+stub pointer. (This matters for GH #80 and #67's existing IAT installs, which
+already land in RndrGL's image.)
+
+## 7. What this settles
+
+* **The keyboard surface is the legacy message queue** (`WM_KEYDOWN`/`WM_KEYUP`/
+  `WM_CHAR`), which the engine's own window procedure consumes and decodes from
+  the message's scan code. A confirm posted to the game window with a real scan
+  code is the *only* in-process route that has not been falsified.
+* **Raw Input cannot carry a keyboard confirm** (section 2: mouse only), so the
+  GH #80 route "hook `GetRawInputData` and fabricate the confirm" is closed for
+  the keyboard. `GetRawInputData` remains the right hook only if a *mouse* event
+  is ever needed.
+* **DirectInput/XInput are resolved but never polled** in a live sim run (GH #80
+  wake 71: `polls=0 taps=0` after 120 s) — consistent with a front-end that reads
+  keys from the queue, not from a polled device.
+* The `[systemCtx+0x6d4]` bits (bit0 = key events, bit1 = char events, bit2 =
+  mouse, bit3, bit6, bit7, bit9 are the other window-state flags) gate all of the
+  above; a run must therefore also be *active* (the flags are written by the
+  window-activation/focus cases of the same procedure).

@@ -66,20 +66,33 @@ sim-safe route ``src/hook/gesture_tap.cpp`` intends but never completes (it neve
 learns the HWND). ``PostMessage`` touches only that window's queue, so it is not
 desktop input.
 
-**Measured ineffective (2026-10-17):** with ``--advance-menu`` the harness found
-the game window (class ``MOS Win32/OpenGL``, visible and *foreground*) and posted
-21 confirm taps over 45 s; the game stayed on its ``PRESS ENTER`` splash the whole
-time. The engine does not consume posted window messages: ``MSystem.dll`` imports
-**DirectInput** and ``RndrGL.dll`` imports **Raw Input**
-(``RegisterRawInputDevices``/``GetRawInputData``), both device-sourced and fed
-only by OS-level ``SendInput`` -- exactly what the simulator suppresses. So
-``--advance-menu`` is **off by default** and is kept only as the sim-safe harness
-half of a future hook-side bridge of the engine's input in simulator mode. The
-taps auto-stop once the hook's ``DisplayMode`` log shows the full-bleed branch
-*after* a cinema/menu branch (the splash is full-bleed-labelled, so the
-transition -- not a bare full-bleed -- is the signal). Tune with
-``--advance-interval``/``--advance-max-taps``; the report records it as
-``menu_advance``.
+**CORRECTED (2026-10-18, wake 84).** The earlier reading -- "the engine ignores
+posted window messages, because it reads DirectInput/Raw Input" -- is an artefact
+of the *message the harness posted*, not of the message path. REA of the shipped
+renderer (``docs/rea/reference/RndrGL_Input_Path.txt``) shows that ``RndrGL.dll``
+-- the module that registers the game's window class (``MOS Win32/OpenGL``) and
+runs its message pump -- **does** handle ``WM_KEYDOWN``/``WM_KEYUP``/``WM_CHAR``
+(read: ``MapVirtualKeyA(vk, 0)``; the key code is taken from ``lParam >> 16``,
+falling back to ``MapVirtualKeyA`` only when that field is the ``0x100``
+sentinel), and its pump is ``GetMessageA(NULL, 0, 0, msg)`` ->
+``TranslateMessage`` -> ``DispatchMessageA``, which delivers *posted* messages.
+The 21 taps of the earlier attempt were posted with ``lParam = 1`` -- scan code
+**0**, a key the engine cannot map. The harness now packs the real scan code
+(``vk_to_scancode``), exactly as the hook's own ``gesture_tap.cpp`` does. The
+route stays **off by default** (opt-in, GH #71) until a run measures it; the
+report records it as ``menu_advance`` including the packed ``scan``. The taps
+auto-stop once the hook's ``DisplayMode`` log shows the full-bleed branch *after*
+a cinema/menu branch (the splash is full-bleed-labelled, so the transition --
+not a bare full-bleed -- is the signal). Tune with
+``--advance-interval``/``--advance-max-taps``.
+
+**Raw Input is mouse-only here (so it cannot carry a keyboard confirm):**
+``RndrGL.dll`` calls ``RegisterRawInputDevices`` once with exactly **one**
+``RAWINPUTDEVICE`` -- ``usUsagePage = 1`` / ``usUsage = 2`` (**mouse**),
+``dwFlags = 0x100`` (``RIDEV_INPUTSINK``), ``hwndTarget`` = the game window --
+and its ``WM_INPUT`` handler forwards only ``dwType == RIM_TYPEMOUSE`` to
+``GetRawInputData``. There is no raw-input keyboard device to fabricate a confirm
+on (recorded for the GH #80 route).
 
 ``--game-arg`` (GH #71 requirement 1, repeatable) passes extra tokens straight to
 the game's argv, so a scripted run can try to drive the engine's *own* id-style
@@ -1849,16 +1862,59 @@ def release_live_lock(path, pid):
 # messages itself. PostMessage only touches that window's queue -- it is NOT
 # desktop input injection, so it stays inside the #68 simulator exception.
 #
-# MEASURED INEFFECTIVE (ADR-0466): this engine reads input via DirectInput
-# (MSystem.dll) / Raw Input (RndrGL.dll), so it ignores posted window messages
-# (21 confirm taps to the visible, foreground `MOS Win32/OpenGL` game window left
-# it on its "PRESS ENTER" splash). The capability is therefore opt-in
-# (`--advance-menu`, default off) and kept only as the harness half of a future
-# hook-side bridge of the engine's input in simulator mode.
+# MEASURED (wake 84): this engine *does* dispatch posted window messages to its
+# window procedure -- and its key handler takes the **scan code** from the
+# message's lParam (`lParam >> 16 & 0x1ff`), using `MapVirtualKeyA(vk, 0)` only
+# when that field is the `0x100` sentinel (see the module docstring and
+# docs/rea/reference/RndrGL_Input_Path.txt). The earlier attempt posted
+# `lParam = 1` (scan code 0), which the engine receives as key code 0 -- an
+# unmapped key -- so "the engine ignores posted messages" was never measured.
+# The tap now packs the real scan code, exactly as the hook's own
+# src/hook/gesture_tap.cpp does (`MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16`).
+# The capability stays opt-in (`--advance-menu`, default off) until a run
+# measures it.
 VK_RETURN = 0x0D
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_CHAR = 0x0102
+
+# GH #71 req 1: what a real key message packs when lParam carries no scan code.
+# The engine's window proc treats 0x100 as that sentinel (it then calls
+# MapVirtualKeyA itself), so it is *not* the scan code to send.
+KEY_LPARAM_NO_SCANCODE = 0x100
+# Minimal VK -> scan code table for the confirm keys, used off Windows (or if the
+# OS lookup is unavailable) so the message encoding stays pure and unit-testable.
+KEY_SCANCODE_FALLBACK = {
+    0x08: 0x0E,  # VK_BACK
+    0x09: 0x0F,  # VK_TAB
+    0x0D: 0x1C,  # VK_RETURN
+    0x1B: 0x01,  # VK_ESCAPE
+    0x20: 0x39,  # VK_SPACE
+    0x25: 0x4B,  # VK_LEFT
+    0x26: 0x48,  # VK_UP
+    0x27: 0x4D,  # VK_RIGHT
+    0x28: 0x50,  # VK_DOWN
+}
+
+
+def vk_to_scancode(vk):
+    """Scan code for a virtual key, as the engine reads it from a key message.
+
+    Uses ``MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)`` when the OS is available and
+    falls back to ``KEY_SCANCODE_FALLBACK`` so the pure scheduling / encoding
+    logic is testable off Windows. Returns 0 for an unmapped key (the value the
+    engine cannot resolve to an action).
+    """
+    key = int(vk) & 0xFF
+    if os.name == "nt":
+        try:
+            import ctypes
+            scan = int(ctypes.WinDLL("user32").MapVirtualKeyW(key, 0))
+            if scan:
+                return scan & 0xFF
+        except Exception:
+            pass
+    return KEY_SCANCODE_FALLBACK.get(key, 0)
 
 
 def key_lparam(scan, is_down):
@@ -1870,10 +1926,16 @@ def key_lparam(scan, is_down):
     return lp
 
 
-def confirm_key_messages(vk=VK_RETURN, scan=0):
+def confirm_key_messages(vk=VK_RETURN, scan=None):
     """The exact (message, wParam, lParam) sequence a confirm tap posts, in
     order -- mirroring gesture_tap.cpp's SendKeyTap (keydown, WM_CHAR for the
-    text keys the engine routes, keyup)."""
+    text keys the engine routes, keyup).
+
+    ``scan`` defaults to the real scan code for ``vk`` (``vk_to_scancode``);
+    passing 0 reproduces the pre-wake-84 tap that the engine could not map.
+    """
+    if scan is None:
+        scan = vk_to_scancode(vk)
     return [(WM_KEYDOWN, vk, key_lparam(scan, True)),
             (WM_CHAR, vk, key_lparam(scan, True)),
             (WM_KEYUP, vk, key_lparam(scan, False))]
@@ -2216,15 +2278,17 @@ def _run_attempt(args, artifacts: Path, attempt: int):
     # gesture_tap.cpp's intended route; it stops as soon as gameplay is reached.
     # Measured ineffective against this engine (ADR-0466), so opt-in only.
     advancer = None
-    menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False}
+    menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False,
+                  "vk": VK_RETURN, "scan": vk_to_scancode(VK_RETURN)}
     if getattr(args, "advance_menu", False):
         menu_stats["enabled"] = True
         advancer = GameMenuAdvancer(
             lambda: post_confirm_to_game_windows(game.pid),
             interval_s=float(getattr(args, "advance_interval", 2.0) or 2.0),
             max_taps=int(getattr(args, "advance_max_taps", 0) or 0))
-        print(f"[xrsim] menu advance: confirm every {advancer.interval_s:.1f}s to "
-              f"pid {game.pid} (GH #71)")
+        print(f"[xrsim] menu advance: confirm VK=0x{menu_stats['vk']:02X} "
+              f"scan=0x{menu_stats['scan']:02X} every {advancer.interval_s:.1f}s "
+              f"to pid {game.pid} (GH #71)")
 
     duration = getattr(args, "duration", None)
     host_log = []
@@ -2300,7 +2364,8 @@ def run_sim(args, artifacts: Path):
                               or LAUNCH_MAX_ATTEMPTS))
     attempts = []
     host_log, log_mark = "", 0
-    menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False}
+    menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False,
+                  "vk": VK_RETURN, "scan": vk_to_scancode(VK_RETURN)}
     state, detail = "started", "game still live at run end"
     for i in range(1, max_attempts + 1):
         if i > 1:
@@ -2693,6 +2758,18 @@ def cmd_selftest(require_image_deps=False):
         launch_retry_decision("early_exit", 2, 2) is False and
         launch_retry_decision("started", 1, 2) is False)
 
+    # GH #71 req 1 (wake 84): the confirm tap must pack the key's *scan code*
+    # where the engine's window proc reads it (`lParam >> 16`). 0x100 is the
+    # value that makes the engine call MapVirtualKeyA itself, so it must never
+    # be sent as the scan code; the pre-wake-84 tap sent 0 (an unmapped key).
+    down, char, up = confirm_key_messages()
+    results["confirm_tap_packs_scancode"] = (
+        vk_to_scancode(VK_RETURN) == 0x1C and
+        all(((m[2] >> 16) & 0x1FF) == 0x1C for m in (down, char, up)) and
+        ((down[2] >> 16) & 0x1FF) != 0 and
+        ((down[2] >> 16) & 0x1FF) != KEY_LPARAM_NO_SCANCODE and
+        key_lparam(0, True) == 1)
+
     # GH #67 live tuning: `--ini` sets a hook flag in the *shadow's* riddick_vr.ini
     # (the file the hook resolves beside its module) so a deploy-free run can flip
     # it. The parser is pure and the merge is section/case-aware + idempotent -- the
@@ -2872,10 +2949,11 @@ def main(argv=None):
     ap.add_argument("--advance-menu", dest="advance_menu", action="store_true",
                     help="post the confirm keystroke to the game's own window to try "
                          "to advance the startup splash/menu (GH #71 req 1): targeted "
-                         "window messages, never OS-global input. OFF by default -- "
-                         "measured INEFFECTIVE against this engine, which reads input "
-                         "via DirectInput (MSystem.dll) / Raw Input (RndrGL.dll), not "
-                         "posted window messages (see the module docstring)")
+                         "window messages, never OS-global input. OFF by default "
+                         "(opt-in until a run measures it). The tap packs the real "
+                         "scan code, as the engine's window proc reads it from lParam "
+                         "(see the module docstring / docs/rea/reference/"
+                         "RndrGL_Input_Path.txt)")
     ap.add_argument("--no-advance-menu", dest="advance_menu", action="store_false",
                     help="never post game-window input (the default; GH #71)")
     ap.set_defaults(advance_menu=False)

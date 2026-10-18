@@ -1,8 +1,23 @@
 # ADR-0466: The engine reads input via DirectInput / Raw Input, so the simulator cannot post past the startup splash
 
-- Status: Accepted (scheduled autoloop wake 63, GH #71 requirement 1)
+> **CORRECTED (autoloop wake 84).** The *measurements* below stand (MSystem.dll
+> resolves DirectInput/XInput and never polls them; RndrGL.dll registers Raw Input;
+> `GetAsyncKeyState`/`GetKeyboardState` are imported by nothing). The **conclusion
+> drawn from them -- "a posted window message cannot drive this engine" -- is
+> false**, because the taps this ADR posted carried `lParam = 1`, i.e. scan code
+> **0**: the engine's own window procedure resolves a key from `lParam >> 16` and
+> forwarded key code 0, an unmapped key. With the real scan code
+> (`MapVirtualKeyA(VK_RETURN, MAPVK_VK_TO_VSC) = 0x1C`) the same targeted
+> `PostMessage` **does** advance the front-end into a live level: a replicated
+> A/A/B/B (2 runs with `--advance-menu`, 2 without) is recorded in
+> **ADR-0485** and `docs/rea/reference/RndrGL_Input_Path.txt`. The `WM_INPUT` /
+> Raw Input surface this ADR points at is **mouse-only** (one `RAWINPUTDEVICE`,
+> `usUsagePage = 1` / `usUsage = 2`, `RIDEV_INPUTSINK`), so it could never have
+> carried a keyboard confirm either way.
+
+- Status: Accepted for its measurements; conclusion superseded by ADR-0485
 - Date: 2026-10-17
-- Related: GH #71, GH #68 (simulator harness), GH #72 (splash is mislabelled), ADR-0447 (gameplay-only gate), `src/hook/gesture_tap.cpp`
+- Related: GH #71, GH #68 (simulator harness), GH #72 (splash is mislabelled), ADR-0447 (gameplay-only gate), `src/hook/gesture_tap.cpp`, **corrected by ADR-0485**
 
 ## Context
 
@@ -125,4 +140,54 @@ and the input bridge (hook `DirectInputCreateA`/`GetDeviceState`/`XInputGetState
 are loaded at runtime (`dinput.dll` + `DirectInputCreateA`, `xinput1_3.dll` +
 `XInputGetState`, both via `LoadLibrary`/`GetProcAddress`), so the bridge must
 intercept the resolved proc, not an IAT import.
+
+## Correction (autoloop wake 84) — the posted message was malformed, and the message path works
+
+Read-only REA of the shipped renderer (`docs/rea/reference/RndrGL_Input_Path.txt`,
+`RndrGL.dll` sha256 `b07baac4…`, image base `0x10000000`) settles what this ADR
+inferred:
+
+- `RndrGL.dll` owns the game window and the pump: `RegisterClassA`/
+  `CreateWindowExA`, `GetMessageA(NULL, 0, 0, &msg)` → `TranslateMessage` →
+  `DispatchMessageA`, and a 7-entry switch for `WM_INPUT`, `WM_KEYDOWN`,
+  `WM_KEYUP`, `WM_CHAR`, `WM_DEADCHAR`, `WM_SYSKEYDOWN`, `WM_SYSKEYUP`. Posted
+  messages **are** dispatched.
+- Its key handler (`0x10042817`/`0x100428aa`) takes the key from
+  `(lParam >> 16) & 0x1ff` and falls back to `MapVirtualKeyA(vk, 0)` only when
+  that field is the `0x100` sentinel; `+0x100` marks an extended key. So
+  `lParam = 1` (this ADR's taps) forwarded key code **0** — an unmapped key.
+- Raw Input is **mouse-only**: one `RAWINPUTDEVICE`
+  (`usUsagePage = 1`, `usUsage = 2`, `dwFlags = RIDEV_INPUTSINK`,
+  `hwndTarget` = the game window) and a `WM_INPUT` handler that returns unless
+  `dwType == RIM_TYPEMOUSE`. There is no raw-input keyboard device.
+
+Harness change: `confirm_key_messages()` packs the real scan code
+(`vk_to_scancode`, OS `MapVirtualKeyW` with a pure fallback table), and
+`menu_advance` records the packed `vk`/`scan`. It stays **opt-in**
+(`--advance-menu`, default off).
+
+**Replicated A/A/B/B** (`RIDDICKVR_SIM=1`, read-only shadow, `--require-fresh-hook`,
+hook `sha256=e82a2dee526e` = the repo build, no deploy):
+
+| run | taps | first non-card page | page for the rest of the run |
+|-----|------|---------------------|------------------------------|
+| A (60 s) | 6 | frame **3300** (loading bar, mean 47.9) | dark level, mean 8.3/9.4 |
+| A2 (45 s) | 6 | frame **3300** | dark level, mean 8.3/9.4 |
+| B (60 s) | 0 | — | the title card, mean **86 ↔ 100** (identical to ADR-0484's measurement), frames 4500–17700 |
+| B2 (45 s) | 0 | — | the title card, mean 86 ↔ 100, frames 4500–13200 |
+
+Both tap runs left the start card at the ~5th-6th tap (≈11–14 s) through the
+`LOADING` page into a dark level page (brightened, it shows interior geometry, a
+lit hatch and the HUD blocks); both control runs sat on the pulsing title card for
+the entire run. Every run passed `scene_advanced` and `gameplay_full_bleed_reached`,
+so the *branch* signal still cannot tell the card from a level (GH #72) — the page
+*content* does, which is why the earlier negatives and ADR-0484's "the page is the
+start screen" reading were both session-specific: a run that never taps stays on
+the card.
+
+**What this changes:** GH #71 requirement 1's acceptance (≥2 distinct live
+gameplay frames, no OS input) is reachable — with `--advance-menu`, which now
+carries a well-formed key message. The Raw Input / DirectInput device routes
+remain as measured (unpolled), so this ADR's route (a) is no longer needed for
+the keyboard.
 

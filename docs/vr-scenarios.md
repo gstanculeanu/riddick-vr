@@ -99,16 +99,26 @@ scenario playback until gameplay is reached is follow-up work (#71/#72), and the
 `<= 0.75` — to cinema until the first full-bleed frame `>= 0.90` is ever
 measured; **on by default** since the 2026-10-18 live A/B, ADR-0478).
 
-**Caveat (GH #71 requirement 1, ADR-0466):** a mock run currently **stalls on the
-"PRESS ENTER" splash** and never reaches gameplay. `RIDDICKVR_SIM=1` suppresses
-the hook's `SendInput` (input safety), and the engine does not consume posted
-window messages — `MSystem.dll` uses **DirectInput** and `RndrGL.dll` uses **Raw
-Input**, both fed only by OS-level input. Measured: the harness found the game
-window (`MOS Win32/OpenGL`, visible, foreground) and posted 21 confirm taps over
-45 s with no effect. The harness carries the sim-safe attempt at
-`python tools/xrsim.py --reach-gameplay --advance-menu` (targeted window messages
-only), but it is **off by default** and measured ineffective; reaching gameplay
-needs a hook-side bridge of the engine's input or a start-at-level route.
+**Caveat (GH #71 requirement 1, ADR-0466 — CORRECTED in wake 84 by ADR-0485):** a
+mock run without input **stalls on the game's front-end "start card"** (the pulsing
+THE CHRONICLES OF RIDDICK / ASSAULT ON DARK ATHENA page). `RIDDICKVR_SIM=1`
+suppresses the hook's `SendInput` (input safety), and the earlier reading that the
+engine "does not consume posted window messages" was **wrong**: the taps it posted
+carried `lParam = 1`, i.e. scan code **0**, and `RndrGL.dll`'s window procedure
+decodes a key from `lParam >> 16` — so the engine received key code 0 (an unmapped
+key). Its pump is `GetMessageA(NULL,0,0)` → `TranslateMessage` →
+`DispatchMessageA`, which *does* dispatch posted messages; Raw Input there is
+**mouse-only** (one `RAWINPUTDEVICE`, page 1 / usage 2, `RIDEV_INPUTSINK`). Full
+record: `docs/rea/reference/RndrGL_Input_Path.txt`.
+
+With the real scan code (`MapVirtualKeyA(VK_RETURN) = 0x1C`) the same targeted
+window message **does** advance the front-end: a replicated A/A/B/B (2 runs with
+`python tools/xrsim.py --reach-gameplay --advance-menu`, 2 without) left the start
+card at the ~6th tap into the `LOADING` page and then a live dark level, while both
+no-tap controls sat on the card for the whole 45-60 s run (ADR-0485). The flag stays
+**off by default** — it is a front-end driver, and the harness's gameplay branch
+still cannot tell the card from a level (`scene_advanced` and
+`gameplay_full_bleed_reached` pass on both, GH #72).
 
 **Update (wake 64, ADR-0466 addendum):** the *command-line* route is dead too.
 The engine's console surface is real (`loadgame`/`savegame`/`changemap`/

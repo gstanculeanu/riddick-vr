@@ -2,6 +2,93 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 84 — 2026-10-18 05:52 (scheduled loop)
+- **Unit:** GH **#71 requirement 1** — the confirm tap the harness posted was
+  **malformed** (scan code 0), and with the real scan code the same targeted
+  window message **reaches a live level**. Why: it is the explicit "Next" of wake
+  83 ("the only route to a valid #67 datum") and the top player-visible blocker
+  (#68/#67/#64 are all gated on a run that reaches gameplay). Harness-only
+  (`tools/xrsim.py` + 2 tests + a `--selftest` case + `docs/rea/reference/
+  RndrGL_Input_Path.txt` + ADR-0485 + ADR-0466 correction + `docs/vr-scenarios.md`
+  + the #71 `verify_reported_fixes` invariant); **no C++ change, no build, no
+  deploy, no install write**.
+- **DECISIVE root cause (read-only REA, shipped 2009 `RndrGL.dll` 939248 B, sha256
+  `b07baac43ce4…`, image base `0x10000000`):** `RndrGL.dll` owns the game window
+  and its pump (`GetMessageA(NULL,0,0)` → `TranslateMessage` → `DispatchMessageA`,
+  `0x1001c407`), and its window proc's switch (`0x10042698`, table `0x10042f7c`)
+  handles `WM_INPUT`/`WM_KEYDOWN`/`WM_KEYUP`/`WM_CHAR`/`WM_SYSKEY*`. The key
+  handler (`0x10042817`) decodes the key from **`(lParam >> 16) & 0x1ff`** —
+  `MapVirtualKeyA(vk,0)` is used **only** when that field is the `0x100` sentinel —
+  and forwards it to the input context's vtable slot `0xc4`. The harness's tap
+  sent `lParam = 1` ⇒ **key code 0** ⇒ "the engine ignores posted messages" was
+  never measured (ADR-0466 corrected in place). **Also closed:** `RegisterRawInputDevices`
+  (`0x10040b5a`) is called once with **one** `RAWINPUTDEVICE` = page 1 / usage 2
+  (**mouse**), `dwFlags = 0x100` (`RIDEV_INPUTSINK`), and the `WM_INPUT` handler
+  returns unless `dwType == RIM_TYPEMOUSE` (`0x1004270c`), so GH #80's
+  "fabricate the confirm on the Raw Input path" cannot carry a keyboard event.
+- **Change:** `tools/xrsim.py` `vk_to_scancode(vk)` (OS `MapVirtualKeyW` +
+  a pure `KEY_SCANCODE_FALLBACK` table), `KEY_LPARAM_NO_SCANCODE = 0x100`, and
+  `confirm_key_messages(scan=None)` now packs the real scan code (0x1C for
+  `VK_RETURN`, exactly what `src/hook/gesture_tap.cpp` posts); `menu_advance`
+  records `vk`/`scan`; `--advance-menu` stays **off by default**.
+- **EVIDENCE (live, `RIDDICKVR_SIM=1`, read-only per-run shadow, `--require-fresh-hook`,
+  NO deploy, hook `sha256=e82a2dee526e` 495616 B = the repo build,
+  `deployed_hook_matches_build` PASS in every run) — replicated A/A/B/B:**
+  | run | `--advance-menu` | dumped | pages |
+  |---|---|---|---|
+  | A (60 s) | yes, 6 taps | 46 (2400-15900) | title card → `LOADING` (3300) → **dark level** (4200+) |
+  | A2 (45 s) | yes, 6 taps | 33 (2400-12000) | title card → `LOADING` (3300) → **dark level** (3600+) |
+  | B (60 s) | no | 45 (4500-17700) | pulsing title card, mean **86 ↔ 100** (std 46-49), whole run |
+  | B2 (45 s) | no | 30 (4500-13200) | pulsing title card, whole run |
+  Both tap runs left the card at the ~5th-6th tap (≈11-14 s) and hold a dark page
+  (brightened: interior geometry, a lit hatch, the HUD blocks) — i.e. a live
+  scene, not a plate; both controls never left the card (that mean 86 ↔ 100 is
+  exactly ADR-0484's title-card measurement). All four runs PASS
+  `scene_advanced` (all frames distinct — the card's fade suffices) and
+  `gameplay_full_bleed_reached` (fill 1.00), so the **branch** signal still cannot
+  tell card from level (GH #72); the page **content** does. A/A also PASS
+  `horizontal_disparity_present` (dx=-48, dy=0) and `capture_gate_matches_saved`
+  (46/46, 0 mismatch, 43/54 straddled = GH #79's race). Artifacts/report in
+  `%TEMP%\oc_wake84`.
+- **Evidence (offline):** `tools/test_xrsim.py` PASS (rewritten
+  `test_confirm_key_messages_are_wellformed` — pins `scan == 0x1C`, the `0x100`
+  sentinel exclusion, and that the pre-wake-84 form stays expressible — + new
+  `test_confirm_scancode_fallback_is_pure`); `xrsim --selftest` PASS
+  (+`confirm_tap_packs_scancode`); all **12 `tools/test_*.py` PASS**;
+  `verify_reported_fixes` (extended #71 invariant), `scenario_tests.py --check`,
+  `verify_hook_init`, `validate_addresses`, `verify_test_artifacts` PASS.
+  **No C++ → no `build-all`/CTest** (documented).
+- **Blocker / honest limit:** four runs is a small sample; nothing here claims a
+  *cause* deeper than "the corrected tap is followed by the advance in 2/2 runs and
+  absent in 2/2 controls" (ADR-0448 once measured an auto-advance without any tap).
+  The reached page is a live scene but its *state* is not established (the run
+  drives no movement — the mock controller state never reaches the game's own
+  input; the 46 frames differ only by the page's light flicker). Only `VK_RETURN`
+  is exercised. Reaching gameplay via the flag stays opt-in; a *non-tapping* run
+  can still grade the start card as gameplay (GH #72).
+- **Next:** (1) with a reachable live level, take the **#67 step-3 datum** —
+  `--reach-gameplay --advance-menu --ini ViewmodelObserve=1 --ini ViewmodelTrace=1`
+  and re-read the `fp` submission sample + `viewmodel_candidate_is_volumetric`
+  (wakes 79-83's samples were all taken on the start card); (2) the rest of the
+  deploy-gated ladder is now validatable on a real scene (#76 step 1, #79 hook
+  half, #68 req 5, #72 req 2); (3) a page-content discriminator so
+  `gameplay_full_bleed_reached` cannot PASS on the front-end card (GH #71 req 2);
+  (4) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (5) GH #83 manual-session blind spot.
+- **Infra incident (self-reported):** this wake's file edit **replaced**
+  `tools/autoloop/logs/STATE.log` instead of appending to it, destroying its
+  ~107 KB / wakes-1-83 history. It is covered by `tools/autoloop/.gitignore`
+  (`logs/`), so there is no git copy and it cannot be restored (the runner keeps
+  only the last couple of `run-*.log`s, whose wrapped `-Tail` echoes are lossy).
+  The **durable, committed per-wake record is `tools/autoloop/STATE.md`** (complete,
+  newest-first) plus the per-wake GitHub comments, so no decision or evidence is
+  lost; the log keeps a header note + this line and must be **appended** to from
+  now on. Filed as **GH #88** (an agent tool overwriting an append-only log);
+  `%TEMP%\opencode\append_state_log*.py` show an earlier wake hit the same hazard.
+- **Branch:** committed on **main** (single-writer); install untouched (deployed
+  hook `479232 B 12:47`, install ini `7363 B`, install log `7635 B 00:25` — all
+  unchanged), no leftover processes, live lock released.
+
+
 ## Wake 83 — 2026-10-18 05:12 (scheduled loop)
 - **Unit:** GH **#67 step 1 (fourth correction)** — the "arms candidate" is a
   **plane**, so the window being identified is *not* the viewmodel. Wake 82 read
