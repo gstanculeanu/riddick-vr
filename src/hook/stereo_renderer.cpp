@@ -422,6 +422,32 @@ static int s_dibrCaptureCountdown = 0;      // depth clears until the next captu
 static uint32_t s_dibrDepthClears = 0;      // depth-only clears seen while opt-in
 static uint32_t s_dibrCaptures = 0;         // captures actually taken
 
+// GH #76 (ADR-0503): the world-depth hunt. The engine's scene depth is not in the
+// window backbuffer (ADR-0501) and not in the buffer the depth-only clear targets
+// (ADR-0502, far-only), so instead of guessing a capture point again, read *every*
+// framebuffer object the engine generated (ADR-0503's Hook_glGenFramebuffers
+// records the ids) at the depth-only clear -- the one instant a readback is
+// *proven* to return real depth (ADR-0502 measured this clear's own buffer at
+// raw 0.905..1.000, so that buffer is the scan's built-in positive control) -- and
+// LOG each one's raw depth. This is evidence-gathering only: it never rewrites the
+// snapshot or the warp, so it cannot regress the stereo pair.
+//
+// `s_dibrFboFound` latches once a genuinely near buffer is seen so the scan stops
+// spending readbacks; nothing consumes the id yet (that is the follow-up unit).
+static bool s_dibrFboFound = false;          // a scan saw a near-world-depth buffer
+static uint32_t s_dibrFboScanCountdown = 0;  // depth-only clears until the next scan
+static uint32_t s_dibrFboScans = 0;          // full scans actually taken
+// A full scan reads every recorded FBO, so it runs on a slow cadence (in
+// depth-only clears) rather than per frame.
+static const uint32_t kDibrFboScanEveryClears = 600;
+static const int kDibrFboScanMax = 32;       // matches OpenGLProxy's recorded cap
+
+// A raw window depth this close to 0 means geometry within a few metres at the
+// measured world projection (near 4.0 m, ADR-0488): the visible world pass. The
+// depth-only clear's own buffer measured a minimum of 0.905 (~41 m, ADR-0502), so
+// anything below this clearly separates "near world" from that far-only pass.
+static const float kDibrNearDepthMax = 0.50f;
+
 // Cap on how many presented frames a captured world depth may age before it is
 // treated as stale instead of being applied to a frame it no longer describes.
 static const uint64_t kDibrCaptureMaxAgeSwaps = 8;
@@ -559,6 +585,76 @@ static void BuildDibrGrid(GLint ox, GLint oy, GLint srcW, GLint srcH,
 
 } // namespace (DIBR helpers)
 
+// GH #76 (ADR-0503): the world-depth hunt, run at the depth-only clear. ADR-0502
+// closed the clear's *own* buffer as the world-depth source (far-only, nearest
+// ~41 m), but that same clear is the only instant a readback is proven to return
+// real depth -- so it is the right place to look for the *other* buffer that holds
+// the visible world pass. Read every framebuffer object the engine generated (the
+// ids Hook_glGenFramebuffers recorded), log each one's raw depth, and latch a
+// genuinely near one. Evidence only: nothing here rewrites the snapshot or the
+// warp, so it cannot regress the stereo pair.
+void StereoRenderer::ScanFramebufferDepths(GLint w, GLint h) {
+    if (!g_vrConfig.stereoParallaxDibr) return;
+    DibrReadPixels_t read = DibrReadPixels();
+    if (!read || !OpenGLProxy::real_glBindFramebuffer) return;
+    if (w < 8 || h < 8) return;
+    if (static_cast<double>(w) * static_cast<double>(h) > 4.0e6) return;
+
+    GLuint ids[kDibrFboScanMax];
+    const int n = OpenGLProxy::GetKnownFramebufferIds(ids, kDibrFboScanMax);
+    ++s_dibrFboScans;
+    VR_LOG_INFO("DIBR fbo scan: begin #%u known=%d rect=%dx%d", s_dibrFboScans, n, (int)w, (int)h);
+
+    float bestLo = 1.0f;
+    GLuint bestFbo = 0;
+    std::vector<float> probe;
+    // i == -1 is the target of this clear (id 0 = the window); the rest are the
+    // engine's generated FBOs.
+    for (int i = -1; i < n; ++i) {
+        const GLuint fbo = (i < 0) ? 0u : ids[i];
+        if (fbo != 0 && (fbo == m_leftFbo || fbo == m_rightFbo)) continue; // our eye targets
+        OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, fbo);
+        // Report the binding the driver actually accepted, so a scan that reads
+        // "far" everywhere can be distinguished from a scan whose reads failed.
+        GLint bound = -1;
+        if (DibrGetIntegerv()) {
+            DibrGetIntegerv()(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &bound);
+        }
+        // No skip on status: an FBO without a depth attachment (or a name the
+        // engine has since deleted) must still be logged so "no near depth" is a
+        // statement about the whole set. The 1.0 pre-fill keeps a failed or
+        // partial read from reading as near geometry.
+        GLenum status = 0x8CD5 /* GL_FRAMEBUFFER_COMPLETE */;
+        if (fbo != 0 && OpenGLProxy::glCheckFramebufferStatus) {
+            status = OpenGLProxy::glCheckFramebufferStatus(0x8CD5 /* GL_FRAMEBUFFER */);
+        }
+        probe.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 1.0f);
+        read(0, 0, w, h, 0x1902 /* GL_DEPTH_COMPONENT */, 0x1406 /* GL_FLOAT */, probe.data());
+        float lo = 1.0f, hi = 0.0f;
+        for (float d : probe) {
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+        }
+        VR_LOG_INFO("DIBR fbo scan: fbo=%u bound=%d %dx%d status=0x%04X rawDepth=[%.3f..%.3f]",
+                    (unsigned)fbo, (int)bound, (int)w, (int)h, (unsigned)status, lo, hi);
+        if (lo < bestLo) {
+            bestLo = lo;
+            bestFbo = fbo;
+        }
+    }
+    OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+
+    if (bestFbo != 0 && bestLo > 0.001f && bestLo <= kDibrNearDepthMax) {
+        s_dibrFboFound = true;
+        VR_LOG_INFO("DIBR fbo scan: NEAR world depth is in fbo=%u (rawMin=%.3f <= %.2f); "
+                    "there is a real depth source to wire in", (unsigned)bestFbo, bestLo,
+                    kDibrNearDepthMax);
+    } else {
+        VR_LOG_INFO("DIBR fbo scan: no near world depth in any FBO (nearest fbo=%u rawMin=%.3f)",
+                    (unsigned)bestFbo, bestLo);
+    }
+}
+
 // GH #76 (ADR-0502): the world-pass depth snapshot. Called from Hook_glClear for
 // a depth-only clear, *before* the engine's clear executes, so the depth buffer
 // still holds the world pass. Reads the currently bound draw framebuffer's depth
@@ -568,6 +664,20 @@ static void BuildDibrGrid(GLint ox, GLint oy, GLint srcW, GLint srcH,
 void StereoRenderer::OnDepthOnlyClear() {
     if (!g_vrConfig.stereoParallaxDibr) return;
     ++s_dibrDepthClears;
+    // GH #76 (ADR-0503): look for the near visible world pass in the engine's
+    // *other* framebuffer objects, at this clear -- the one point where a depth
+    // readback is proven to return real depth (this clear's own buffer measures
+    // raw 0.905..1.000, ADR-0502). Runs before the capture throttle so the scan
+    // cadence is independent of DibrDepthEvery; latched off once found.
+    if (!s_dibrFboFound) {
+        if (s_dibrFboScanCountdown > 0) {
+            --s_dibrFboScanCountdown;
+        } else {
+            s_dibrFboScanCountdown = kDibrFboScanEveryClears;
+            ScanFramebufferDepths(m_viewportWidth > 0 ? m_viewportWidth : m_windowWidth,
+                                  m_viewportHeight > 0 ? m_viewportHeight : m_windowHeight);
+        }
+    }
     if (s_dibrCaptureCountdown > 0) {
         --s_dibrCaptureCountdown;
         return;

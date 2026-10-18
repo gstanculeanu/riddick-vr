@@ -2,6 +2,85 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 101 — 2026-10-18 13:45 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) — wake 100's
+  Next #1**: the hook now records **every** framebuffer object the engine allocates
+  and **scans each one's depth** at the depth-only clear; the scan measures that
+  **no hook-readable FBO holds the near world pass** (ADR-0503). Real C++ change ->
+  `build-all` + CTest on both arches; 4 live runs on read-only per-run shadows (no
+  deploy, no install write).
+- **Why this unit:** the standing prompt's top item (#76) and ADR-0502's explicit
+  Next #1: "a run that ... **scans several FBOs' depth** would name [the pass]".
+  Wake-99/100 closed the window depth (ADR-0501) and the depth-only clear's own
+  buffer (ADR-0502); the remaining question was *which* buffer holds the near world.
+- **Change (docs + instrument only, no warp change):**
+  - `src/hook/opengl_proxy.{h,cpp}`: wrap `glGenFramebuffers`/`EXT`
+    (`Hook_glGenFramebuffers`, forwarding, returned only when the real entry point
+    resolved), record the generated ids (bounded 32) in `s_knownFramebuffers`, and
+    expose `GetKnownFramebufferIds()`. The engine's scene FBO ids were previously
+    invisible (only ids it *bound* surfaced).
+  - `src/hook/stereo_renderer.{h,cpp}`: NEW `ScanFramebufferDepths()`, called from
+    `OnDepthOnlyClear()` (throttled `kDibrFboScanEveryClears=600` clears, latched
+    off once a near buffer is seen). It binds each id as `GL_READ_FRAMEBUFFER`,
+    logs `DIBR fbo scan: fbo=.. bound=.. WxH status=0x.. rawDepth=[lo..hi]` per FBO
+    plus a summary, pre-fills 1.0 (far) so a failed/partial read cannot read as
+    near, and logs `bound=` (the driver's read binding) so "reads returned far" is
+    distinguishable from "reads failed". **Evidence only** — it never rewrites
+    `s_dibrCapture` or the warp, so there is no regression surface.
+  - NEW `docs/adr/0503-…`; `tools/verify_reported_fixes.py` new #76/ADR-0503
+    invariant; `docs/adr/README.md` (head -> 0503), `docs/vr-scenarios.md`,
+    `src/hook/README.md`.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 510464 B
+  `97056c7473c1` + x64 host); **CTest 29/29 (x86) and 27/27 (x64)**; all 12
+  `tools/test_*.py` exit 0; `verify_reported_fixes`, `scenario_tests.py --check`,
+  `verify_hook_init`, `validate_addresses`, `verify_test_artifacts`,
+  `xrsim --selftest` PASS.
+- **EVIDENCE live (`RIDDICKVR_SIM=1`, read-only per-run shadows,
+  `--reach-gameplay --duration 100 --advance-menu --advance-min-taps 8
+  --require-fresh-hook --require-parallax --downscale 4 --ini
+  StereoParallaxDibr=1`; `deployed_hook_matches_build` PASS each):**
+  - Runs A/C did not measure (the known launcher/menu flake: 0 captured frames).
+    Run B reached gameplay (2 frames, fill 1.00) with the pre-final build; the
+    **final** instrument is Run D.
+  - **Run D (in-level gameplay, 21,539/21,600 comfort frames, fill 0.87-0.95, 17
+    scans, hook `97056c7473c1`):** every scan the same — `fbo=0` window
+    `rawDepth=[1.000..1.000]`; `fbo=3,4,5,7,8,9,10` `[1.000..1.000]`; **only
+    `fbo=6`** has depth, at raw `[0.775..0.906]` (≈ 23-41 m at the measured world
+    projection, near 4.0 / far 2048.0, ADR-0488). `bound=` echoed every id, so the
+    bindings/reads are real. **0 of 17 scans found a near buffer.** The paired
+    reprojection line stayed `DIBR: src=clear ... fbo=6 depth_z=[36.6..429.4]m
+    fullDisp=[0.11..1.40]px ... use=0` (the ADR-0502 far-only pass).
+  - **Run C (full-bleed reached, 0 frames):** same picture **plus the positive
+    control** — one scan read `fbo=6 rawDepth=[0.812..1.000]` beside the clear's
+    own capture `depth_z=[13.2..81.8]m`, proving the read returns real depth for
+    the one buffer that has an attachment.
+- **Verdict / consequence (honest):** ADR-0502's Next #1 is **not supported** — no
+  hook-readable FBO holds the visible near world pass. With ADR-0501 (window) and
+  ADR-0502 (clear's buffer), **every hook-observable depth source on this title is
+  far-only**, so GH #76's *interim* (option 2) has **no usable depth source**;
+  `--require-parallax` still fails and the milestone is not reached. The scan is
+  opt-in (`StereoParallaxDibr=0` default) and evidence-only -> **no regression**.
+  The remaining route is GH #76 option (1) (a second engine view), which needs a
+  separately scoped engine render seam (the ADR-0406 seam is dead code).
+- **Blocker / honest limit:** the `status=` field is `0x0000` for every engine FBO
+  (the driver rejects `glCheckFramebufferStatus(GL_FRAMEBUFFER)` on a read-only
+  binding), so attachment completeness is not asserted there — the `bound=` echo
+  and the FBO-6 positive control carry the read's validity instead. A
+  *multisampled* depth attachment would make `glReadPixels` fail and read as
+  uniformly far, which is not ruled out for the non-FBO-6 buffers; the scan rect is
+  the window's 1280x605 (a smaller FBO would still show near values in the
+  overlap); scans are 600 clears apart, so a per-frame transient FBO could be
+  missed; nothing about the 2004 build; no headset.
+- **Next:** (1) **#76 needs a different scope** — per-eye rendering via an engine
+  render seam (option 1), or accept the documented shift-stereo and drop the depth
+  hunt; do **not** spend more wakes scanning for depth; (2) move to the
+  player-visible queue GH #63/#64/#61 (hands), then the P1 bugs
+  #45/#49/#50/#51/#65; (3) `StereoParallaxDibr=0` stays the default; (4)
+  `DEFAULT_GAME_DIR` 2004-vs-2009; (5) GH #83/#88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY per-run shadows; no deploy, no install write); no leftover game/host
+  processes; live lock released. `STATE.log` **appended** (never replaced — GH #88).
+
 ## Wake 100 — 2026-10-18 13:10 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) — wake 99's
   Next #1**: the world-pass depth is now captured at the **mid-frame depth-only

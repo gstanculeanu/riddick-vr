@@ -61,6 +61,15 @@ private:
     // smoothed) so baked gameplay bars are cropped out; menus use fit instead.
     // Rect in absolute GL-origin (y-up) backbuffer coords.
     void ScanActiveRegion(GLint ox, GLint oy, GLint srcW, GLint srcH);
+
+    // GH #76 (ADR-0503): depth scan over the engine's own framebuffer objects,
+    // run at the depth-only clear (the one instant a readback is proven to return
+    // real depth). Reads every FBO the engine generated (ADR-0503's
+    // Hook_glGenFramebuffers records the ids), logs each one's raw depth, and
+    // latches a genuinely near one. Evidence only -- it never changes the
+    // reprojection, so it cannot regress the stereo pair. A no-op unless
+    // StereoParallaxDibr=1.
+    void ScanFramebufferDepths(GLint w, GLint h);
     void BlitEye(bool isLeftEye, GLint sx0, GLint sy0, GLint sx1, GLint sy1,
                  GLint dx0, GLint dy0, GLint dx1, GLint dy1);
 

@@ -374,7 +374,7 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   carries `latch=.. fill=.. fullBleed=..`, and the latch logs its own demotion
   once (`cold-start latch demoted ...`). See ADR-0459 / ADR-0478.
 
-## Native stereo interim: depth-based reprojection (GH #76, ADR-0501 / ADR-0502)
+## Native stereo interim: depth-based reprojection (GH #76, ADR-0501 / ADR-0502 / ADR-0503)
 - True per-eye view/projection needs the engine to render the scene twice. That is
   architecturally blocked here (ADR-0501): `CameraHook::StabilizeViewMatrix` -- the
   ADR-0406 "intended seam" -- is dead code (no call sites), and the engine applies
@@ -406,6 +406,17 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   present-but-far depth otherwise falls back to the legacy blit. Without this the
   far-depth warp collapsed the pair to a mono duplicate (measured). The `DIBR:`
   log line carries `src=.. minSep=.. use=..`. See ADR-0501 / ADR-0502.
+- **Depth hunt closed (ADR-0503).** ADR-0502's "find the buffer that holds the near
+  world depth" is measured and **not supported**: `Hook_glGenFramebuffers` records
+  every framebuffer id the engine allocates (`GetKnownFramebufferIds()`), and
+  `StereoRenderer::ScanFramebufferDepths()` (run from `OnDepthOnlyClear`, the one
+  point a readback is proven real) reads each one's depth and logs
+  `DIBR fbo scan: fbo=.. bound=.. WxH status=0x.. rawDepth=[lo..hi]`. Live in-level
+  gameplay (17 scans): the window and every engine FBO read uniformly far; only
+  `fbo=6` has any depth and it is the far-only pass of ADR-0502 (≈ 23-41 m). So the
+  interim has **no usable depth source**; the scan is evidence-only (it never
+  rewrites the snapshot or the warp) and `StereoParallaxDibr=0` stays the default.
+  GH #76's remaining route is option (1), a separately scoped second engine view.
 
 
 

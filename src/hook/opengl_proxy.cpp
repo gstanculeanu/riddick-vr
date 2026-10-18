@@ -21,6 +21,7 @@ bool OpenGLProxy::s_initialized = false;
 // Extension pointers
 PFNGLBINDFRAMEBUFFERPROC OpenGLProxy::glBindFramebuffer = nullptr;
 PFNGLGENFRAMEBUFFERSPROC OpenGLProxy::glGenFramebuffers = nullptr;
+PFNGLGENFRAMEBUFFERSPROC OpenGLProxy::real_glGenFramebuffers = nullptr;
 PFNGLDELETEFRAMEBUFFERSPROC OpenGLProxy::glDeleteFramebuffers = nullptr;
 PFNGLFRAMEBUFFERTEXTURE2DPROC OpenGLProxy::glFramebufferTexture2D = nullptr;
 PFNGLCHECKFRAMEBUFFERSTATUSPROC OpenGLProxy::glCheckFramebufferStatus = nullptr;
@@ -63,6 +64,27 @@ static GLuint s_lastBoundFramebuffer = 0;
 // rebind to 0 (the window). A depth-only clear clears this one's depth buffer, so
 // the world-pass depth can be captured there before the engine wipes it.
 static GLuint s_currentDrawFramebuffer = 0;
+
+// GH #76 (ADR-0503): every framebuffer-object name the engine generated, in
+// generation order. The engine's scene FBOs are otherwise invisible to the hook
+// (only bound ids surface in Hook_glBindFramebuffer) and the depth-only clear's
+// buffer reads far-only (ADR-0502), so the swap-time depth scan iterates this set
+// to name the buffer that carries the near world pass. Bounded: a title with more
+// live FBOs than this simply stops growing the list (the ones already recorded
+// stay scannable).
+static const int kKnownFramebufferMax = 32;
+static GLuint s_knownFramebuffers[kKnownFramebufferMax] = {0};
+static int s_knownFramebufferCount = 0;
+
+static void RecordKnownFramebuffer(GLuint id) {
+    if (id == 0) return;
+    for (int i = 0; i < s_knownFramebufferCount; ++i) {
+        if (s_knownFramebuffers[i] == id) return;
+    }
+    if (s_knownFramebufferCount < kKnownFramebufferMax) {
+        s_knownFramebuffers[s_knownFramebufferCount++] = id;
+    }
+}
 
 // Real WGL & GL Typedefs
 typedef HGLRC (WINAPI *PFN_wglCreateContext)(HDC);
@@ -313,7 +335,12 @@ void OpenGLProxy::QueryContextExtensions() {
         real_glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)LoadExt("glBindFramebuffer", "glBindFramebufferEXT");
         glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)Hook_glBindFramebuffer;
     }
-    if (!glGenFramebuffers) glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)LoadExt("glGenFramebuffers", "glGenFramebuffersEXT");
+    if (!real_glGenFramebuffers) {
+        real_glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)LoadExt("glGenFramebuffers", "glGenFramebuffersEXT");
+        // Only expose the wrapper when the real entry point is known: a wrapper
+        // with no real target would swallow the engine's own FBO creation.
+        if (real_glGenFramebuffers) glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)Hook_glGenFramebuffers;
+    }
     if (!glDeleteFramebuffers) glDeleteFramebuffers = (PFNGLDELETEFRAMEBUFFERSPROC)LoadExt("glDeleteFramebuffers", "glDeleteFramebuffersEXT");
     if (!glFramebufferTexture2D) glFramebufferTexture2D = (PFNGLFRAMEBUFFERTEXTURE2DPROC)LoadExt("glFramebufferTexture2D", "glFramebufferTexture2DEXT");
     if (!glCheckFramebufferStatus) glCheckFramebufferStatus = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)LoadExt("glCheckFramebufferStatus", "glCheckFramebufferStatusEXT");
@@ -518,7 +545,14 @@ PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
         glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)Hook_glBindFramebuffer;
         return (PROC)Hook_glBindFramebuffer;
     } else if (procName == "glGenFramebuffers" || procName == "glGenFramebuffersEXT") {
-        glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)realProc;
+        // GH #76 (ADR-0503): record the ids the engine allocates so the depth
+        // scan can see them. Return the wrapper only with a real target behind
+        // it, so the engine's allocation can never be swallowed.
+        real_glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)realProc;
+        if (realProc) {
+            glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)Hook_glGenFramebuffers;
+            return (PROC)Hook_glGenFramebuffers;
+        }
     } else if (procName == "glDeleteFramebuffers" || procName == "glDeleteFramebuffersEXT") {
         glDeleteFramebuffers = (PFNGLDELETEFRAMEBUFFERSPROC)realProc;
     } else if (procName == "glFramebufferTexture2D" || procName == "glFramebufferTexture2DEXT") {
@@ -773,6 +807,30 @@ void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffe
     if (real_glBindFramebuffer) {
         real_glBindFramebuffer(target, framebuffer);
     }
+}
+
+// GH #76 (ADR-0503): record the FBO names the engine allocates. Purely
+// forwards the call to the real entry point; the only addition is the id list.
+void WINAPI OpenGLProxy::Hook_glGenFramebuffers(GLsizei n, GLuint *framebuffers) {
+    RiddickVR_EnsureHookInitialized();
+    if (!real_glGenFramebuffers && real_wglGetProcAddress) {
+        // Resolve on demand (the engine may ask for this name before
+        // QueryContextExtensions ran); never swallow the call.
+        real_glGenFramebuffers =
+            (PFNGLGENFRAMEBUFFERSPROC)real_wglGetProcAddress("glGenFramebuffers");
+    }
+    if (!real_glGenFramebuffers) return;
+    real_glGenFramebuffers(n, framebuffers);
+    if (framebuffers) {
+        for (GLsizei i = 0; i < n; ++i) RecordKnownFramebuffer(framebuffers[i]);
+    }
+}
+
+int OpenGLProxy::GetKnownFramebufferIds(GLuint* out, int maxOut) {
+    if (!out || maxOut <= 0) return 0;
+    int n = s_knownFramebufferCount < maxOut ? s_knownFramebufferCount : maxOut;
+    for (int i = 0; i < n; ++i) out[i] = s_knownFramebuffers[i];
+    return n;
 }
 
 GLuint OpenGLProxy::GetLastBoundFramebuffer() {

@@ -70,6 +70,13 @@ public:
     static void WINAPI Hook_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
     static void WINAPI Hook_glClear(GLbitfield mask);
     static void WINAPI Hook_glBindFramebuffer(GLenum target, GLuint framebuffer);
+    // GH #76 (ADR-0503): record the framebuffer-object names the engine
+    // generates. The engine's scene FBO ids are otherwise invisible to the hook
+    // (only the ones it binds pass through Hook_glBindFramebuffer), and the
+    // depth-only clear's buffer was measured *far-only* (ADR-0502), so the
+    // remaining question -- "which buffer holds the near world pass?" -- needs
+    // the full set to read. Forwarding only; never suppresses.
+    static void WINAPI Hook_glGenFramebuffers(GLsizei n, GLuint *framebuffers);
 
     // GH #67 step 1 (corrected, ADR-0481): one *candidate* transform source is
     // the ARB vertex-program path. RndrGL.dll's static OPENGL32 import table has
@@ -187,7 +194,13 @@ public:
     // mid-frame can be stamped and dropped once it is stale instead of being
     // applied to a much later frame.
     static uint64_t GetSwapFrameCount();
+    // GH #76 (ADR-0503): the framebuffer-object names recorded by
+    // Hook_glGenFramebuffers (bounded). Copies at most `maxOut` ids and returns
+    // how many were written. The swap-time depth scan uses this to name the
+    // buffer that actually holds the near world pass.
+    static int GetKnownFramebufferIds(GLuint* out, int maxOut);
     static PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers;
+    static PFNGLGENFRAMEBUFFERSPROC real_glGenFramebuffers;
     static PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers;
     static PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D;
     static PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus;

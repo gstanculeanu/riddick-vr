@@ -284,9 +284,22 @@ sub-2 px disparity is below the legacy cue and the `minSep` gate keeps the legac
 blit: `stereo_kind=shift-only` (`spread=0`), `not_mono_duplicate` and
 `horizontal_disparity_present` PASS, and `--require-parallax` honestly FAILs.
 Without the gate (measured) the applied far-depth warp collapsed the pair to a
-mono duplicate (`identical=True`) — hence the gate. Next: identify the pass the
-depth-only clear's buffer belongs to / find the near-world depth (or capture at
-the projection load that closes the viewmodel window). Also recorded:
+mono duplicate (`identical=True`) — hence the gate.
+**ADR-0503 (wake 101) closes the search for the near world depth:** the hook now
+records every framebuffer id the engine allocates (`Hook_glGenFramebuffers` →
+`GetKnownFramebufferIds`) and, at the depth-only clear (the one point a readback is
+proven real), scans and logs each FBO's depth
+(`DIBR fbo scan: fbo=.. bound=.. WxH status=0x.. rawDepth=[lo..hi]`). Live,
+in-level gameplay (17 scans, `bound=` echoed each id so the reads are real): the
+window and every engine FBO read uniformly `1.000` (far); **only `fbo=6`** has any
+depth and it is the already-known far-only pass (`rawDepth [0.775..0.906]`, ≈ 23-41
+m). A one-scan positive control confirms the read is real
+(`fbo=6 rawDepth=[0.812..1.000]` beside the clear's own `depth_z=[13.2..81.8] m`).
+So **no hook-readable buffer holds the near world pass** and the interim depth
+reprojection has **no usable depth source** here; the scan is evidence-only (it
+never rewrites the snapshot) and `StereoParallaxDibr=0` stays the default. GH #76's
+remaining route is option (1), a second engine view — a separately scoped engine
+render seam, not another depth readback. Also recorded:
 `CameraHook::StabilizeViewMatrix` (the ADR-0406 "intended seam") is **dead code**
 (no call sites); head-look is injected as mouse movement, so per-eye dual
 rendering has no engine hook seam on this title.

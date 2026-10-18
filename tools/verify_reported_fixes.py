@@ -1025,6 +1025,32 @@ def main():
             "snapshot is cached and logged, and a warp below the legacy half-IPD "
             "separation falls back)")
 
+    # GH #76 / ADR-0503: ADR-0502's Next 1 ("find the buffer that actually holds
+    # the near world depth") is measured -- no framebuffer object the hook can read
+    # holds the visible world pass, so the interim has no usable depth source on
+    # this title. The guard pins the instrument that produced that measurement (the
+    # engine-FBO id recorder, the per-FBO depth scan run at the depth-only clear,
+    # and its evidence lines) plus the ADR, so the negative cannot be asserted
+    # without the mechanism behind it, and it pins that the scan is
+    # evidence-gathering only (it must not rewrite the snapshot).
+    require("Hook_glGenFramebuffers" in opengl_proxy_h and
+            "GetKnownFramebufferIds" in opengl_proxy_h and
+            "real_glGenFramebuffers" in opengl_proxy_h and
+            "Hook_glGenFramebuffers" in opengl_proxy_cpp and
+            "s_knownFramebuffers" in opengl_proxy_cpp and
+            "GetKnownFramebufferIds" in opengl_proxy_cpp and
+            "ScanFramebufferDepths" in
+            (ROOT / "src/hook/stereo_renderer.h").read_text(encoding="utf-8") and
+            "ScanFramebufferDepths" in stereo_renderer_cpp and
+            "DIBR fbo scan" in stereo_renderer_cpp and
+            "kDibrNearDepthMax" in stereo_renderer_cpp and
+            "kDibrFboScanEveryClears" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0503-gh76-no-readable-near-world-depth-buffer.md").exists(),
+            "GH #76 / ADR-0503: the FBO depth scan (engine FBO ids recorded by "
+            "Hook_glGenFramebuffers, a per-FBO depth read at the depth-only clear, "
+            "its evidence lines) must exist as the instrument behind the measured "
+            "negative 'no readable FBO holds the near world pass'")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never
