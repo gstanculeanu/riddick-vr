@@ -2,6 +2,95 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 90 — 2026-10-18 08:55 (scheduled loop)
+- **Unit:** GH **#67 step 1 (tenth correction, ADR-0492)** — the **engine-side**
+  identification the geometric corrections could not give: on the live (2009)
+  `Content\GameClasses_Win32_x86.dll` the first-person viewmodel is an **item
+  property** `VIEWMODEL` with an attach configuration `ATTACHPOINT`/
+  `ATTACHROTTRACK` on `CRPG_Object_Inventory`, **not a GL pass**. Read-only REA
+  (raw scan), no C++ change, no build, no deploy, no install write, no live run.
+- **Why this unit:** the explicit "Next" of wake 89 / ADR-0491 ("the remaining
+  route is engine-side REA of the RndrGL draw path / the engine's own viewmodel
+  draw, GH #66 approach 2") and the top player-visible item (#67). Nine corrections
+  had attacked the arms *through GL*; all are measured dead on the live level.
+- **Measured (read-only; subject sha256
+  `d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79`, 9,016,560 B,
+  the 2009 module — every deep-REA doc in `docs/rea/reference/` so far is the
+  **2004** build, 2.2 MB):**
+  - the RPG item-flag name table (VA **0x1082d728**, bit-ordered) reproduces
+    ADR-0435's bits on the target build: bit0 `wallcollision`, **bit1
+    `noviewmodel`**, bit2 `playerlaserbeam`, bit3 `__equipped__`, bit4
+    `rpgmodelflags`, bit5 `aiming`, bit6 `playerflashlight`, bit7 `forcewalk`, …,
+    bit31 `nomerge` (full 32-row table in the artifact);
+  - `.rdata` strings `VIEWMODEL`/`ATTACHPOINT`/`ATTACHROTTRACK` (VA
+    `0x1075a144`/`0x1075a150`/`0x1075a15c`) sit immediately before the class-name
+    string `CRPG_Object_Inventory` (`0x1075a16c`, referenced once from the
+    class-registry `.data` at `0x1082d9ec`);
+  - each of the three names has **exactly one** code xref, all in one
+    neighbourhood (`0x10265a92`, `0x10265b7a`, `0x10265b9d`);
+    `FUN_10265ab0` looks up `ATTACHROTTRACK`/`ATTACHPOINT` **by name** (call
+    `0x10283bba`) and reads a **bool** (vtable slot `0x1b8`) into its own bytes
+    `+0x362`/`+0x35a`; `FUN_10265a70` (leaf `ret 0Ch`) pushes `VIEWMODEL` into a
+    name-keyed call (`0x100162e0`) — read-vs-set not resolved without a decompile;
+  - `FirstPerson`/`ThirdPerson` are adjacent `.data` view-mode name-table entries
+    (VA `0x1083ff68`/`0x1083ff6c` → `0x1078be28`/`0x1078be1c`).
+- **Consequence:** consistent with ADR-0481/0482 (the transform is applied
+  engine-side to the submitted vertices), the arms reach GL as an ordinary
+  `glDrawElements` of an already-transformed, item-owned model — **no** GL
+  signature can isolate them. The next step is the `VIEWMODEL` **consumer** (the
+  model-instance creation in MXR) or the engine's own FP attach state, not another
+  geometry threshold. This closes the geometric branch of #67 step 1 by the
+  engine's own data model.
+- **NEW infra limit (measured):** the 2009 `GameClasses` is 9.0 MB and does **not**
+  fit the provider's single-request analysis budget — `rea function … --procedure
+  0x10265a92` → `provider_timeout` (`analyze_function`, `timeout_ms 330000`,
+  "Ghidra startup deadline elapsed") and `rea decompile … 0x10265a92` →
+  `execution_failure` (`procedure_pseudo_code`); the second attempt's Ghidra
+  headless java was left running past the budget and was killed by this wake (no
+  leftover processes). `rea doctor` is healthy; `RndrGL.dll` (939 KB, 2009) does
+  decompile. The 2009 engine-side code path needs a **persistent analysis snapshot**
+  across wakes (or a smaller module). Recorded in the artifact's §5.
+- **Change (docs + guard only):**
+  - **NEW `docs/rea/reference/GameClasses2009_ViewmodelProperties.txt`** — subject
+    hash + section map, the reproducer, the full 32-entry flag table with VAs, the
+    disassembly of `FUN_10265a70`/`FUN_10265ab0`, the view-mode table, the
+    provider-timeout record, and a "not claimed" section.
+  - **NEW `docs/adr/0492-gh67-engine-side-viewmodel-mechanism.md`.**
+  - `tools/verify_reported_fixes.py` — new GH #67 invariant pinning the artifact
+    (hash, `0x1082d728`+`noviewmodel`, the three property VAs, the three xrefs,
+    `CRPG_Object_Inventory`, `provider_timeout`, `FirstPerson`) + ADR-0492.
+  - `src/hook/README.md` (ADR-0492 bullet), `docs/vr-scenarios.md` (wake-90
+    correction), `docs/rea/reference/RndrGL_GL_Path.txt` §4 + not-claimed (the
+    engine-side answer and the partial 2009 exception).
+- **EVIDENCE offline:** `verify_reported_fixes` PASS (with the new invariant),
+  `scenario_tests.py --check` PASS, `verify_test_artifacts` PASS, `verify_hook_init`
+  PASS, `validate_addresses` PASS, `xrsim --selftest` PASS, all **12
+  `tools/test_*.py` exit 0**. **No C++ → no `build-all`/CTest** (documented).
+  Artifacts: `%TEMP%\opencode\wake90_*.py` (the read-only scan scripts) and
+  `wake90_func.json`/`wake90_decompile.json` (the provider-failure records).
+- **Blocker:** none. **Limits (honest):** raw-scan only — **no decompilation**
+  (`FUN_10265a70`/`FUN_10265ab0` are located by prologue + property-`push`, not by
+  Ghidra); the helper `0x10283bba` and vtable slot `0x110` are named by usage;
+  whether `FUN_10265a70` reads or *sets* `VIEWMODEL` is unresolved; "the viewmodel
+  mesh is created from this property" is an **inference** from the name + the
+  attach properties (the consumer is not decompiled); and whether the viewmodel is
+  **drawn at all** in the sampled passive/unarmed level start is *not* established
+  here (wake 89's open "state question"). One laptop, one module.
+- **Next:** (1) **#67 step 1 — the `VIEWMODEL` consumer** (MXR
+  `CXR_ModelInstance` creation for the equipped item) or the engine's own FP
+  attach state; (2) **persist a Ghidra analysis snapshot** so the 2009 modules can
+  be decompiled across wakes (the 330 s budget is measured insufficient for the
+  9 MB `GameClasses`) — or decompile a smaller 2009 module first; (3) the "is the
+  viewmodel even drawn on this level?" state question (the sim starts unarmed and
+  cannot drive engine input, GH #80); (4) `ViewmodelObserve=0` stays the default;
+  (5) the deploy-gated ladder on a real scene (#76 step 1, #79 hook half, #68
+  req 5); (6) page-content discriminator for `gameplay_full_bleed_reached` (#71
+  req 2); (7) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (8) GH #83 blind spot.
+- **Branch:** committed on **main** (single-writer); install untouched (no deploy,
+  no install write), no leftover processes (the stray Ghidra headless was killed),
+  live lock not taken (no live run). `STATE.log` **appended** (never replaced —
+  GH #88).
+
 ## Wake 89 — 2026-10-18 08:19 (scheduled loop)
 - **Unit:** GH **#67 step 1 (ninth correction, ADR-0491)** — the census of the
   first-person window's submission **mechanism** now covers all three entry-point

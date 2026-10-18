@@ -1,0 +1,199 @@
+# GameClasses_Win32_x86.dll (2009 Dark Athena) — the first-person viewmodel is an
+# item *property*, not a GL pass (GH #67 step 1 / GH #63 / #66)
+#
+# subject : F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll
+#           size 9,016,560 B  sha256 d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79
+#           (2009 *Assault on Dark Athena* build = the live/simulated target; the
+#            2004 *Escape from Butcher Bay* build is a different module, see ADR-0413)
+#           image base 0x10000000. Sections (raw offset == VA low bits for all three):
+#             .text   VA/raw 0x00001000  vsize 0x00739eb1
+#             .rdata  VA/raw 0x0073b000  vsize 0x000e4f4d
+#             .data   VA/raw 0x00820000  vsize 0x00067128
+# provider: raw byte/pointer scan (no decompiler). Reproduce with the script below.
+# method  : read-only ASCII + little-endian-pointer scan of the shipped module.
+#           No game file is modified.
+# purpose : GH #67 step 1. The geometric routes to the engine's first-person
+#           viewmodel are measured dead (ADR-0484 planar candidate; ADR-0487 window
+#           opener; ADR-0490 window-independent near-field; ADR-0491 immediate-mode
+#           census empty on the level). This records what the *engine* says the
+#           viewmodel is, engine-side, so the next step targets the right mechanism.
+# ------------------------------------------------------------------------------
+
+## 1. Reproducer (read-only)
+
+    import struct, hashlib
+    p = r"F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll"
+    d = open(p, "rb").read()
+    print(hashlib.sha256(d).hexdigest())        # d7e81d7d… (above)
+
+    def cstr(va):                                # VA == 0x10000000 + fileoff here
+        o = va - 0x10000000
+        return d[o:d.find(b"\0", o)].decode("latin1")
+
+    def refs(va):                                # imm32 cross-references (raw)
+        pat = struct.pack("<I", va); out=[]; s=0
+        while True:
+            i = d.find(pat, s)
+            if i < 0: return out
+            out.append(0x10000000+i); s = i+1
+
+    # the RPG item flag-name table (bit-ordered) starts at VA 0x1082d728
+    for bit in range(32):
+        print(bit, cstr(struct.unpack_from("<I", d, 0x82d728+4*bit)[0]))
+    for name, va in (("VIEWMODEL",0x1075a144),("ATTACHPOINT",0x1075a150),
+                     ("ATTACHROTTRACK",0x1075a15c),("CRPG_Object_Inventory",0x1075a16c)):
+        print(name, hex(va), [hex(r) for r in refs(va)])
+
+## 2. The RPG item-flag name table — `noviewmodel` is bit 1 (VA 0x1082d728)
+
+The 2009 build ships the same bit-ordered flag-name table the 2004 build does
+(ADR-0435 assigned the bits; this is the live target's own copy, complete):
+
+| bit | mask | name | | bit | mask | name |
+|----:|---:|---|---|----:|---:|---|
+| 0 (0x01) | wallcollision | | 16 (0x10000) | needequippedlink |
+| 1 (0x02) | **noviewmodel** | | 17 (0x20000) | keepaftermission |
+| 2 (0x04) | playerlaserbeam | | 18 (0x40000) | droponunequip |
+| 3 (0x08) | __equipped__ | | 19 (0x80000) | __removed__ |
+| 4 (0x10) | rpgmodelflags | | 20 (0x100000) | renderquantity |
+| 5 (0x20) | aiming | | 21 (0x200000) | questitem |
+| 6 (0x40) | playerflashlight | | 22 (0x400000) | forceselected |
+| 7 (0x80) | forcewalk | | 23 (0x800000) | twohanded |
+| 8 (0x100) | unselectable | | 24 (0x1000000) | consume |
+| 9 (0x200) | autoaim | | 25 (0x2000000) | __usable__ |
+| 10 (0x400) | autoequip | | 26 (0x4000000) | nopickup |
+| 11 (0x800) | autoactivate | | 27 (0x8000000) | mergeonly |
+| 12 (0x1000) | useless | | 28 (0x10000000) | weapontargeting |
+| 13 (0x2000) | __activated__ | | 29 (0x20000000) | singleshot |
+| 14 (0x4000) | needammo | | 30 (0x40000000) | removeinstant |
+| 15 (0x8000) | needlink | | 31 (0x80000000) | nomerge |
+
+This is `isweapon`-class item state, and it reproduces ADR-0435/ADR-0438's
+`noviewmodel = 1 << 1` on the target build. It is a *flag name table*: the strings
+are reached only through this pointer array (each name has no other xref), which is
+what a per-bit editor/debug name list looks like. It is **not** a draw gate — see
+the 2004 module's mask scan (docs/rea/reference/GameClasses_NoviewmodelRuntime.txt).
+
+## 3. `VIEWMODEL` / `ATTACHPOINT` / `ATTACHROTTRACK` are item-class property names
+
+At VA 0x1075a144 the `.rdata` string block is:
+
+    0x1075a144  "VIEWMODEL\0"
+    0x1075a150  "ATTACHPOINT\0"
+    0x1075a15c  "ATTACHROTTRACK\0"
+    0x1075a16c  "CRPG_Object_Inventory\0"
+                0x1075a182  "Force Equipping item - Ident: %d"   (0x1075a208)
+
+Each of the three property names has **exactly one** cross-reference, and all
+three are in the **same code neighbourhood** (file `0x265a92`..`0x265b9d`,
+VA `0x10265a92`..`0x10265b9d`):
+
+| property string | VA | sole code xref (VA) | containing function |
+|---|---|---|---|
+| `VIEWMODEL` | 0x1075a144 | 0x10265a92 | `FUN_10265a70` (leaf, `ret 0Ch`) |
+| `ATTACHROTTRACK` | 0x1075a15c | 0x10265b7a | `FUN_10265ab0` |
+| `ATTACHPOINT` | 0x1075a150 | 0x10265b9d | `FUN_10265ab0` |
+
+`CRPG_Object_Inventory` (the class-name string) is referenced once, from `.data`
+VA 0x1082d9ec (a class-registry table). So the three names are declared next to the
+`CRPG_Object_Inventory` class name and each is *used* from code.
+
+### 3a. `FUN_10265ab0` reads `ATTACHROTTRACK`/`ATTACHPOINT` as bool properties
+
+Disassembly (from the raw bytes; the function's SEH prologue is at VA 0x10265ab0):
+
+    10265b79  68 5c a1 75 10     push 0x1075a15c        ; "ATTACHROTTRACK"
+    10265b7e  8b ce              mov  ecx,esi           ; this
+    10265b80  e8 35 e0 01 00     call 0x10283bba        ; name-keyed property lookup
+    10265b85  85 c0              test eax,eax
+    10265b87  5f                 pop  edi
+    10265b88  74 12              je   0x10265b9c
+    10265b8a  8b 10              mov  edx,[eax]         ; property vtable
+    10265b8d  8b c8              mov  ecx,eax
+    10265b8f  8b 82 b8 01 00 00  mov  eax,[edx+0x1b8]    ; slot 110
+    10265b95  ff d0              call eax               ; -> bool (al)
+    10265b97  88 85 62 03 00 00  mov  [ebp+0x362],al    ; store
+    10265b9c  68 50 a1 75 10     push 0x1075a150        ; "ATTACHPOINT"
+    10265ba1  8b ce              mov  ecx,esi
+    10265ba3  e8 12 e0 01 00     call 0x10283bba        ; same lookup
+    10265ba8  85 c0              test eax,eax
+    10265baa  5f                 ...                    (je 0x10265b??)
+    10265bad  8b 10              mov  edx,[eax]
+    10265baf  8b c8              mov  ecx,eax
+    10265bb1  8b 82 b8 01 00 00  mov  eax,[edx+0x1b8]
+    10265bb7  ff d0              call eax
+    10265bb9  88 85 5a 03 00 00  mov  [ebp+0x35a],al
+
+Reading: the object looks up two item properties **by name** (`ATTACHROTTRACK`,
+`ATTACHPOINT`), and if found reads a **bool** value (vtable slot 0x1b8) into its
+own bytes `+0x362` and `+0x35a`. This is the item's "attach to the first-person
+attach point" configuration. The lookup helper (`0x10283bba`) is the object's
+`FindProperty(name)` (same helper for both names; named by usage, not by symbol).
+
+### 3b. `FUN_10265a70` references `VIEWMODEL`
+
+    10265a70  8b 44 24 0c        mov  eax,[esp+0Ch]
+    ...
+    10265a88  83 ec 08           sub  esp,8
+    10265a8b  8b cc              mov  ecx,esp
+    10265a8d  89 64 24 24        mov  [esp+24h],esp
+    10265a91  68 44 a1 75 10     push 0x1075a144        ; "VIEWMODEL"
+    10265a96  e8 45 08 db ff     call 0x100162e0        ; name-keyed helper
+    10265a9b  e8 f0 7c 00 00     call 0x1026d790
+    10265aa3  5f                 pop  edi
+    10265aa4  5e                 pop  esi
+    10265aa5  c2 0c 00           ret  0Ch
+
+The immediate `"VIEWMODEL"` is passed to a call (the same name-keyed family);
+because the epilogue has no `test eax,eax`, whether this site *reads* or *sets*
+the property is **not** resolved here (it would need a decompile — see §5).
+
+## 4. `FirstPerson` / `ThirdPerson` are adjacent entries in a view-mode name table
+
+VA 0x1083ff68 -> `0x1078be28` `"FirstPerson"`; VA 0x1083ff6c -> `0x1078be1c`
+`"ThirdPerson"` (adjacent dwords, in a `.data` table whose neighbours are code
+pointers). The strings sit in `.rdata` next to `CWObject_InputEntity`
+(0x1078be04) and, further on, `CWObject_Matinee` / `.\WObj_Misc\WObj_Matinee.cpp`.
+This reads as a **view-mode / camera-mode name list** for an entity. Class identity
+is not proven (§ "not claimed").
+
+## 5. The 2009 module does not fit the provider's analysis budget
+
+The full-function analysis that would decompile `FUN_10265a70`/`FUN_10265ab0`
+**timed out** on this module, twice, on 2026-10-18:
+
+    rea function "<install>\Content\GameClasses_Win32_x86.dll" --procedure 0x10265a92
+    -> {"error":"Analysis failed","code":"provider_timeout",
+        "details":{"operation":"analyze_function","timeout_ms":330000,
+                   "target_sha256":"d7e81d7d…",
+                   "failure_message":"Ghidra startup deadline elapsed"}}
+    rea decompile "<install>\Content\GameClasses_Win32_x86.dll" 0x10265a92
+    -> {"code":"execution_failure","details":{"operation":"procedure_pseudo_code"},
+        "message":"Analysis could not complete … repeating the unchanged request
+                   is not expected to succeed"}
+
+Both are the same 330 s analysis budget being exceeded on the 9.0 MB module (the
+second call was killed mid-analysis and cleaned up).
+
+`rea doctor` reports Ghidra 12.1.4 healthy, and the deep-REA corpus in this
+directory (`MXR_*`, `MCCDyn_*`, `GameClasses_NoviewmodelRuntime`) is all the
+**2004** build — `GameClasses_Win32_x86.dll` there is 2,219,520 B; the 2009 module
+is 9,016,560 B (~4x). `RndrGL.dll` is 939,248 B and *does* decompile (the 2009
+`RndrGL_Input_Path.txt` is the 2009 module), so the budget is a size/analysis-limit,
+not a broken installation. Consequence: the 2009 engine-side code path needs either
+a persistent analysis snapshot across wakes or a smaller module; a single 330 s
+request is not enough for this DLL.
+
+## not claimed
+
+- **No decompilation.** `FUN_10265a70` and `FUN_10265ab0` are located by raw scan
+  (SEH/leaf prologue + the property-name `push`), not recovered by Ghidra. The
+  helper names `FindProperty` and vtable slot 110 are named by *usage*.
+- Whether `FUN_10265a70` reads or writes `VIEWMODEL` is not resolved (§3b).
+- "the first-person viewmodel mesh is created from this property" is an inference
+  from the property name plus the attach properties; the consumer that turns
+  `VIEWMODEL` into a model instance is not decompiled here.
+- Whether the viewmodel is drawn at all in the sampled (passive, unarmed) level
+  start is **not** established by this file.
+- `FirstPerson`/`ThirdPerson` are read as a name list; their consumer is not
+  located.

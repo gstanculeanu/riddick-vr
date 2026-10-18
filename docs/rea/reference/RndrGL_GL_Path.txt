@@ -166,10 +166,22 @@ ADR-0482 and `src/hook/vertex_submission_observe.h`.
   hypothesis. It is off by default (`SuppressEngineViewmodel=0`) and the hook
   logs per-frame draw/suppressed counters so one in-headset run confirms it
   before it is trusted (see ADR-0439).
+- **Engine-side answer (ADR-0492, wake 90):** the first-person viewmodel is not a
+  GL-state pass at all. In the live (2009) `Content\GameClasses_Win32_x86.dll` it
+  is an item **property** `VIEWMODEL` plus an attach configuration
+  `ATTACHPOINT`/`ATTACHROTTRACK` on `CRPG_Object_Inventory`, so the arms arrive as
+  an ordinary `glDrawElements` of an already-transformed, item-owned model. Every
+  GL signature route (ADR-0484/0487/0490/0491) is therefore closed by measurement,
+  and this suppressor cannot be a *viewmodel* gate for GH #67 on this build — see
+  `docs/rea/reference/GameClasses2009_ViewmodelProperties.txt`.
 
 ## not claimed
 - Not verified in-game (no launch): the depth-only-clear boundary, the count of
   draws in the window, and whether `glDrawElements` alone hides the arms.
 - The origin of the `glCallList` list IDs is unresolved (section 2).
 - These offsets are for the 2004 EFBB x86 build; the Dark Athena build is not
-  scanned here (ADR-0413 target mismatch).
+  scanned here (ADR-0413 target mismatch). **Partial exception (ADR-0492):** the
+  2009 build's *viewmodel property* mechanism and its RPG item-flag table **are**
+  now scanned — see `docs/rea/reference/GameClasses2009_ViewmodelProperties.txt`.
+  The 2009 module is 9.0 MB and does not fit the provider's single-request
+  analysis budget, so no Ghidra decompilation of it exists yet.

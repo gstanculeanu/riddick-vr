@@ -272,6 +272,24 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   immediate-mode vertices, **FAILs** when the census ran and it held none, and
   SKIPs on a pre-#0491 hook; finding immediate geometry in the window is removing a
   mechanism blind spot, **not** identifying the arms. See ADR-0491.
+- **ADR-0492 — engine-side identification: the viewmodel is an item *property*, not
+  a GL pass.** With every GL route measured dead (ADR-0484/0487/0490/0491), the
+  live (2009) `Content\GameClasses_Win32_x86.dll` was scanned read-only and the
+  engine's own viewmodel mechanism is an **item property** `VIEWMODEL` plus an
+  attach configuration `ATTACHPOINT`/`ATTACHROTTRACK`, declared next to the
+  `CRPG_Object_Inventory` class name (`.rdata` VAs `0x1075a144`/`0x1075a150`/
+  `0x1075a15c`). Each name has exactly **one** code xref, all in one neighbourhood
+  (`0x10265a92`, `0x10265b7a`, `0x10265b9d`): `FUN_10265ab0` looks up
+  `ATTACHROTTRACK`/`ATTACHPOINT` by name and reads a **bool** (vtable slot `0x1b8`)
+  into the object at `+0x362`/`+0x35a`; `FUN_10265a70` pushes `VIEWMODEL` into a
+  name-keyed call. The 2009 RPG item-flag table (VA `0x1082d728`) reproduces
+  ADR-0435's bits with **`noviewmodel` = bit 1**. Consequence: the arms reach GL as
+  an ordinary `glDrawElements` of an already-transformed, item-owned model (the
+  transform is engine-side, ADR-0481/0482), so **no** GL signature can isolate
+  them — the next step is the `VIEWMODEL` consumer / the engine's own FP attach
+  state, not another threshold. Recorded (with the provider-timeout limit on the
+  9.0 MB module) in `docs/rea/reference/GameClasses2009_ViewmodelProperties.txt`.
+  See ADR-0492.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

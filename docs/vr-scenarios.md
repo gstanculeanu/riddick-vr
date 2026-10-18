@@ -412,6 +412,27 @@ vertices, FAIL when the census ran and there were none, SKIP on a pre-#0491 hook
 and `viewmodel_immediate_candidate_is_volumetric`. Finding immediate geometry in
 the window removes the mechanism blind spot; it does **not** identify the arms.
 
+**Correction (wake 90, ADR-0492): the viewmodel is an item *property*, not a GL
+pass — the engine-side answer.** With every GL route measured dead (ADR-0484
+planar candidate, ADR-0487 window opener, ADR-0490 near-field, ADR-0491 immediate
+mode), the live **2009** `Content\GameClasses_Win32_x86.dll`
+(`sha256 d7e81d7d…`) was scanned read-only. The engine's first-person viewmodel is
+an item **property** `VIEWMODEL` plus an attach configuration
+`ATTACHPOINT`/`ATTACHROTTRACK`, declared beside the class name
+`CRPG_Object_Inventory` (`.rdata` VAs `0x1075a144`/`0x1075a150`/`0x1075a15c`); each
+name has exactly **one** code xref, all in one neighbourhood (`0x10265a92`,
+`0x10265b7a`, `0x10265b9d`), where `FUN_10265ab0` reads `ATTACHROTTRACK`/
+`ATTACHPOINT` as **bool** properties (vtable slot `0x1b8`) into `+0x362`/`+0x35a`.
+The 2009 RPG item-flag name table (VA `0x1082d728`) reproduces ADR-0435's bits with
+`noviewmodel` = **bit 1**. Because the object/view transform is applied engine-side
+to the submitted vertices (ADR-0481/0482), the arms reach GL as an ordinary
+`glDrawElements` of an already-transformed, item-owned model — **no** GL signature
+can isolate them, so the next step is the `VIEWMODEL` consumer / the engine's own FP
+attach state, not another threshold. Recorded in
+`docs/rea/reference/GameClasses2009_ViewmodelProperties.txt` (which also records
+that the 9.0 MB 2009 module exceeds the provider's single-request analysis budget,
+so the deep REA needs a persistent snapshot).
+
 
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during

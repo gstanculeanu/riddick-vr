@@ -457,6 +457,33 @@ def main():
             "own z-flipped convention so the NearPlaneDrop opener is measurable "
             "(ADR-0488)")
 
+    # GH #67 step 1 (tenth correction, ADR-0492): every geometric route is now
+    # measured dead, so the remaining route is engine-side. The engine's own
+    # first-person viewmodel is an item *property* (`VIEWMODEL`) with an attach
+    # configuration (`ATTACHPOINT`/`ATTACHROTTRACK`) on `CRPG_Object_Inventory`
+    # -- read-only, from the LIVE (2009) GameClasses module -- not a GL pass. Pin
+    # the reference artifact so the finding (module hash, the bit-ordered flag
+    # table with `noviewmodel` at bit 1, the three property names and their single
+    # code xrefs, the provider-timeout limit) cannot silently rot.
+    vm_props = ROOT / "docs/rea/reference/GameClasses2009_ViewmodelProperties.txt"
+    _vm_props_text = vm_props.read_text(encoding="utf-8") if vm_props.exists() else ""
+    require(vm_props.exists() and
+            "d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79" in _vm_props_text and
+            "0x1082d728" in _vm_props_text and "noviewmodel" in _vm_props_text and
+            "0x1075a144" in _vm_props_text and "0x1075a150" in _vm_props_text and
+            "0x1075a15c" in _vm_props_text and
+            "0x10265a92" in _vm_props_text and "0x10265b7a" in _vm_props_text and
+            "0x10265b9d" in _vm_props_text and
+            "CRPG_Object_Inventory" in _vm_props_text and
+            "provider_timeout" in _vm_props_text and
+            "FirstPerson" in _vm_props_text and
+            (ROOT / "docs/adr/0492-gh67-engine-side-viewmodel-mechanism.md").exists() and
+            "ADR-0492" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8"),
+            "GH #67: the engine-side identification of the first-person viewmodel "
+            "(an item property VIEWMODEL + ATTACHPOINT/ATTACHROTTRACK on "
+            "CRPG_Object_Inventory, recorded from the live 2009 GameClasses module) "
+            "must stay recorded (ADR-0492)")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.
