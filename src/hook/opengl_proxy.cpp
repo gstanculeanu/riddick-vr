@@ -8,6 +8,7 @@
 #include "gl_matrix_tracker.h"
 #include "vertex_program_observe.h"
 #include "vertex_submission_observe.h"
+#include "gl_entry_census.h"
 #include "immediate_mode_observe.h"
 #include "projection_near.h"
 #include "logging.h"
@@ -144,6 +145,44 @@ static VertexProgramObserver s_vertexProgramObserver;
 // Fed by the RndrGL glVertexPointer/glDrawElements/glCallList hooks in
 // dllmain.cpp; inert unless ViewmodelObserve=1.
 static VertexSubmissionObserver s_vertexSubmissionObserver;
+// GH #76/#90 (ADR-0507): the *array source* census -- which dynamic entry points
+// the engine resolves, whether a buffer object is bound for the array draws, and
+// whether the generic-attribute / glInterleavedArrays path is used at all. Fed by
+// Hook_wglGetProcAddress (name census + the glBindBuffer / glVertexAttribPointer
+// wrappers below). Read-only; it changes no draw and is inert on a title that
+// resolves none of these names.
+static GlProcNameCensus s_glProcCensus;
+static ArrayBindingTracker s_arrayBinding;
+static AttributePathCensus s_attributePathCensus;
+
+typedef void (APIENTRY *PFN_glBindBuffer)(GLenum, GLuint);
+typedef void (APIENTRY *PFN_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
+typedef void (APIENTRY *PFN_glEnableVertexAttribArray)(GLuint);
+static PFN_glBindBuffer real_glBindBuffer = nullptr;
+static PFN_glVertexAttribPointer real_glVertexAttribPointer = nullptr;
+static PFN_glEnableVertexAttribArray real_glEnableVertexAttribArray = nullptr;
+
+// The engine resolves these through `wglGetProcAddress` (they are absent from its
+// static import table, ADR-0482). Each wrapper forwards verbatim and only tallies.
+static void APIENTRY Hook_glBindBuffer(GLenum target, GLuint buffer) {
+    s_arrayBinding.NoteBind(static_cast<unsigned>(target), static_cast<unsigned>(buffer));
+    if (real_glBindBuffer) real_glBindBuffer(target, buffer);
+}
+static void APIENTRY Hook_glVertexAttribPointer(GLuint index, GLint size, GLenum type,
+                                                GLboolean normalized, GLsizei stride,
+                                                const void* pointer) {
+    s_attributePathCensus.NoteAttribPointer(
+        static_cast<unsigned>(index),
+        size > 0 ? static_cast<unsigned>(size) : 0u,
+        static_cast<unsigned>(type),
+        static_cast<int>(stride),
+        pointer);
+    if (real_glVertexAttribPointer) real_glVertexAttribPointer(index, size, type, normalized, stride, pointer);
+}
+static void APIENTRY Hook_glEnableVertexAttribArray(GLuint index) {
+    s_attributePathCensus.NoteEnableArray();
+    if (real_glEnableVertexAttribArray) real_glEnableVertexAttribArray(index);
+}
 // GH #67 step 1 (ninth correction, ADR-0491): the *mechanism* census -- the
 // immediate-mode path (glBegin/glEnd + glVertex3f/glVertex3fv/glVertex2f/
 // glVertex2i) that the shipped RndrGL.dll imports and no probe ever counted.
@@ -482,6 +521,30 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
                 m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
         }
     }
+    // GH #76/#90 (ADR-0507): the array-source census. Logged on the same sampled
+    // frames as the probes above (no new INI key): the run's whole dynamic GL
+    // vocabulary plus the live buffer-object / generic-attribute state, so
+    // ADR-0506's "where is the world array set?" is answerable from one log.
+    if ((s_swapFrameCount % 300) == 0) {
+        const ArrayBindingTracker& ab = s_arrayBinding;
+        const AttributePathCensus& ap = s_attributePathCensus;
+        VR_LOG_INFO("GLProcCensus [#%llu]: procs=%u names=%u arrayBuf=%u elemBuf=%u "
+                    "bindCalls=%u(ary=%u elem=%u) attribPtr=%u enableAttr=%u "
+                    "interleaved=%u attribLast=(idx=%u size=%u type=0x%X stride=%d ptr=%d)",
+            static_cast<unsigned long long>(s_swapFrameCount),
+            s_glProcCensus.TotalCalls(), s_glProcCensus.UniqueNames(),
+            ab.arrayBufferId, ab.elementBufferId, ab.bindCalls, ab.arrayBinds, ab.elementBinds,
+            ap.attribPointerCalls, ap.enableArrayCalls, ap.interleavedCalls,
+            ap.lastIndex, ap.lastSize, ap.lastType, ap.lastStride,
+            ap.lastPointerSet ? 1 : 0);
+        // New names only, so a long run states each resolved entry point once.
+        static unsigned s_glProcNamesLogged = 0;
+        for (unsigned i = s_glProcNamesLogged; i < s_glProcCensus.UniqueNames(); ++i) {
+            VR_LOG_INFO("GLProcCensus name: %s calls=%u",
+                s_glProcCensus.NameAt(i), s_glProcCensus.CallsAt(i));
+        }
+        s_glProcNamesLogged = s_glProcCensus.UniqueNames();
+    }
     // GH #67 step 1 (second/third corrections, ADR-0482/0483): the submitted-vertex
     // sample -- the surface the transform is actually applied on. One counts line
     // plus, on the same sampled frames, the window's largest in-window array draw
@@ -489,10 +552,11 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
     // the window-independent near-field candidate. Inert unless ViewmodelObserve=1.
     if (s_vertexSubmissionObserver.Observing() && (s_swapFrameCount % 300) == 0) {
         const VertexSubmissionSnapshot vs = s_vertexSubmissionObserver.ComputeSnapshot();
-        VR_LOG_INFO("ViewmodelProbe submission [#%llu]: arrayIn=%u arrayOut=%u listIn=%u listOut=%u ptrSize=%u ptrType=%u ptrStride=%d inSample=%u outSample=%u nearSample=%u",
+        VR_LOG_INFO("ViewmodelProbe submission [#%llu]: arrayIn=%u arrayOut=%u listIn=%u listOut=%u ptrSize=%u ptrType=%u ptrStride=%d ptrCalls=%u ptrNull=%u inSample=%u outSample=%u nearSample=%u",
             static_cast<unsigned long long>(s_swapFrameCount),
             vs.arrayInside, vs.arrayOutside, vs.listInside, vs.listOutside,
             vs.pointerSize, vs.pointerType, vs.pointerStride,
+            vs.pointerCalls, vs.pointerNullCalls,
             vs.hasInsideSample ? 1u : 0u, vs.hasOutsideSample ? 1u : 0u,
             vs.hasNearSample ? 1u : 0u);
         if (vs.hasInsideSample) LogVertexSubmissionSample("fp", vs.insideSample);
@@ -538,6 +602,14 @@ PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
 
     PROC realProc = real_wglGetProcAddress ? real_wglGetProcAddress(lpszProc) : nullptr;
 
+    // GH #76/#90 (ADR-0507): name every distinct entry point the engine resolves,
+    // exactly once, so a run states the engine's whole dynamic GL vocabulary (a name
+    // it never asks for cannot be the source of an unset array). Cumulative, never
+    // reset -- the log line is evidence, not a per-frame tally.
+    if (s_glProcCensus.Note(lpszProc)) {
+        VR_LOG_INFO("GLProcCensus resolve: name=%s", lpszProc);
+    }
+
     // Cache essential extension pointers when requested by the game engine
     std::string procName(lpszProc);
     if (procName == "glBindFramebuffer" || procName == "glBindFramebufferEXT") {
@@ -578,6 +650,21 @@ PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
     } else if (procName == "glProgramEnvParameter4fARB") {
         real_glProgramEnvParameter4fARB = (PFNGLPROGRAMENVPARAMETER4FARBPROC)realProc;
         if (realProc) return (PROC)Hook_glProgramEnvParameter4fARB;
+    } else if (procName == "glBindBuffer" || procName == "glBindBufferARB") {
+        // GH #76/#90 (ADR-0507): the buffer-object route. A non-zero
+        // GL_ARRAY_BUFFER binding at a draw is what makes a null vertex pointer
+        // *set* (offset 0 into the buffer) rather than absent.
+        real_glBindBuffer = (PFN_glBindBuffer)realProc;
+        if (realProc) return (PROC)Hook_glBindBuffer;
+    } else if (procName == "glVertexAttribPointer" || procName == "glVertexAttribPointerARB") {
+        // GH #76/#90 (ADR-0507): the generic-attribute route -- sets no
+        // fixed-function vertex array, so a live call here means the sampler's
+        // glVertexPointer state is not the array the draw used.
+        real_glVertexAttribPointer = (PFN_glVertexAttribPointer)realProc;
+        if (realProc) return (PROC)Hook_glVertexAttribPointer;
+    } else if (procName == "glEnableVertexAttribArray" || procName == "glEnableVertexAttribArrayARB") {
+        real_glEnableVertexAttribArray = (PFN_glEnableVertexAttribArray)realProc;
+        if (realProc) return (PROC)Hook_glEnableVertexAttribArray;
     }
 
     return realProc;
@@ -997,8 +1084,20 @@ void OpenGLProxy::NoteDrawListSubmission() {
 // regardless of the observation switch, so this is a pure read of what the engine
 // last submitted; it never enables observation and never changes a draw.
 VertexSample OpenGLProxy::SampleSubmittedArray(unsigned count, unsigned indexType, const void* indices) {
-    return s_vertexSubmissionObserver.SampleCurrent(count, indexType, indices);
+    VertexSample s = s_vertexSubmissionObserver.SampleCurrent(count, indexType, indices);
+    // GH #76/#90 (ADR-0507): stamp the array-buffer binding that was in force at the
+    // draw, so a `noarray` rejection is named as "the buffer-object idiom" or "no
+    // array at all" instead of being read as an absent array either way.
+    s.arrayBufferBound = s_arrayBinding.arrayBufferId != 0u;
+    s.arrayBufferId = s_arrayBinding.arrayBufferId;
+    return s;
 }
+
+// GH #76/#90 (ADR-0507): the array-source census accessors. Read-only.
+const GlProcNameCensus& OpenGLProxy::ProcCensus() { return s_glProcCensus; }
+const ArrayBindingTracker& OpenGLProxy::ArrayBinding() { return s_arrayBinding; }
+const AttributePathCensus& OpenGLProxy::AttributePaths() { return s_attributePathCensus; }
+void OpenGLProxy::NoteInterleavedArrays() { s_attributePathCensus.NoteInterleaved(); }
 
 // The window state machine runs when dual render is on (BuildViewmodelSuppressionConfig
 // sets `track` for it), so this reports the live first-person window boundary.

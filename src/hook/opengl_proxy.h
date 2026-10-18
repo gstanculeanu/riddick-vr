@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "vertex_submission_observe.h"
+#include "gl_entry_census.h"
 
 namespace RiddickVR {
 
@@ -152,6 +153,22 @@ public:
     // float client array (it reports `valid=false` instead of guessing).
     static VertexSample SampleSubmittedArray(unsigned count, unsigned indexType, const void* indices);
     static bool IsViewmodelWindowOpen();
+
+    // GH #76/#90 (ADR-0507): the *array source* census that ADR-0506's Next 1 asked
+    // for. `ProcCensus` records every name the engine resolves through
+    // `wglGetProcAddress` (a name never asked for cannot be the source); it is fed
+    // by Hook_wglGetProcAddress and is never reset, so the log states the run's
+    // whole dynamic-vocabulary. `ArrayBinding`/`AttributePaths` are the live
+    // GL_ARRAY_BUFFER binding and the generic-attribute / glInterleavedArrays
+    // tallies the wrappers maintain. Read-only; they change no draw.
+    static const GlProcNameCensus& ProcCensus();
+    static const ArrayBindingTracker& ArrayBinding();
+    static const AttributePathCensus& AttributePaths();
+    // GH #76/#90 (ADR-0507): the `glInterleavedArrays` path. Its import table entry
+    // is absent from every shipped module (ADR-0482), so this hook is expected not
+    // to install -- but the census then *states* "never called" instead of assuming
+    // it, which is what ADR-0506's Next 1 asked for.
+    static void NoteInterleavedArrays();
 
     // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The
     // shipped RndrGL.dll *imports* glBegin/glEnd/glVertex3f/glVertex3fv (and the

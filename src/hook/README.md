@@ -469,5 +469,23 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   rejection is `noarray` (`GL_FLOAT` 3-component stride-56 geometry read with a null
   client pointer), so the world array is set where the draw hook cannot see it.
 
+- **The array source is named (ADR-0507, wake 105; GH #76 / GH #90).**
+  `gl_entry_census.h` holds the pure, headless-tested census: `GlProcNameCensus`
+  (every distinct name the engine resolves through `wglGetProcAddress`, logged once),
+  `ArrayBindingTracker` (the live `GL_ARRAY_BUFFER`/`GL_ELEMENT_ARRAY_BUFFER`
+  bindings + tallies), and `AttributePathCensus` (the generic-attribute
+  `glVertexAttribPointer[ARB]`/`glEnableVertexAttribArray[ARB]` counts and the
+  `glInterleavedArrays` count). `opengl_proxy` wraps those entry points and logs
+  `GLProcCensus [..]: procs=.. names=.. arrayBuf=.. elemBuf=.. bindCalls=..(ary=..
+  elem=..) attribPtr=.. enableAttr=.. interleaved=.. attribLast=(..)`; the
+  submitted-vertex line adds `ptrCalls=`/`ptrNull=`; the rejection signature adds
+  `buf=`/`bid=`. Measured in-level: the engine resolves **and calls** the whole core
+  buffer-object API (5.23M `GL_ARRAY_BUFFER` + 10.70M `GL_ELEMENT_ARRAY_BUFFER`
+  binds, 11.11M `glVertexAttribPointerARB` calls over ~9.6k swaps) while 83% of its
+  `glVertexPointer` calls pass a null pointer — so ADR-0482's "no buffer object"
+  premise is falsified, and the world draws' position data is not in the
+  fixed-function client array the sampler reads (`buf=0` at the rejected draws).
+  Read-only: no draw decision changes.
+
 
 

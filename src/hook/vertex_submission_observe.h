@@ -99,6 +99,12 @@ struct VertexSample {
     unsigned vertexSize = 0;  // components per vertex as recorded by glVertexPointer
     int stride = 0;           // bytes between vertices (0 = tightly packed)
     bool pointerSet = false;  // a non-null client vertex array pointer was recorded
+    // GH #76/#90 (ADR-0507): whether a buffer object was bound to GL_ARRAY_BUFFER
+    // when this draw was sampled. A non-zero id beside a null vertex pointer is the
+    // buffer-object idiom (offset 0 into the buffer), i.e. the array *is* set -- just
+    // not in client memory -- which is the discriminator ADR-0506 needed.
+    bool arrayBufferBound = false;
+    unsigned arrayBufferId = 0;
     VertexSampleReason reason = VertexSampleReason::Ok;  // why, when !valid
     float first[3] = {};      // the first sampled vertex
     float min[3] = {};        // axis-aligned bounds over the sampled vertices
@@ -215,6 +221,11 @@ struct VertexSubmissionSnapshot {
     unsigned pointerSize = 0;     // components per vertex (2/3/4)
     unsigned pointerType = 0;     // GL type enum of the array
     int pointerStride = 0;        // bytes between vertices (0 = tightly packed)
+    // GH #76/#90 (ADR-0507): glVertexPointer calls seen this interval, and how many
+    // of them passed a null pointer -- so a run can state whether the null the
+    // world draws read is ever *set* by the engine or is only ever stale.
+    unsigned pointerCalls = 0;
+    unsigned pointerNullCalls = 0;
     bool hasInsideSample = false; // an in-window array draw was sampled
     bool hasOutsideSample = false;
     VertexSample insideSample;    // the first-person candidate (largest in-window mesh)
@@ -253,6 +264,11 @@ public:
         pointerStride_ = stride;
         pointer_ = pointer;
         pointerSet_ = pointer != nullptr;
+        // GH #76/#90 (ADR-0507): the null/non-null tally. Counted whether or not
+        // observation is on (the pointer state above is needed by the dual pass
+        // either way); it is a read-only counter and changes no draw.
+        ++pointerCalls_;
+        if (!pointer) ++pointerNullCalls_;
     }
 
     // One glDrawElements call, tagged by whether it fell inside the first-person
@@ -321,6 +337,8 @@ public:
         snap.pointerSize = pointerSize_;
         snap.pointerType = pointerType_;
         snap.pointerStride = pointerStride_;
+        snap.pointerCalls = pointerCalls_;
+        snap.pointerNullCalls = pointerNullCalls_;
         snap.hasInsideSample = hasInsideSample_;
         snap.hasOutsideSample = hasOutsideSample_;
         snap.insideSample = insideSample_;
@@ -329,6 +347,8 @@ public:
         snap.nearSampleInside = nearSampleInside_;
         snap.nearSample = nearSample_;
         arrayInside_ = arrayOutside_ = listInside_ = listOutside_ = 0u;
+        pointerCalls_ = 0;
+        pointerNullCalls_ = 0;
         hasInsideSample_ = hasOutsideSample_ = false;
         insideSample_ = VertexSample{};
         outsideSample_ = VertexSample{};
@@ -350,6 +370,8 @@ public:
         pointerStride_ = 0;
         pointer_ = nullptr;
         pointerSet_ = false;
+        pointerCalls_ = 0;
+        pointerNullCalls_ = 0;
     }
 
 private:
@@ -370,6 +392,8 @@ private:
     int pointerStride_ = 0;
     const void* pointer_ = nullptr;
     bool pointerSet_ = false;
+    unsigned pointerCalls_ = 0;
+    unsigned pointerNullCalls_ = 0;
 };
 
 } // namespace RiddickVR

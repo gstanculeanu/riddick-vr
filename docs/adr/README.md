@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0506` — the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0507` — the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -35,7 +35,13 @@ every ADR names the epic #57 subsystem it advances.
   ~92% of the span's draws (ADR-0505 counted them): the measured rejection is
   `noarray` — `GL_FLOAT`/3-component/stride-56 geometry read with a **null client
   pointer** — i.e. the world array is set where the draw hook cannot see it.
-  **Head = `0506`; the next new ADR is `0507`.**
+  ADR-0507 answers that with measurement: the engine resolves and calls the whole
+  core **buffer-object** API and `glVertexAttribPointerARB` (5.2M `GL_ARRAY_BUFFER`
+  + 10.7M `GL_ELEMENT_ARRAY_BUFFER` binds and 11.1M generic-attribute pointers over
+  ~9.6k in-level swaps) and calls `glVertexPointer(..., NULL)` 83% of the time, so
+  ADR-0482's "no buffer object" premise is falsified and the world position data is
+  **not** in the fixed-function client array the sampler reads.
+  **Head = `0507`; the next new ADR is `0508`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

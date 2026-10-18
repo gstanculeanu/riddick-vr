@@ -105,6 +105,10 @@ typedef void (WINAPI *PFN_glLoadIdentity)(void);
 typedef void (WINAPI *PFN_glPushMatrix)(void);
 typedef void (WINAPI *PFN_glPopMatrix)(void);
 typedef void (WINAPI *PFN_glTranslatef)(GLfloat, GLfloat, GLfloat);
+// GH #76/#90 (ADR-0507): the glInterleavedArrays path -- GL 1.1, but absent from
+// every shipped module's import table (ADR-0482), so this IAT hook is expected to
+// fail to install; it is added so a run *states* the path is never used.
+typedef void (WINAPI *PFN_glInterleavedArrays)(GLenum format, GLsizei stride, const void* pointer);
 
 static PFN_glDrawElements real_glDrawElements = nullptr;
 static PFN_glCallList real_glCallList = nullptr;
@@ -119,6 +123,7 @@ static PFN_glVertex3f real_glVertex3f = nullptr;
 static PFN_glVertex3fv real_glVertex3fv = nullptr;
 static PFN_glVertex2f real_glVertex2f = nullptr;
 static PFN_glVertex2i real_glVertex2i = nullptr;
+static PFN_glInterleavedArrays real_glInterleavedArrays = nullptr;
 
 static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
@@ -206,6 +211,14 @@ static void WINAPI Hook_glVertex2f(GLfloat x, GLfloat y) {
 static void WINAPI Hook_glVertex2i(GLint x, GLint y) {
     RiddickVR::OpenGLProxy::NoteImmediateVertex2(static_cast<float>(x), static_cast<float>(y));
     if (real_glVertex2i) real_glVertex2i(x, y);
+}
+
+// GH #76/#90 (ADR-0507): observe `glInterleavedArrays` (forward verbatim). It both
+// sets the vertex array *and* rewrites the enable state, so a live call would
+// explain an unset `glVertexPointer`; the census counts it either way.
+static void WINAPI Hook_glInterleavedArrays(GLenum format, GLsizei stride, const void* pointer) {
+    RiddickVR::OpenGLProxy::NoteInterleavedArrays();
+    if (real_glInterleavedArrays) real_glInterleavedArrays(format, stride, pointer);
 }
 
 static void InstallRndrGLHooks() {
@@ -307,6 +320,14 @@ static void InstallRndrGLHooks() {
     RiddickVR::IATHook::Hook(
         hRndrGL, "OPENGL32.dll", "glVertex2i",
         reinterpret_cast<void*>(Hook_glVertex2i), reinterpret_cast<void**>(&real_glVertex2i)
+    );
+    // GH #76/#90 (ADR-0507): the glInterleavedArrays path. RndrGL does NOT import it
+    // (ADR-0482: absent from every shipped module's import table), so this hook is
+    // expected not to install; it is added so the census *states* the path is never
+    // used rather than assuming it. A failed IATHook::Hook is a no-op.
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glInterleavedArrays",
+        reinterpret_cast<void*>(Hook_glInterleavedArrays), reinterpret_cast<void**>(&real_glInterleavedArrays)
     );
 }
 

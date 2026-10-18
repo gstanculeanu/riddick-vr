@@ -336,6 +336,26 @@ with the first rejected draw's `sig=[<reason> vtype=.. vsize=.. stride=.. ptr=..
 — which names *why* the pass lost draws (measured: all `noarray`, `GL_FLOAT`/3/stride 56
 geometry read with a null client pointer, i.e. the world array is set out of the hook's sight).
 
+**ADR-0507 (wake 105; GH #76 / GH #90) measures the array source.** A
+`wglGetProcAddress` name census (each distinct resolved name logged once as
+`GLProcCensus resolve: name=..`) plus forwarding wrappers for
+`glBindBuffer[ARB]`/`glVertexAttribPointer[ARB]`/`glEnableVertexAttribArray[ARB]`
+and an (expected-absent) `glInterleavedArrays` hook feed `src/hook/gl_entry_census.h`.
+Per sampled interval the hook logs `GLProcCensus [..]: procs=.. names=.. arrayBuf=..
+elemBuf=.. bindCalls=..(ary=.. elem=..) attribPtr=.. enableAttr=.. interleaved=..
+attribLast=(..)`; the submitted-vertex line adds `ptrCalls=`/`ptrNull=`; and the
+`DualRender:` rejection signature adds `buf=<n> bid=<id>` (the array-buffer binding
+at the first rejection). Measured in-level (50 gameplay frames, full-bleed 1.00):
+the engine resolves the whole core buffer-object API and calls it — 5.23M
+`GL_ARRAY_BUFFER` + 10.70M `GL_ELEMENT_ARRAY_BUFFER` binds and 11.11M
+`glVertexAttribPointerARB` calls over ~9.6k swaps — while 83% of its
+`glVertexPointer` calls pass a **null** pointer, so ADR-0482's "no buffer object"
+premise is falsified and the world position data is **not** in the fixed-function
+client array the sampler reads (`buf=0` at the rejected draws). The sampler must
+move to the generic-attribute + buffer path (ADR-0507 Next 1); the pass is
+unchanged, opt-in (`StereoDualRender=0`), `use=0`, and `--require-parallax` still
+fails.
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

@@ -2,6 +2,105 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 105 — 2026-10-18 15:45 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 — the
+  array source is MEASURED, and it falsifies ADR-0482's premise (ADR-0507)**: a new
+  dynamic-entry-point + array-source census (`gl_entry_census.h`, fed by the
+  `wglGetProcAddress` hook and forwarded `glBindBuffer[ARB]` /
+  `glVertexAttribPointer[ARB]` / `glEnableVertexAttribArray[ARB]` wrappers + an
+  IAT hook for the expected-absent `glInterleavedArrays`) names, live, **where the
+  world vertex array is set**. Evidence-only: no draw decision changes, the pass
+  stays opt-in/gated and falls back to the shipped shifted capture.
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0506's explicit
+  Next 1 ("log every hooked `glVertexPointer` call and add a `glInterleavedArrays`
+  hook, and check whether the draws bind a buffer object via a
+  `wglGetProcAddress`'d core `glBindBuffer`"). The blocker was a *measurement*, not
+  a design.
+- **Change (diagnostic + evidence, NO render change):**
+  - NEW `src/hook/gl_entry_census.h` (pure, headless): `GlProcNameCensus` (bounded
+    dedup table of resolved names + per-name call counts), `ArrayBindingTracker`
+    (live `GL_ARRAY_BUFFER`/`GL_ELEMENT_ARRAY_BUFFER` ids + tallies),
+    `AttributePathCensus` (generic-attribute pointer/enable counts + last shape,
+    separate `glInterleavedArrays` count).
+  - `vertex_submission_observe.h`: `VertexSample.arrayBufferBound`/`arrayBufferId`;
+    interval `pointerCalls`/`pointerNullCalls`.
+  - `opengl_proxy.{h,cpp}`: `GLProcCensus resolve: name=..` (once per distinct
+    name) + a per-interval `GLProcCensus [..]: procs=.. names=.. arrayBuf=..
+    elemBuf=.. bindCalls=..(ary=.. elem=..) attribPtr=.. enableAttr=.. interleaved=..
+    attribLast=(..)`; `ptrCalls=`/`ptrNull=` on the submitted-vertex line;
+    `SampleSubmittedArray` stamps the binding at the draw.
+  - `stereo_dual.h` + `stereo_renderer.cpp`: the first rejection's array-buffer
+    binding; the `DualRender:` sig adds `buf=%d bid=%u`. `dllmain.cpp`: the
+    `glInterleavedArrays` IAT hook (`Hook_glInterleavedArrays`).
+  - NEW `tests/gl_entry_census_tests.cpp` (CTest `gl_entry_census`, both arches);
+    NEW `docs/adr/0507-…`; `docs/adr/README.md` (head -> 0507), `docs/vr-scenarios.md`,
+    `src/hook/README.md`; `verify_reported_fixes.py` new #76/#90/ADR-0507 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 522752 B
+  `4ce0a0cbb402` + x64 host); **CTest 32/32 (x86) and 30/30 (x64)** (+1 each, the
+  new `gl_entry_census` passes); all 12 `tools/test_*.py` exit 0;
+  `verify_reported_fixes`, `xrsim --selftest`, `scenario_tests.py --check`,
+  `verify_hook_init`, `validate_addresses`, `verify_test_artifacts` PASS.
+- **EVIDENCE live (`RIDDICKVR_SIM=1`, read-only per-run shadows,
+  `--reach-gameplay --advance-menu --advance-min-taps 8 --require-fresh-hook
+  --require-parallax --dump-branch any --downscale 4 --ini StereoDualRender=1
+  --ini ViewmodelObserve=1`; `deployed_hook_matches_build` PASS, hook
+  `4ce0a0cbb402` = the repo build):**
+  - Run A (duration 90) stayed in the menu (window never found / not foreground —
+    the known launcher flake, 0 gameplay of 1 frame) and is **recorded, not graded**.
+  - Run B (duration 70) reached **live in-level gameplay**: 50 gameplay / 7 cinema /
+    1 unknown of 58; `gameplay_full_bleed_reached` fill **1.00**; `frame_budget`
+    PASS (n=15240 p50=2.91 ms p95=5.15 ms).
+  - **DECISIVE (4 findings):** (1) the engine *resolves* the whole core
+    buffer-object API through `wglGetProcAddress` — `glBindBuffer`, `glGenBuffers`,
+    `glDeleteBuffers`, `glIsBuffer`, `glBufferData`, `glBufferSubData`,
+    `glGetBufferSubData`, `glMapBuffer`, `glUnmapBuffer`, `glGetBufferParameteriv`,
+    `glGetBufferPointerv` — plus `glVertexAttribPointerARB`,
+    `glEnableVertexAttribArrayARB`, `glDisableVertexAttribArrayARB`,
+    `glVertexAttrib1fARB`, the `glMultiTexCoord*ARB` / `glSecondaryColor*EXT` /
+    `glCompressedTex*ARB` sets (`procs=147 names=64`); `glInterleavedArrays` is
+    **never** resolved or called (`interleaved=0`). (2) It *calls* them heavily:
+    `GLProcCensus [#9600]: bindCalls=15932431(ary=5234634 elem=10697797)
+    attribPtr=11110069 enableAttr=705159` — i.e. ≈325 `GL_ARRAY_BUFFER` + ≈670
+    `GL_ELEMENT_ARRAY_BUFFER` binds and ≈695 `glVertexAttribPointerARB` calls **per
+    frame** → **ADR-0482's "RndrGL never binds a buffer object" premise is
+    falsified** (it was a statement about the *static* import table). (3) The null
+    pointer is the engine's own doing: `ViewmodelProbe submission [#9600]:
+    ptrCalls=124385 ptrNull=102785` — **83% of `glVertexPointer` calls pass NULL**
+    (≈413 calls/frame), so the fixed-function array the sampler reads is null by
+    design, not by staleness. (4) At the census's first rejection the new field
+    reads `buf=0 bid=0`:
+    `DualRender: swap=17459 draws=60 eligible=60 skipped=675 active=1
+    scale=[unknown=675 near=0 mid=2 world=58] reject=675
+    rc=[nonfloat=0 noarray=675 zerocount=0 badsize=0 badindex=0]
+    sig=[noarray vtype=0x1406 vsize=3 stride=56 ptr=0 itype=0x1403 count=12
+    buf=0 bid=0]` — so the `noarray` draws are **not** "offset 0 into a
+    currently-bound VBO" either.
+- **VERDICT (honest):** the array source is **named**: the world position data is
+  submitted through the **generic-attribute + buffer-object** path
+  (`glVertexAttribPointerARB` + bound vertex/element buffers), and the sampler is
+  reading the **wrong array** — the fixed-function `glVertexPointer` client array,
+  which the engine leaves null. ADR-0506's "set where the hook cannot see it" is
+  refined: the hook *does* see the bind and pointer-set calls. Native stereo is
+  **NOT** achieved: `use=0`, `stereo_parallax_present` FAILs (`stereo_kind=shift-only`,
+  spread=0, 50 gameplay frames), gameplay still presents the shipped shifted capture.
+  **No regression** (full-bleed 1.00, frame_budget PASS, both eyes non-black).
+- **LIMITS:** instrumentation only; the generic-attribute *index* that carries
+  position is not identified (last sampled attribute pointer is index 8, size 2);
+  the independent `glEnableClientState(GL_VERTEX_ARRAY)` state is not tracked; the
+  name table is capped at 64; the 2004 build untouched; no headset.
+- **Install untouched** (READ-ONLY per-run shadows; no deploy, no install write), no
+  leftover game/host processes, live lock released.
+- **Next:** (1) **move the sampler to the array the engine uses** — track the
+  generic-attribute state per index + the `glEnableClientState` flags + the bound
+  buffers at the draw, and decode the world position bounds from the bound buffer
+  (`glGetBufferSubData`/`glMapBuffer` with the size from
+  `glGetBufferParameteriv`); only then can `DualRenderDrawEligible` classify these
+  draws at all (ADR-0507 Next 1). (2) Re-run `--require-parallax` and require a
+  non-zero per-tile spread. (3) Prove/replace the world-span boundary (per-frame
+  totals + per-draw projection). (4) Keep `StereoDualRender=0` /
+  `StereoParallaxDibr=0` / `StereoReplayProbe=0` defaults. (5) The P1 comfort/controls
+  bugs #45/#49/#50/#51/#65. (6) `DEFAULT_GAME_DIR` 2004-vs-2009; (7) GH #83/#88/#89/#74.
+
 ## Wake 104 — 2026-10-18 15:05 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 — the
   world-span census now NAMES the rejection (ADR-0506)**: ADR-0505 measured its

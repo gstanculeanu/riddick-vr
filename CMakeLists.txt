@@ -63,6 +63,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/depth_parallax.h
         src/hook/stereo_replay.h
         src/hook/stereo_dual.h
+        src/hook/gl_entry_census.h
         src/hook/display_branch.h
         src/hook/sim_input_bridge.h
         src/hook/sim_input_bridge_win32.cpp
@@ -268,6 +269,16 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME stereo_dual COMMAND riddick_vr_stereo_dual_tests)
+
+    # GH #76 / GH #90 (ADR-0507): the array-source census -- the dynamic GL
+    # entry-point vocabulary the engine resolves, the live buffer-object binding,
+    # and the generic-attribute / glInterleavedArrays path. Pure, headless
+    # (gl_entry_census.h) plus the sampler's recorded pointer tally.
+    add_executable(riddick_vr_gl_entry_census_tests tests/gl_entry_census_tests.cpp)
+    target_include_directories(riddick_vr_gl_entry_census_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME gl_entry_census COMMAND riddick_vr_gl_entry_census_tests)
 
     # GH #61: the baked diffuse + the arm mesh UVs must be skin-toned, never a
     # white / flat patch (refutes the "decodes white" premise that disabled it).

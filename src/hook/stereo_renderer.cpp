@@ -1735,7 +1735,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     "size=%dx%d use=%d scale=[unknown=%u near=%u mid=%u world=%u] "
                                     "reject=%u rc=[nonfloat=%u noarray=%u zerocount=%u badsize=%u "
                                     "badindex=%u] sig=[%s vtype=0x%X vsize=%u stride=%d ptr=%d "
-                                    "itype=0x%X count=%u]",
+                                    "itype=0x%X count=%u buf=%d bid=%u]",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
                                     m_dualEligible, m_dualCensus.skipped, m_dualMirrorClears,
                                     (int)m_dualFrameActive, m_dualCoverL, m_dualCoverR,
@@ -1748,7 +1748,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     DualRejectReasonName(m_dualCensus.rejectReason),
                                     m_dualCensus.rejectVertexType, m_dualCensus.rejectVertexSize,
                                     m_dualCensus.rejectStride, (int)m_dualCensus.rejectPointerSet,
-                                    m_dualCensus.rejectIndexType, m_dualCensus.rejectCount);
+                                    m_dualCensus.rejectIndexType, m_dualCensus.rejectCount,
+                                    (int)m_dualCensus.rejectArrayBufferBound,
+                                    m_dualCensus.rejectArrayBufferId);
                     } else {
                         --s_dualLogCountdown;
                     }

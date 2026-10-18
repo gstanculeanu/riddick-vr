@@ -1142,6 +1142,44 @@ def main():
             "band/rejection census + the evidence line) -- ADR-0505 measured the "
             "pass inert without saying which draws it lost")
 
+    # GH #76 / GH #90 / ADR-0507: ADR-0506 named the rejection -- every undecodable
+    # world-span draw is `noarray` (a null client vertex pointer with a real
+    # stride).  The 2009 RndrGL.dll imports no buffer-object entry point (ADR-0482),
+    # so the array must be set through a *dynamically resolved* path.  The
+    # array-source census must therefore exist: every name the engine resolves
+    # through wglGetProcAddress is recorded once (a pure, bounded name census), the
+    # GL_ARRAY_BUFFER binding is tracked through a forwarded glBindBuffer wrapper,
+    # the generic-attribute + glInterleavedArrays paths are counted, the sampler
+    # tallies null-pointer glVertexPointer calls, and the first rejection's
+    # array-buffer binding is carried in the evidence line.  All of it read-only:
+    # the pass stays opt-in and the census never changes which draws are re-issued.
+    gl_entry_census_h = (ROOT / "src/hook/gl_entry_census.h").read_text(encoding="utf-8")
+    require("class GlProcNameCensus" in gl_entry_census_h and
+            "struct ArrayBindingTracker" in gl_entry_census_h and
+            "struct AttributePathCensus" in gl_entry_census_h and
+            "kGlArrayBuffer" in gl_entry_census_h and
+            "kGlProcNameMax" in gl_entry_census_h and
+            "arrayBufferBound = false" in vertex_observe_h and
+            "arrayBufferId = 0" in vertex_observe_h and
+            "pointerNullCalls" in vertex_observe_h and
+            "rejectArrayBufferBound" in stereo_dual_h and
+            "rejectArrayBufferId" in stereo_dual_h and
+            "Hook_glBindBuffer" in (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8") and
+            "Hook_glVertexAttribPointer" in (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8") and
+            "GLProcCensus resolve:" in (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8") and
+            "Hook_glInterleavedArrays" in (ROOT / "src/hook/dllmain.cpp").read_text(encoding="utf-8") and
+            "buf=%d bid=%u" in stereo_renderer_cpp and
+            "gl_entry_census.h" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            (ROOT / "tests/gl_entry_census_tests.cpp").exists() and
+            "gl_entry_census" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0507-gh76-array-source-census.md").exists(),
+            "GH #76 / GH #90 / ADR-0507: the array-source census must name *where* "
+            "the world vertex array is set (the dynamic wglGetProcAddress name "
+            "census + the tracked GL_ARRAY_BUFFER binding + the generic-attribute "
+            "and glInterleavedArrays counts + the sampler's null-pointer tally) "
+            "-- ADR-0506 measured the world draws reading a null pointer with no "
+            "way to say whether a buffer was bound")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

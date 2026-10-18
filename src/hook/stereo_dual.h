@@ -160,6 +160,11 @@ struct SpanDrawCensus {
     unsigned rejectVertexType = 0, rejectVertexSize = 0, rejectIndexType = 0, rejectCount = 0;
     int rejectStride = 0;
     bool rejectPointerSet = false;
+    // GH #76/#90 (ADR-0507): whether a GL_ARRAY_BUFFER was bound at that first
+    // rejection, i.e. whether the null vertex pointer is the buffer-object idiom
+    // (offset 0 into a bound buffer) or genuinely unset.
+    bool rejectArrayBufferBound = false;
+    unsigned rejectArrayBufferId = 0;
 
     void Add(const VertexSample& s) {
         switch (DualSampleScaleOf(s)) {
@@ -187,6 +192,8 @@ struct SpanDrawCensus {
             rejectVertexSize = s.vertexSize;
             rejectStride = s.stride;
             rejectPointerSet = s.pointerSet;
+            rejectArrayBufferBound = s.arrayBufferBound;
+            rejectArrayBufferId = s.arrayBufferId;
             rejectIndexType = s.indexType;
             rejectCount = s.count;
         }
