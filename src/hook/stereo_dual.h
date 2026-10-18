@@ -30,6 +30,7 @@
 
 #include "vertex_submission_observe.h"
 
+#include <cmath>
 #include <cstddef>
 
 namespace RiddickVR {
@@ -87,5 +88,111 @@ inline bool DualFrameUsable(float coverageLeft, float coverageRight,
     if (!(coverageLeft >= minCoverage) || !(coverageRight >= minCoverage)) return false;
     return true;
 }
+
+// --- GH #76/#90 (ADR-0506): name what the world span actually contains ---------
+//
+// ADR-0505's live census measured that only ~8% of the draws inside the world span
+// are world-scale, ~92% did not decode at all, and near-field draws were absent
+// (`unknown=675 near=0 mid=2 world=58`). The per-eye pass therefore captured ~60
+// of ~735 draws and produced unusable frames. "The pass is inert on its own gate"
+// is not a diagnosis, so this names the rejection: which band each draw falls in
+// and, for the undecodable ones, the *signature* (vertex type/size/stride/pointer
+// and index type) of the first one. It is evidence only -- it never changes which
+// draws are re-issued.
+
+// Max |coordinate| over the sampled bounds; 0 for an invalid sample.
+inline float DualSampleExtent(const VertexSample& s) {
+    if (!s.valid) return 0.0f;
+    float e = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        const float lo = std::fabs(s.min[c]);
+        const float hi = std::fabs(s.max[c]);
+        const float m = lo > hi ? lo : hi;
+        if (m > e) e = m;
+    }
+    return e;
+}
+
+// The measured bands (ADR-0490/0505): near-field is <= kNearFieldMaxAbs and is the
+// HUD/viewmodel band; world is the eye-space geometry at |coord| ~1.6e3..3.5e3.
+// What sits *between* them was never named -- wake 103 saw ~2 such draws per span
+// -- so this band exists to make it countable rather than silently "eligible".
+enum class DualSampleScale : unsigned { Unknown = 0, Near, Mid, World };
+
+constexpr float kDualMidMaxExtent = 1000.0f;  // > near-field and <= this is "mid"
+
+inline DualSampleScale DualSampleScaleOf(const VertexSample& s) {
+    if (!s.valid) return DualSampleScale::Unknown;
+    const float e = DualSampleExtent(s);
+    if (e <= kNearFieldMaxAbs) return DualSampleScale::Near;
+    if (e <= kDualMidMaxExtent) return DualSampleScale::Mid;
+    return DualSampleScale::World;
+}
+
+// Reason names for the evidence log (stable tokens, asserted by the unit test).
+inline const char* DualRejectReasonName(VertexSampleReason r) {
+    switch (r) {
+        case VertexSampleReason::Ok:                   return "ok";
+        case VertexSampleReason::NonFloatVertexType:   return "nonfloat";
+        case VertexSampleReason::NoVertexArray:        return "noarray";
+        case VertexSampleReason::ZeroCount:            return "zerocount";
+        case VertexSampleReason::UnsupportedVertexSize:return "badsize";
+        case VertexSampleReason::UnknownIndexType:     return "badindex";
+    }
+    return "?";
+}
+
+// One span's draw census. `skipped` counts the draws the pass refused: the
+// undecodable ones plus the decoded-but-near-field ones (the viewmodel/HUD band).
+// `decodeRejected` is the undecodable subset, bucketed by reason; the first such
+// draw's signature is kept, so a single log line states *why* the world pass is
+// invisible to the array sampler.
+struct SpanDrawCensus {
+    // `nearField` not `near`: windef.h defines a bare `near` macro (hence the
+    // capitalised m_dualScaleNear of ADR-0505).
+    unsigned unknown = 0, nearField = 0, mid = 0, world = 0;
+    unsigned skipped = 0;
+    unsigned decodeRejected = 0;
+    unsigned reasonNonFloat = 0, reasonNoArray = 0, reasonZeroCount = 0;
+    unsigned reasonBadSize = 0, reasonBadIndex = 0;
+    bool hasRejectSig = false;
+    VertexSampleReason rejectReason = VertexSampleReason::Ok;
+    unsigned rejectVertexType = 0, rejectVertexSize = 0, rejectIndexType = 0, rejectCount = 0;
+    int rejectStride = 0;
+    bool rejectPointerSet = false;
+
+    void Add(const VertexSample& s) {
+        switch (DualSampleScaleOf(s)) {
+            case DualSampleScale::Near:  ++nearField; break;
+            case DualSampleScale::Mid:   ++mid;       break;
+            case DualSampleScale::World: ++world;     break;
+            default:                     ++unknown;   break;
+        }
+        if (DualRenderDrawEligible(s)) return;  // a world draw the pass re-issues
+        ++skipped;
+        if (s.valid) return;                    // decoded, but near-field (viewmodel/HUD)
+        ++decodeRejected;
+        switch (s.reason) {
+            case VertexSampleReason::NonFloatVertexType:    ++reasonNonFloat; break;
+            case VertexSampleReason::NoVertexArray:         ++reasonNoArray;  break;
+            case VertexSampleReason::ZeroCount:             ++reasonZeroCount;break;
+            case VertexSampleReason::UnsupportedVertexSize: ++reasonBadSize;  break;
+            case VertexSampleReason::UnknownIndexType:      ++reasonBadIndex; break;
+            default: break;
+        }
+        if (!hasRejectSig) {
+            hasRejectSig = true;
+            rejectReason = s.reason;
+            rejectVertexType = s.vertexType;
+            rejectVertexSize = s.vertexSize;
+            rejectStride = s.stride;
+            rejectPointerSet = s.pointerSet;
+            rejectIndexType = s.indexType;
+            rejectCount = s.count;
+        }
+    }
+
+    void Reset() { *this = SpanDrawCensus{}; }
+};
 
 } // namespace RiddickVR

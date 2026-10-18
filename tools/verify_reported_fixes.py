@@ -1110,6 +1110,38 @@ def main():
             "+ the draw-hook call, the opt-in config, and the black-eye fail-safe) "
             "must exist -- it is the epic #57 item-1 render")
 
+    # GH #76 / GH #90 / ADR-0506: the per-eye pass measured itself inert on its own
+    # gate (ADR-0505: `unknown=675 near=0 mid=2 world=58`, i.e. ~92% of the span's
+    # draws did not decode). Counting them is not a diagnosis, so the span census
+    # must *name* the rejection: the decode reason (vertex type/size/stride/pointer,
+    # index type) has to be carried on the sample, the band + rejection census must
+    # be pure (tested), and the renderer's evidence line must print the reason
+    # buckets and the first rejection's signature -- while the pass stays opt-in and
+    # evidence-only (the census never changes which draws are re-issued).
+    vertex_observe_h = (ROOT / "src/hook/vertex_submission_observe.h").read_text(encoding="utf-8")
+    require("enum class VertexSampleReason" in vertex_observe_h and
+            "VertexSampleReason reason" in vertex_observe_h and
+            "vertexSize = 0" in vertex_observe_h and
+            "stride = 0" in vertex_observe_h and
+            "pointerSet = false" in vertex_observe_h and
+            "VertexSampleReason::NonFloatVertexType" in vertex_observe_h and
+            "VertexSampleReason::NoVertexArray" in vertex_observe_h and
+            "VertexSampleReason::UnknownIndexType" in vertex_observe_h and
+            "struct SpanDrawCensus" in stereo_dual_h and
+            "DualSampleScaleOf" in stereo_dual_h and
+            "DualRejectReasonName" in stereo_dual_h and
+            "kDualMidMaxExtent" in stereo_dual_h and
+            "m_dualCensus.Add(sampled)" in stereo_renderer_cpp and
+            "m_dualCensus.Reset()" in stereo_renderer_cpp and
+            "rc=[nonfloat=" in stereo_renderer_cpp and
+            "sig=[%s vtype=" in stereo_renderer_cpp and
+            "census" in (ROOT / "tests/stereo_dual_tests.cpp").read_text(encoding="utf-8").lower() and
+            (ROOT / "docs/adr/0506-gh76-span-census-names-the-rejection.md").exists(),
+            "GH #76 / GH #90 / ADR-0506: the span census must name *why* the world "
+            "pass did not decode (the sample's reason signature + the pure, tested "
+            "band/rejection census + the evidence line) -- ADR-0505 measured the "
+            "pass inert without saying which draws it lost")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

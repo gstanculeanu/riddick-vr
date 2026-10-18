@@ -1328,26 +1328,15 @@ void StereoRenderer::OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const 
 
     const VertexSample sampled = OpenGLProxy::SampleSubmittedArray(
         static_cast<unsigned>(count), static_cast<unsigned>(type), indices);
-    // GH #76/#90 evidence: the *scale* census of the span's draws. The measured
-    // separation is world ~1.6e3..3.5e3 vs near-field ~0.45 (ADR-0490), so the
-    // bucket counts say directly whether the span holds the world or a
-    // depth/colour-masked pass, and whether the sample decodes at all.
-    float extent = 0.0f;
-    if (sampled.valid) {
-        for (int c = 0; c < 3; ++c) {
-            const float lo = std::fabs(sampled.min[c]);
-            const float hi = std::fabs(sampled.max[c]);
-            const float e = lo > hi ? lo : hi;
-            if (e > extent) extent = e;
-        }
-    }
-    if (!sampled.valid) ++m_dualScaleUnknown;
-    else if (extent <= kNearFieldMaxAbs) ++m_dualScaleNear;
-    else if (extent <= 1000.0f) ++m_dualScaleMid;
-    else ++m_dualScaleWorld;
+    // GH #76/#90 evidence (ADR-0506): the span's scale bands *and* why each refused
+    // draw was refused. The measured separation is world ~1.6e3..3.5e3 vs
+    // near-field ~0.45 (ADR-0490), so the bucket counts say directly whether the
+    // span holds the world or a depth/colour-masked pass, and the kept signature
+    // names the (type, size, stride, pointer, index type) the array sampler could
+    // not decode.
+    m_dualCensus.Add(sampled);
 
     if (!DualRenderDrawEligible(sampled)) {
-        ++m_dualSkipped;
         return;
     }
     if (!m_dualOffValid) RefreshDualEyeOffsets();
@@ -1743,13 +1732,23 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                         s_dualLogCountdown = g_vrConfig.stereoDualRenderLogEvery;
                         VR_LOG_INFO("DualRender: swap=%u frames=%u used=%u draws=%u eligible=%u "
                                     "skipped=%u mirrors=%u active=%d coverL=%.3f coverR=%.3f "
-                                    "size=%dx%d use=%d scale=[unknown=%u near=%u mid=%u world=%u]",
+                                    "size=%dx%d use=%d scale=[unknown=%u near=%u mid=%u world=%u] "
+                                    "reject=%u rc=[nonfloat=%u noarray=%u zerocount=%u badsize=%u "
+                                    "badindex=%u] sig=[%s vtype=0x%X vsize=%u stride=%d ptr=%d "
+                                    "itype=0x%X count=%u]",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
-                                    m_dualEligible, m_dualSkipped, m_dualMirrorClears,
+                                    m_dualEligible, m_dualCensus.skipped, m_dualMirrorClears,
                                     (int)m_dualFrameActive, m_dualCoverL, m_dualCoverR,
                                     (int)m_dualW, (int)m_dualH, (int)dualUsedThisFrame,
-                                    m_dualScaleUnknown, m_dualScaleNear, m_dualScaleMid,
-                                    m_dualScaleWorld);
+                                    m_dualCensus.unknown, m_dualCensus.nearField, m_dualCensus.mid,
+                                    m_dualCensus.world, m_dualCensus.decodeRejected,
+                                    m_dualCensus.reasonNonFloat, m_dualCensus.reasonNoArray,
+                                    m_dualCensus.reasonZeroCount, m_dualCensus.reasonBadSize,
+                                    m_dualCensus.reasonBadIndex,
+                                    DualRejectReasonName(m_dualCensus.rejectReason),
+                                    m_dualCensus.rejectVertexType, m_dualCensus.rejectVertexSize,
+                                    m_dualCensus.rejectStride, (int)m_dualCensus.rejectPointerSet,
+                                    m_dualCensus.rejectIndexType, m_dualCensus.rejectCount);
                     } else {
                         --s_dualLogCountdown;
                     }
@@ -1988,11 +1987,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         m_dualFrameActive = false;
         m_dualDraws = 0;
         m_dualEligible = 0;
-        m_dualSkipped = 0;
-        m_dualScaleUnknown = 0;
-        m_dualScaleNear = 0;
-        m_dualScaleMid = 0;
-        m_dualScaleWorld = 0;
+        m_dualCensus.Reset();
     }
 }
 

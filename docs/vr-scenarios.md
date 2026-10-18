@@ -330,7 +330,11 @@ Eligible = inside the world span **and** the sampled array bounds not near-field
 are never eye-translated; a frame with too few eligible draws or a black eye
 (`stereo_dual.h`) falls back to the shipped shifted capture. Logs
 `DualRender: swap=.. eligible=.. skipped=.. coverL=.. coverR=.. use=..` plus the
-span's sampled-scale census `scale=[unknown=.. near=.. mid=.. world=..]`.
+span's sampled-scale census `scale=[unknown=.. near=.. mid=.. world=..]` and, from
+ADR-0506, the rejection census `reject=.. rc=[nonfloat=.. noarray=.. zerocount=.. badsize=.. badindex=..]`
+with the first rejected draw's `sig=[<reason> vtype=.. vsize=.. stride=.. ptr=.. itype=.. count=..]`
+— which names *why* the pass lost draws (measured: all `noarray`, `GL_FLOAT`/3/stride 56
+geometry read with a null client pointer, i.e. the world array is set out of the hook's sight).
 
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim

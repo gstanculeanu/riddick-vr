@@ -2,6 +2,7 @@
 
 #include "opengl_proxy.h"
 #include "ipc_bridge.h"
+#include "stereo_dual.h"
 #include <windows.h>
 #include <GL/gl.h>
 #include <d3d11.h>
@@ -162,17 +163,14 @@ private:
     // window (ADR-0439/0483). Only draws inside it are candidate world geometry.
     bool m_dualWorldSpan = false;
     unsigned m_dualMirrorClears = 0;
-    // Scale census of the span's draws (evidence for the next step): the sampled
-    // extent in the three measured bands plus undecodable draws.
-    unsigned m_dualScaleUnknown = 0;
-    unsigned m_dualScaleNear = 0;
-    unsigned m_dualScaleMid = 0;
-    unsigned m_dualScaleWorld = 0;
+    // GH #76/#90 (ADR-0506): the span's scale bands *and* the reason each refused
+    // draw was refused, so a run names the rejected signature rather than only
+    // counting it (ADR-0505's ~92% undecodable span draws).
+    SpanDrawCensus m_dualCensus;
     bool m_dualOffValid = false;
     float m_dualOff[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
     unsigned m_dualDraws = 0;
     unsigned m_dualEligible = 0;
-    unsigned m_dualSkipped = 0;
     unsigned m_dualFrames = 0;
     unsigned m_dualFramesUsed = 0;
     int m_dualCoverCountdown = 0;

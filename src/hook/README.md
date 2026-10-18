@@ -456,6 +456,18 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   `DualRender: swap=.. frames=.. used=.. draws=.. eligible=.. skipped=.. coverL=..
   coverR=.. size=.. use=..`. The offset uses the scene-faithfulness gate above, so a
   mock/sim run applies the head-local `+/-halfIpd`.
+- **The span census names the rejection (ADR-0506, wake 104; GH #76 / GH #90).** The
+  per-eye pass measured itself inert on its gate (ADR-0505: ~92% of the span's draws
+  did not decode), so `VertexSample` now carries the raw `vertexSize`/`stride`/
+  `pointerSet` and a `VertexSampleReason`, and `stereo_dual.h::SpanDrawCensus`
+  (`Add`/`Reset`) counts the scale bands (the previously-unnamed **mid** band is now
+  explicit) plus the refused subset, its undecodable part bucketed by reason, and the
+  first rejection's signature. The evidence line adds
+  `reject=.. rc=[nonfloat=.. noarray=.. zerocount=.. badsize=.. badindex=..]
+  sig=[<reason> vtype=.. vsize=.. stride=.. ptr=.. itype=.. count=..]`. It is
+  evidence only — the census never changes which draws are re-issued. Measured: every
+  rejection is `noarray` (`GL_FLOAT` 3-component stride-56 geometry read with a null
+  client pointer), so the world array is set where the draw hook cannot see it.
 
 
 

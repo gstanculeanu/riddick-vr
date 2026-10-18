@@ -13,11 +13,21 @@
 
 using RiddickVR::DualFrameUsable;
 using RiddickVR::DualNonBlackFraction;
+using RiddickVR::DualRejectReasonName;
 using RiddickVR::DualRenderDrawEligible;
+using RiddickVR::DualSampleExtent;
+using RiddickVR::DualSampleScale;
+using RiddickVR::DualSampleScaleOf;
 using RiddickVR::IsNearFieldSample;
+using RiddickVR::kDualMidMaxExtent;
 using RiddickVR::kDualMinEyeCoverage;
+using RiddickVR::kGlFloat;
+using RiddickVR::kGlUnsignedShort;
 using RiddickVR::kNearFieldMaxAbs;
+using RiddickVR::SampleClientVertices;
+using RiddickVR::SpanDrawCensus;
 using RiddickVR::VertexSample;
+using RiddickVR::VertexSampleReason;
 
 static int g_failures = 0;
 
@@ -116,6 +126,98 @@ int main() {
         Check(DualFrameUsable(kDualMinEyeCoverage, kDualMinEyeCoverage),
               "coverage at the floor is accepted");
         Check(DualFrameUsable(0.8f, 0.8f), "a normal pair is accepted");
+    }
+
+    // 8. GH #76/#90 (ADR-0506): the span census names the *band* of each draw, and
+    //    the "mid" band (between the measured near-field and world bands) is now a
+    //    named bucket rather than silently eligible. Invalid samples carry no
+    //    extent, so they are "Unknown" and never confused with world geometry.
+    {
+        VertexSample invalid = MakeSample(false, -5.0f, 5.0f);
+        Check(DualSampleExtent(invalid) == 0.0f, "an invalid sample has no extent");
+        Check(DualSampleScaleOf(invalid) == DualSampleScale::Unknown,
+              "an undecodable draw is the Unknown band");
+
+        Check(DualSampleScaleOf(MakeSample(true, -0.45f, 0.45f)) == DualSampleScale::Near,
+              "the viewmodel/HUD band is Near");
+        Check(DualSampleScaleOf(MakeSample(true, -500.0f, 500.0f)) == DualSampleScale::Mid,
+              "content between near-field and world is the named Mid band");
+        Check(DualSampleScaleOf(MakeSample(true, 1600.0f, 3500.0f)) == DualSampleScale::World,
+              "measured eye-space geometry is the World band");
+
+        // Band boundaries: <= near-field is Near, <= mid ceiling is Mid.
+        Check(DualSampleScaleOf(MakeSample(true, -kNearFieldMaxAbs, kNearFieldMaxAbs)) ==
+                  DualSampleScale::Near, "the near-field boundary is Near");
+        Check(DualSampleScaleOf(MakeSample(true, -kDualMidMaxExtent, kDualMidMaxExtent)) ==
+                  DualSampleScale::Mid, "the mid ceiling is Mid");
+        Check(DualSampleScaleOf(MakeSample(true, -kDualMidMaxExtent - 1.0f, kDualMidMaxExtent + 1.0f)) ==
+                  DualSampleScale::World, "just past the mid ceiling is World");
+    }
+
+    // 9. The rejected-signature is recorded once, from the *first* undecodable draw,
+    //    and the reason buckets say which decode step failed (ADR-0505 next step 1).
+    {
+        SpanDrawCensus census;
+        census.Add(MakeSample(true, 1600.0f, 3500.0f));           // world: eligible
+        Check(census.world == 1u && census.skipped == 0u, "a world draw is counted and not skipped");
+
+        census.Add(MakeSample(true, -0.45f, 0.45f));              // near: skipped, decoded
+        Check(census.nearField == 1u && census.skipped == 1u && census.decodeRejected == 0u,
+              "a decoded near-field draw is skipped but not a decode rejection");
+
+        VertexSample noArray = MakeSample(false, 0.0f, 0.0f, 526u);
+        noArray.reason = VertexSampleReason::NoVertexArray;
+        noArray.vertexType = kGlFloat;
+        noArray.vertexSize = 3u;
+        noArray.stride = 0;
+        noArray.pointerSet = false;
+        noArray.indexType = kGlUnsignedShort;
+        census.Add(noArray);
+        Check(census.unknown == 1u && census.skipped == 2u && census.decodeRejected == 1u,
+              "the undecodable draw is Unknown and a decode rejection");
+        Check(census.reasonNoArray == 1u, "the reason bucket names the failed decode step");
+        Check(census.hasRejectSig && census.rejectReason == VertexSampleReason::NoVertexArray,
+              "the first rejection's reason is kept");
+        Check(census.rejectVertexType == kGlFloat && census.rejectVertexSize == 3u &&
+                  census.rejectStride == 0 && !census.rejectPointerSet &&
+                  census.rejectIndexType == kGlUnsignedShort && census.rejectCount == 526u,
+              "the rejection signature carries type/size/stride/pointer/index/count");
+
+        VertexSample badSize = MakeSample(false, 0.0f, 0.0f, 8u);
+        badSize.reason = VertexSampleReason::UnsupportedVertexSize;
+        badSize.vertexSize = 1u;
+        census.Add(badSize);
+        Check(census.reasonBadSize == 1u && census.decodeRejected == 2u,
+              "a second rejection is bucketed");
+        Check(census.rejectVertexSize == 3u,
+              "the signature is the FIRST rejection, not overwritten");
+
+        Check(DualRejectReasonName(VertexSampleReason::NoVertexArray)[0] == 'n' &&
+                  DualRejectReasonName(VertexSampleReason::UnknownIndexType)[0] == 'b',
+              "reject reasons have stable short names");
+
+        census.Reset();
+        Check(census.skipped == 0u && census.decodeRejected == 0u && !census.hasRejectSig,
+              "Reset clears the census");
+    }
+
+    // 10. The sampler records the raw GL state it was handed, so a rejection can be
+    //     reported as a signature rather than a bare count (pure, no GL).
+    {
+        VertexSample nonFloat = SampleClientVertices(6u, kGlUnsignedShort, nullptr,
+                                                     3u, 0x1403u /* GL_UNSIGNED_SHORT */, 0, nullptr);
+        Check(!nonFloat.valid && nonFloat.reason == VertexSampleReason::NonFloatVertexType,
+              "a non-float vertex array is reported, not decoded");
+        Check(nonFloat.vertexType == 0x1403u && nonFloat.vertexSize == 3u,
+              "the rejected type/size is recorded for the log");
+
+        const float verts[3 * 3] = {1.0f, 2.0f, 3.0f, -1.0f, -2.0f, -3.0f, 0.5f, 0.5f, 0.5f};
+        VertexSample ok = SampleClientVertices(3u, kGlUnsignedShort, nullptr,
+                                               3u, kGlFloat, 0, verts);
+        Check(ok.valid && ok.reason == VertexSampleReason::Ok,
+              "a tightly packed float array decodes");
+        Check(ok.min[0] == -1.0f && ok.max[0] == 1.0f && ok.pointerSet,
+              "the decoded bounds are over the sampled vertices");
     }
 
     if (g_failures == 0) {

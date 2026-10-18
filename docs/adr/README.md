@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0505` — the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0506` — the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -31,7 +31,11 @@ every ADR names the epic #57 subsystem it advances.
   eye into per-eye frames (GH #76/#90), which is epic #57 item 1's render; the
   world pass is complete at the array hook (ADR-0491), so no state capture or
   recorded vertices are needed, and a black-eye gate keeps the shifted capture.
-  **Head = `0505`; the next new ADR is `0506`.**
+  ADR-0506 instruments that pass's **world-span census** to name *why* it lost
+  ~92% of the span's draws (ADR-0505 counted them): the measured rejection is
+  `noarray` — `GL_FLOAT`/3-component/stride-56 geometry read with a **null client
+  pointer** — i.e. the world array is set where the draw hook cannot see it.
+  **Head = `0506`; the next new ADR is `0507`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

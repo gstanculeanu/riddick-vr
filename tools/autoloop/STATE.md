@@ -2,6 +2,85 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 104 — 2026-10-18 15:05 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 — the
+  world-span census now NAMES the rejection (ADR-0506)**: ADR-0505 measured its
+  per-eye pass inert on its own gate (~92% of the span's draws undecodable) but only
+  *counted* them, so this wake makes the rejection nameable — `VertexSample` carries
+  the raw `vertexSize`/`stride`/`pointerSet` and a `VertexSampleReason`, and a new
+  pure `stereo_dual.h::SpanDrawCensus` (`Add`/`Reset`) counts the scale bands (the
+  previously-unnamed **mid** band is now explicit) plus the refused subset, its
+  undecodable part bucketed by reason, and the **first** rejection's signature; the
+  throttled `DualRender:` evidence line prints `reject=.. rc=[...] sig=[...]`.
+  Evidence-only: the census never changes which draws are re-issued (pass still
+  opt-in `StereoDualRender=0`, gated, falls back to the shipped shifted capture).
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0505's own Next 1
+  ("log the rejected vertex type/size/stride/pointer"). GH #63/#64/#61 and the P1
+  bugs remain headset/deploy-gated (#64 routes through the capped #67); option 1
+  cannot advance without knowing what the pass loses. Diagnostic, not a second
+  render change.
+- **Change:**
+  - `src/hook/vertex_submission_observe.h`: `enum class VertexSampleReason` (`Ok`,
+    `NonFloatVertexType`, `NoVertexArray`, `ZeroCount`, `UnsupportedVertexSize`,
+    `UnknownIndexType`); `VertexSample` gains `vertexSize`/`stride`/`pointerSet`/
+    `reason`, set on every early return of `SampleClientVertices` so a rejection is a
+    *signature*, not a bare count.
+  - `src/hook/stereo_dual.h`: `DualSampleExtent`, `DualSampleScale` +
+    `DualSampleScaleOf` (bands `unknown`/`nearField`/`mid`/`world`,
+    `kDualMidMaxExtent=1000`), `DualRejectReasonName`, `SpanDrawCensus`.
+  - `stereo_renderer.{h,cpp}`: the four `m_dualScale*` counters + `m_dualSkipped`
+    become one `m_dualCensus`; `OnSceneDraw` calls `Add` (the eligibility check only
+    decides whether to re-issue); the `DualRender:` line adds
+    `reject=.. rc=[nonfloat noarray zerocount badsize badindex] sig=[<reason> vtype
+    vsize stride ptr itype count]`; the per-frame reset calls `Reset()`.
+  - `tests/stereo_dual_tests.cpp`: 3 new sections (band classification incl. the mid
+    band and boundaries; the census buckets + first-rejection signature + `Reset`;
+    the sampler's recorded state/`reason`). NEW `docs/adr/0506-…`;
+    `docs/adr/README.md` (head -> 0506), `docs/vr-scenarios.md`, `src/hook/README.md`;
+    `verify_reported_fixes.py` new #76/#90/ADR-0506 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 521216 B
+  `F68012DC818E` + x64 host); **CTest 31/31 (x86) and 29/29 (x64)** (extended
+  `stereo_dual` passes); all 12 `tools/test_*.py` exit 0; `verify_reported_fixes`,
+  `xrsim --selftest`, `scenario_tests.py --check`, `verify_hook_init`,
+  `validate_addresses`, `verify_test_artifacts` PASS.
+- **EVIDENCE live (`RIDDICKVR_SIM=1`, one read-only per-run shadow
+  `riddickvr-shadow-20392`, `--reach-gameplay --duration 90 --advance-menu
+  --advance-min-taps 8 --require-fresh-hook --require-parallax --dump-branch any
+  --downscale 4 --ini StereoDualRender=1`; `deployed_hook_matches_build` PASS, hook
+  `f68012dc818e` = the repo build):** reached live gameplay (16 taps, 2 gameplay / 3
+  cinema of 5 frames, `gameplay_full_bleed_reached` fill 0.95). The census line:
+  `swap=1205 draws=60 eligible=60 skipped=672 use=0
+  scale=[unknown=672 near=0 mid=2 world=58]
+  reject=672 rc=[nonfloat=0 noarray=672 zerocount=0 badsize=0 badindex=0]
+  sig=[noarray vtype=0x1406 vsize=3 stride=56 ptr=0 itype=0x1403 count=12]`.
+  **DECISIVE:** every undecodable draw is `noarray` with `GL_FLOAT` (0x1406),
+  3 components, **stride 56**, `GL_UNSIGNED_SHORT` (0x1403) indices and a **null
+  client pointer** — the type/index type are exactly what the sampler decodes, so
+  only the *pointer* is missing, i.e. the world array is established where the draw
+  hook cannot see it (buffer-object offset-0 idiom, or an uninstrumented
+  `glInterleavedArrays`/`wglGetProcAddress` path). `mid=2..7` makes ADR-0505's "~2
+  unexplained mid draws" a stated number (not the blocker). NO REGRESSION: `use=0`
+  (both eyes black) so gameplay still presents the shipped shifted capture;
+  `stereo_parallax_present` still FAILs (`stereo_kind=unknown`, 2 gameplay frames);
+  `frame_budget` PASS (n=510 p50=3.82 ms p95=6.32 ms).
+- **VERDICT (honest):** the rejection is *named* and the ambiguity in ADR-0505 is
+  resolved, but native stereo is **not** achieved (`--require-parallax` still fails).
+  Remaining work is specific: find where the world array is set (log every hooked
+  `glVertexPointer` + hook `glInterleavedArrays`; check a `wglGetProcAddress`'d core
+  `glBindBuffer` the ADR-0481 probe never looked for) and capture the buffer+offset
+  instead of client memory if it is buffer-backed.
+- **LIMITS:** instrumentation only; the 2004 build untouched; no headset; the leading
+  explanation is a hypothesis, not a result (the discriminating test is Next 1).
+- **Install untouched** (READ-ONLY per-run shadow; no deploy, no install write), no
+  leftover game/host processes, live lock released.
+- **Next:** (1) locate the world array source (above) per ADR-0506 Next 1; (2)
+  prove/replace the world-span boundary (per-frame totals + per-draw projection —
+  now that the mid band counts); (3) grade parallax (fix the dump gate gameplay label
+  GH #72/#69 or measure the eye pair in the hook); (4) keep
+  `StereoDualRender=0`/`StereoParallaxDibr=0`/`StereoReplayProbe=0` defaults; (5) the
+  P1 comfort/controls bugs #45/#49/#50/#51/#65; (6) DEFAULT_GAME_DIR 2004-vs-2009;
+  (7) GH #83/#88/#89/#74.
+
 ## Wake 103 — 2026-10-18 14:45 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 — the
   per-eye camera is applied AT THE DRAW SITE (ADR-0505)**: a new opt-in

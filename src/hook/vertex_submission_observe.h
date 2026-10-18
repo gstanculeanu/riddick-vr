@@ -77,12 +77,29 @@ constexpr unsigned kMaxVertexSamples = 24;
 // (measured: near-field meshes ~±0.45, view-space world/overlay draws ~1.6e3..3.5e3).
 constexpr float kNearFieldMaxAbs = 16.0f;
 
+// GH #76/#90 (ADR-0506): *why* an array draw's vertices could not be decoded. The
+// span census (stereo_dual.h) counts these so a run names the rejected signature
+// (vertex type/size/stride/pointer, index type) instead of only "unknown" -- which
+// is what decides whether the per-eye pass can see the world geometry at all.
+enum class VertexSampleReason : unsigned {
+    Ok = 0,
+    NonFloatVertexType,     // glVertexPointer type != GL_FLOAT
+    NoVertexArray,          // no client vertex array pointer recorded (null)
+    ZeroCount,              // glDrawElements count == 0
+    UnsupportedVertexSize,  // glVertexPointer size outside 2..4
+    UnknownIndexType,       // index type not GL_UNSIGNED_BYTE/SHORT/INT
+};
+
 struct VertexSample {
     bool valid = false;       // the array was decodable and at least one vertex was read
     unsigned read = 0;        // vertices actually read
     unsigned count = 0;       // the draw's index count (total vertices, not just sampled)
     unsigned indexType = 0;   // as passed to glDrawElements
     unsigned vertexType = 0;  // as recorded by glVertexPointer
+    unsigned vertexSize = 0;  // components per vertex as recorded by glVertexPointer
+    int stride = 0;           // bytes between vertices (0 = tightly packed)
+    bool pointerSet = false;  // a non-null client vertex array pointer was recorded
+    VertexSampleReason reason = VertexSampleReason::Ok;  // why, when !valid
     float first[3] = {};      // the first sampled vertex
     float min[3] = {};        // axis-aligned bounds over the sampled vertices
     float max[3] = {};
@@ -112,16 +129,34 @@ inline VertexSample SampleClientVertices(unsigned count, unsigned indexType, con
     VertexSample s;
     s.indexType = indexType;
     s.vertexType = vertexType;
+    s.vertexSize = vertexSize;
+    s.stride = stride;
+    s.pointerSet = vertices != nullptr;
     s.count = count;                               // the draw's size, logged even when undecodable
-    if (vertexType != kGlFloat) return s;          // only float arrays are decoded
-    if (!vertices || count == 0u) return s;        // nothing to read
-    if (vertexSize < 2u || vertexSize > 4u) return s;
+    if (vertexType != kGlFloat) {                  // only float arrays are decoded
+        s.reason = VertexSampleReason::NonFloatVertexType;
+        return s;
+    }
+    if (!vertices) {                               // nothing to read
+        s.reason = VertexSampleReason::NoVertexArray;
+        return s;
+    }
+    if (count == 0u) {
+        s.reason = VertexSampleReason::ZeroCount;
+        return s;
+    }
+    if (vertexSize < 2u || vertexSize > 4u) {
+        s.reason = VertexSampleReason::UnsupportedVertexSize;
+        return s;
+    }
     unsigned indexSize;
     switch (indexType) {
         case kGlUnsignedByte:  indexSize = 1u; break;
         case kGlUnsignedShort: indexSize = 2u; break;
         case kGlUnsignedInt:   indexSize = 4u; break;
-        default: return s;                          // unknown index type
+        default:                                       // unknown index type
+            s.reason = VertexSampleReason::UnknownIndexType;
+            return s;
     }
     const unsigned step = stride > 0
         ? static_cast<unsigned>(stride)
