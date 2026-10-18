@@ -1383,14 +1383,28 @@ void StereoRenderer::OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const 
     // span holds the world or a depth/colour-masked pass, and the kept signature
     // names the (type, size, stride, pointer, index type) the array sampler could
     // not decode.
-    m_dualCensus.Add(sampled);
+    //
+    // GH #76/#90 (ADR-0510): split the eligible draws by the engine's **colour-write
+    // mask** at this draw. ADR-0509 read that mask once per span and measured
+    // `cmask=0x0`, so the span census must now say whether the span *ever* turns
+    // colour back on -- a draw submitted with the mask fully off (a depth/occlusion
+    // prepass) re-issues correctly but can never colour an eye frame, so it is
+    // counted but not re-issued.
+    const bool colourWritesOn =
+        DualColourMaskWritesColour(OpenGLProxy::ColourWriteMaskNibble());
+    m_dualCensus.Add(sampled, colourWritesOn);
 
     if (!DualRenderDrawEligible(sampled)) {
         return;
     }
     // GH #76/#90 (ADR-0509): the first eligible draw of the span is the instant the
     // engine's output state is current and unmodified by the pass, so read it here.
+    // Deliberately *before* the ADR-0510 colour gate, so the span's opening state
+    // stays the evidence it was in ADR-0509 (the queried cmask, not the first
+    // colour-on draw's).
     if (!m_dualState.captured) CaptureDualDrawState();
+    // GH #76/#90 (ADR-0510): a colour-masked draw cannot colour an eye frame.
+    if (!colourWritesOn) return;
     if (!m_dualOffValid) RefreshDualEyeOffsets();
     if (!m_dualOffValid) return;
 
@@ -1795,6 +1809,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     "badindex=%u] sig=[%s vtype=0x%X vsize=%u stride=%d ptr=%d "
                                     "itype=0x%X count=%u buf=%d bid=%u] "
                                     "gen=%u gbacked=%u gsig=[enabled=%u buf=%u] "
+                                    "cw=[on=%u off=%u calls=%u] "
                                     "sstate=[cap=%d cmask=0x%X dmask=%d drawbuf=0x%X "
                                     "vp=%d,%d,%dx%d sc=%d scissor=%d,%d,%dx%d dt=%d blend=%d]",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
@@ -1815,6 +1830,8 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     m_dualCensus.rejectArrayBufferId,
                                     m_dualCensus.genericEligible, m_dualCensus.genericBufferBacked,
                                     m_dualCensus.genericEnabled, m_dualCensus.genericBufferId,
+                                    m_dualCensus.eligibleColourOn, m_dualCensus.eligibleColourOff,
+                                    OpenGLProxy::ColourMaskCallCount(),
                                     (int)m_dualState.captured, DualColourMaskNibble(m_dualState),
                                     (int)m_dualState.depthWrite, m_dualState.drawBuffer,
                                     m_dualState.viewport[0], m_dualState.viewport[1],

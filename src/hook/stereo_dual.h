@@ -160,6 +160,22 @@ inline bool DualDrawStateWritesNoColour(const DualDrawState& s) {
     return s.captured && (!s.ColourWriteEnabled() || s.drawBuffer == kDualDrawBufferNone);
 }
 
+// --- GH #76/#90 (ADR-0510): per-draw colour-write gate --------------------------
+//
+// ADR-0509 read the span's output state *once per span* and measured `cmask=0x0` at
+// the first eligible draw -- so it could not tell a span that is a depth/occlusion
+// prepass throughout from one whose mask turns back on later (the colour pass). The
+// next step it named is to classify **at each draw**: a draw the engine submits with
+// the colour mask fully off re-issues correctly but can never colour an eye frame, so
+// the pass must not spend a per-eye draw on it.
+//
+// The gate is on the RGB channels only: an alpha-only mask (`0x8`) writes nothing
+// `DualNonBlackFraction` reads, so it counts as no colour. `colourNibble` is the
+// 4-bit mask `DualColourMaskNibble` reports (bit0=red..bit3=alpha; default `0xF`).
+inline bool DualColourMaskWritesColour(unsigned colourNibble) {
+    return (colourNibble & 0x7u) != 0u;
+}
+
 // --- GH #76/#90 (ADR-0506): name what the world span actually contains ---------
 //
 // ADR-0505's live census measured that only ~8% of the draws inside the world span
@@ -217,7 +233,9 @@ inline const char* DualRejectReasonName(VertexSampleReason r) {
 // undecodable ones plus the decoded-but-near-field ones (the viewmodel/HUD band).
 // `decodeRejected` is the undecodable subset, bucketed by reason; the first such
 // draw's signature is kept, so a single log line states *why* the world pass is
-// invisible to the array sampler.
+// invisible to the array sampler. `Add` also takes the engine's per-draw colour-write
+// state (ADR-0510) and splits the *eligible* draws into colour-on/off, so the same
+// span says whether it ever turns colour back on.
 struct SpanDrawCensus {
     // `nearField` not `near`: windef.h defines a bare `near` macro (hence the
     // capitalised m_dualScaleNear of ADR-0505).
@@ -246,15 +264,22 @@ struct SpanDrawCensus {
     bool hasGenericSig = false;
     unsigned genericEnabled = 0;
     unsigned genericBufferId = 0;
+    // GH #76/#90 (ADR-0510): the eligible draws split by the engine's colour-write
+    // mask *at the draw*. `colourOff` draws were re-issued by ADR-0508 but cannot
+    // write colour (the measured `cmask=0x0` depth stage); `colourOn` is the subset
+    // that can colour an eye frame. The pass now re-issues only `colourOn`.
+    unsigned eligibleColourOn = 0;
+    unsigned eligibleColourOff = 0;
 
-    void Add(const VertexSample& s) {
+    void Add(const VertexSample& s, bool colourWritesOn) {
         switch (DualSampleScaleOf(s)) {
             case DualSampleScale::Near:  ++nearField; break;
             case DualSampleScale::Mid:   ++mid;       break;
             case DualSampleScale::World: ++world;     break;
             default:                     ++unknown;   break;
         }
-        if (DualRenderDrawEligible(s)) {        // a world draw the pass re-issues
+        if (DualRenderDrawEligible(s)) {        // a world draw the pass would re-issue
+            if (colourWritesOn) ++eligibleColourOn; else ++eligibleColourOff;
             if (!s.valid) {                     // ... via the generic-attribute path
                 ++genericEligible;
                 if (s.genericPositionBufferId != 0u) ++genericBufferBacked;

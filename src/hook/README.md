@@ -512,5 +512,21 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   boundary) is separable from "the re-issue is wrong" (→ fix the pass). Evidence only:
   no draw decision changes, `StereoDualRender=0` stays the default.
 
+- **The re-issue is gated per draw on the colour-write mask (ADR-0510, wake 108; GH #76 /
+  GH #90).** A single per-span read cannot tell a depth-only stage from a mask that turns
+  back on, so `RndrGL`'s statically imported `glColorMask` is IAT-hooked
+  (`Hook_glColorMask` → `OpenGLProxy::NoteColourMask`, with a call count that proves the
+  hook is live). `stereo_dual.h::DualColourMaskWritesColour` is the RGB-only gate (an
+  alpha-only mask writes nothing the eye-frame coverage reads); `OnSceneDraw` computes it
+  at the draw, feeds `SpanDrawCensus`, and returns **without re-issuing** a draw whose
+  mask is off — so `m_dualEligible` (the fail-safe gate's counter) is the count of draws
+  actually re-issued. The `DualRender:` line adds `cw=[on=… off=… calls=…]`. This is a
+  correctness improvement over ADR-0508's ~706 masked draws per eye; the clear-based span
+  boundary is deliberately unchanged (the census measures whether it must move). Live
+  (wake 108) the in-level span reads `cw=[on=547 off=159 calls=162194]` beside
+  `cmask=0x0`: the span's opening depth prepass *is* colour-masked (159 draws) but its
+  colour world pass (547) is **not**, so the boundary need not move and the blocker is
+  the re-issue (`coverL=0.289`, `use=0`).
+
 
 

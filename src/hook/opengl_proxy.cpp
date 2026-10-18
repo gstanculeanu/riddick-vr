@@ -87,6 +87,15 @@ static void RecordKnownFramebuffer(GLuint id) {
     }
 }
 
+// GH #76/#90 (ADR-0510): the engine's glColorMask state (bit0=red..bit3=alpha; the
+// GL default is all four channels on). ADR-0509 read it once per span via
+// glGetBooleanv and measured `cmask=0x0` at the span's first eligible draw; the
+// per-eye pass needs it *at each draw*, so RndrGL's `glColorMask` import is
+// IAT-hooked (the live 2009 `RndrGL.dll` statically imports it) and forwards here.
+// The call count makes the hook's liveness part of the run's evidence.
+static unsigned s_colourMaskNibble = 0xFu;
+static unsigned s_colourMaskCalls = 0;
+
 // Real WGL & GL Typedefs
 typedef HGLRC (WINAPI *PFN_wglCreateContext)(HDC);
 typedef BOOL  (WINAPI *PFN_wglDeleteContext)(HGLRC);
@@ -1124,6 +1133,15 @@ const GlProcNameCensus& OpenGLProxy::ProcCensus() { return s_glProcCensus; }
 const ArrayBindingTracker& OpenGLProxy::ArrayBinding() { return s_arrayBinding; }
 const AttributePathCensus& OpenGLProxy::AttributePaths() { return s_attributePathCensus; }
 void OpenGLProxy::NoteInterleavedArrays() { s_attributePathCensus.NoteInterleaved(); }
+
+// GH #76/#90 (ADR-0510): the per-draw colour-write mask. Forwarded from the RndrGL
+// `glColorMask` IAT hook; a pure record, it never changes the mask the engine set.
+void OpenGLProxy::NoteColourMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
+    s_colourMaskNibble = (red ? 1u : 0u) | (green ? 2u : 0u) | (blue ? 4u : 0u) | (alpha ? 8u : 0u);
+    ++s_colourMaskCalls;
+}
+unsigned OpenGLProxy::ColourWriteMaskNibble() { return s_colourMaskNibble; }
+unsigned OpenGLProxy::ColourMaskCallCount() { return s_colourMaskCalls; }
 
 // The window state machine runs when dual render is on (BuildViewmodelSuppressionConfig
 // sets `track` for it), so this reports the live first-person window boundary.

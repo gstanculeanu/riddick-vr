@@ -168,7 +168,8 @@ private:
     unsigned m_dualMirrorClears = 0;
     // GH #76/#90 (ADR-0506): the span's scale bands *and* the reason each refused
     // draw was refused, so a run names the rejected signature rather than only
-    // counting it (ADR-0505's ~92% undecodable span draws).
+    // counting it (ADR-0505's ~92% undecodable span draws). ADR-0510 adds the split of
+    // its *eligible* draws by the engine's colour-write mask at the draw.
     SpanDrawCensus m_dualCensus;
     // GH #76/#90 (ADR-0509): the span's output GL state (glColorMask/glDepthMask/
     // viewport/scissor/enables), read once at the first eligible draw, plus the eye

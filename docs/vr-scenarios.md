@@ -379,6 +379,25 @@ dt=… blend=…]`. A fully-masked `cmask=0x0` (a depth/occlusion stage) means t
 must move its span boundary; a live mask with sane viewport/scissor means the re-issue
 itself is at fault. Evidence only; `StereoDualRender=0` stays the default.
 
+**ADR-0510 (wake 108; GH #76 / GH #90) classifies at each draw.** ADR-0509's single
+per-span read cannot tell a depth-only stage from a mask that turns back on, so the pass
+now tracks the engine's `glColorMask` — `RndrGL`'s statically imported `glColorMask` is
+IAT-hooked (`Hook_glColorMask` → `OpenGLProxy::NoteColourMask`, counted so a run states
+the hook is live) — and gates the re-issue on it **per draw**: a draw submitted with the
+colour mask fully off (the measured `cmask=0x0` depth stage) re-issues correctly but can
+never colour an eye frame, so it is counted but not re-issued. `DualColourMaskWritesColour`
+is RGB-only (an alpha-only mask writes nothing the eye-frame coverage reads), and
+`SpanDrawCensus` splits its **eligible** draws into `eligibleColourOn`/`eligibleColourOff`
+so one span says whether it ever turns colour back on. The `DualRender:` line gains
+`cw=[on=… off=… calls=…]`. `m_dualEligible` counts only draws actually re-issued, so a
+colour-masked span cannot pass the fail-safe gate. This is a correctness improvement over
+ADR-0508 (which spent ~706 masked draws per eye) and stays opt-in
+(`StereoDualRender=0`). Live (wake 108) the in-level span reads `cw=[on=547 off=159
+calls=162194]` beside `sstate=[… cmask=0x0 …]`: **the span's opening depth prepass is
+colour-masked (159 draws) but its colour world pass (547) is not** — so the span boundary
+does **not** need to move and the remaining blocker is the re-issue (`coverL=0.289`,
+`use=0`, the shipped shifted capture kept).
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

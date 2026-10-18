@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0509` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0510` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -52,7 +52,15 @@ every ADR names the epic #57 subsystem it advances.
   inherits) once per span and the eye frames' **mean luminance**, so "the span writes
   no colour" (a depth/colour-masked stage → a span-boundary fix) is distinguishable
   from "the re-issue is wrong" (a pass fix).
-  **Head = `0509`; the next new ADR is `0510`.**
+  ADR-0510 acts on that per-span read: it tracks the engine's `glColorMask` (an
+  `RndrGL` IAT hook — the live 2009 `RndrGL.dll` statically imports `glColorMask`)
+  and gates the re-issue **at each draw** on an RGB channel being enabled (a masked
+  draw re-issues correctly but can never colour an eye frame), splitting the span
+  census into eligible **colour-on/off** draws so a run states whether the measured
+  `cmask=0x0` span ever turns colour back on. The measured in-level span **does** (547 colour-on /
+  159 colour-off of 706), so the boundary need not move and the blocker is the
+  re-issue; the pass now re-issues 547 per eye, not 706.
+  **Head = `0510`; the next new ADR is `0511`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

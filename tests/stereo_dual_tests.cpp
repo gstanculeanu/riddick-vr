@@ -12,6 +12,7 @@
 #include <cstdio>
 
 using RiddickVR::DualColourMaskNibble;
+using RiddickVR::DualColourMaskWritesColour;
 using RiddickVR::DualDrawState;
 using RiddickVR::DualDrawStateWritesNoColour;
 using RiddickVR::DualFrameUsable;
@@ -180,10 +181,10 @@ int main() {
     //    and the reason buckets say which decode step failed (ADR-0505 next step 1).
     {
         SpanDrawCensus census;
-        census.Add(MakeSample(true, 1600.0f, 3500.0f));           // world: eligible
+        census.Add(MakeSample(true, 1600.0f, 3500.0f), true);      // world: eligible
         Check(census.world == 1u && census.skipped == 0u, "a world draw is counted and not skipped");
 
-        census.Add(MakeSample(true, -0.45f, 0.45f));              // near: skipped, decoded
+        census.Add(MakeSample(true, -0.45f, 0.45f), true);         // near: skipped, decoded
         Check(census.nearField == 1u && census.skipped == 1u && census.decodeRejected == 0u,
               "a decoded near-field draw is skipped but not a decode rejection");
 
@@ -194,7 +195,7 @@ int main() {
         noArray.stride = 0;
         noArray.pointerSet = false;
         noArray.indexType = kGlUnsignedShort;
-        census.Add(noArray);
+        census.Add(noArray, true);
         Check(census.unknown == 1u && census.skipped == 2u && census.decodeRejected == 1u,
               "the undecodable draw is Unknown and a decode rejection");
         Check(census.reasonNoArray == 1u, "the reason bucket names the failed decode step");
@@ -208,7 +209,7 @@ int main() {
         VertexSample badSize = MakeSample(false, 0.0f, 0.0f, 8u);
         badSize.reason = VertexSampleReason::UnsupportedVertexSize;
         badSize.vertexSize = 1u;
-        census.Add(badSize);
+        census.Add(badSize, true);
         Check(census.reasonBadSize == 1u && census.decodeRejected == 2u,
               "a second rejection is bucketed");
         Check(census.rejectVertexSize == 3u,
@@ -232,7 +233,7 @@ int main() {
         VertexSample generic = MakeSample(false, 0.0f, 0.0f, 12u);
         generic.genericAttributeEnabled = true;
         generic.genericPositionBufferId = 42u;
-        census.Add(generic);
+        census.Add(generic, true);
         Check(census.genericEligible == 1u && census.genericBufferBacked == 1u,
               "a buffer-backed generic draw is counted as eligible");
         Check(census.skipped == 0u && census.decodeRejected == 0u,
@@ -243,7 +244,7 @@ int main() {
 
         VertexSample genericClient = MakeSample(false, 0.0f, 0.0f, 12u);
         genericClient.genericAttributeEnabled = true;   // client memory, buffer 0
-        census.Add(genericClient);
+        census.Add(genericClient, true);
         Check(census.genericEligible == 2u && census.genericBufferBacked == 1u,
               "a client-memory generic draw is eligible but not buffer backed");
         Check(census.genericBufferId == 42u, "the first generic signature is not overwritten");
@@ -305,6 +306,53 @@ int main() {
         const unsigned char mixed[8] = {0, 0, 0, 0, 255, 255, 255, 255};
         Check(DualMeanLuminance(mixed, 2u) > 127.0f && DualMeanLuminance(mixed, 2u) < 128.0f,
               "the mean is over the sample, so a half-lit row is ~127");
+    }
+
+    // 12. GH #76/#90 (ADR-0510): the *per-draw* colour-write gate. ADR-0509 read the
+    //     mask once per span (cmask=0x0) and could not tell a whole-span depth stage
+    //     from a mask that turns back on; the pass therefore classifies at each draw,
+    //     and a draw the engine submitted with the colour mask fully off is counted
+    //     but never re-issued (it cannot colour an eye frame). RGB-only: alpha alone
+    //     writes nothing the eye-frame coverage reads.
+    {
+        Check(!DualColourMaskWritesColour(0x0u), "a fully-off mask writes no colour");
+        Check(!DualColourMaskWritesColour(0x8u), "an alpha-only mask writes no colour");
+        Check(!DualColourMaskWritesColour(0x0u | 0x8u), "alpha plus nothing else writes no colour");
+        Check(DualColourMaskWritesColour(0x1u), "one live RGB channel writes colour");
+        Check(DualColourMaskWritesColour(0x4u), "the blue channel alone writes colour");
+        Check(DualColourMaskWritesColour(0x7u), "all RGB channels write colour");
+        Check(DualColourMaskWritesColour(0xFu), "the GL default (all four) writes colour");
+
+        // The gate is exactly the bit the ADR-0509 nibble reports, so the two agree.
+        DualDrawState state;
+        state.captured = true;
+        state.colourWrite[0] = state.colourWrite[1] = state.colourWrite[2] = state.colourWrite[3] = false;
+        Check(!DualColourMaskWritesColour(DualColourMaskNibble(state)),
+              "the per-draw gate agrees with the span-state nibble");
+        state.colourWrite[1] = true;
+        Check(DualColourMaskWritesColour(DualColourMaskNibble(state)),
+              "one channel on is enough for both");
+    }
+
+    // 12b. GH #76/#90 (ADR-0510): the span census splits its *eligible* draws by
+    //      colour-write state, so a run states whether the measured cmask=0x0 span
+    //      ever turns colour back on (cwon > 0) or is depth-only throughout (cwon=0).
+    //      A skipped draw is counted by the band/rejection buckets, never by the split.
+    {
+        SpanDrawCensus census;
+        census.Add(MakeSample(true, 1600.0f, 3500.0f), false);   // colour-masked world
+        census.Add(MakeSample(true, 1600.0f, 3500.0f), true);    // colour-writing world
+        Check(census.eligibleColourOn == 1u && census.eligibleColourOff == 1u,
+              "eligible world draws are split by the colour-write mask");
+        Check(census.world == 2u && census.skipped == 0u, "both are world-band and not skipped");
+
+        census.Add(MakeSample(true, -0.45f, 0.45f), false);      // near-field: skipped
+        Check(census.skipped == 1u && census.eligibleColourOn == 1u && census.eligibleColourOff == 1u,
+              "a skipped draw never enters the colour split");
+
+        census.Reset();
+        Check(census.eligibleColourOn == 0u && census.eligibleColourOff == 0u,
+              "Reset clears the colour split");
     }
 
     if (g_failures == 0) {

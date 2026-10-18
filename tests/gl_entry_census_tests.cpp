@@ -181,7 +181,7 @@ int main() {
         bufBacked.arrayBufferBound = true;
         bufBacked.arrayBufferId = 12u;
         SpanDrawCensus census;
-        census.Add(bufBacked);
+        census.Add(bufBacked, true);
         Check(census.reasonNoArray == 1u, "the null-pointer draw is bucketed as noarray");
         Check(census.rejectArrayBufferBound, "the first rejection reports its array buffer binding");
         Check(census.rejectArrayBufferId == 12u, "the first rejection reports the buffer id");

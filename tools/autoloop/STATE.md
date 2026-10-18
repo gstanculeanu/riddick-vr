@@ -2,6 +2,96 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 108 - 2026-10-18 17:05 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the
+  per-eye pass now CLASSIFIES AT EACH DRAW by the engine's colour-write mask, and the
+  measurement REFUTES ADR-0509's cause (1): the in-level world span is NOT
+  colour-masked throughout (ADR-0510)**, implementing ADR-0509's Next 1 ("classify by
+  `glColorMask` at the draw — only re-issue draws whose colour writes are on").
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0509's explicit Next 1.
+  ADR-0509 read the mask **once per span** and measured `cmask=0x0`, which cannot tell a
+  span that is a depth prepass throughout (a boundary problem) from one whose mask turns
+  back on for the colour pass (a re-issue problem).
+- **Change (render + evidence; opt-in, gated):**
+  - `dllmain.cpp`: NEW `Hook_glColorMask` IAT-hooked in RndrGL (`glColorMask` is among
+    the live 2009 `RndrGL.dll`'s 96 static `OPENGL32.dll` imports), forwarded verbatim.
+  - `opengl_proxy.{h,cpp}`: `NoteColourMask`/`ColourWriteMaskNibble`/`ColourMaskCallCount`
+    (`s_colourMaskNibble`, bit0=red..bit3=alpha, GL default `0xF`).
+  - `stereo_dual.h`: `DualColourMaskWritesColour` (RGB-only gate; an alpha-only mask
+    writes nothing the eye-frame coverage reads); `SpanDrawCensus::Add(s, colourWritesOn)`
+    splits eligible draws into `eligibleColourOn`/`eligibleColourOff`.
+  - `stereo_renderer.cpp`: `OnSceneDraw` computes `colourWritesOn` at the draw, feeds the
+    census, and after the ADR-0509 span-state capture **returns without re-issuing when
+    the mask is off**; `m_dualEligible` now counts only draws actually re-issued; the
+    `DualRender:` line adds `cw=[on=.. off=.. calls=..]`.
+  - `tests/stereo_dual_tests.cpp` new sections 12/12b + updated census call sites;
+    `tests/gl_entry_census_tests.cpp` call site; NEW
+    `docs/adr/0510-gh76-per-draw-colour-write-gate.md`; `docs/adr/README.md` (head ->
+    0510, curated range -> 0457-0510), `docs/vr-scenarios.md`, `src/hook/README.md`;
+    `verify_reported_fixes.py` new #76/#90/ADR-0510 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 525312 B
+  `7da5d4a1db98` + x64 host); CTest **32/32 (x86)** and **30/30 (x64)**;
+  `verify_reported_fixes.py`, `scenario_tests.py --check`, `xrsim --selftest`,
+  `verify_hook_init.py`, `validate_addresses.py`, `verify_test_artifacts.py` PASS; all
+  12 `tools/test_*.py` exit 0. Read-only import scan: `gl_vocabulary_scan.py --imports`
+  on the 2009 shadow `RndrGL.dll` (939248 B) lists `glColorMask`.
+- **EVIDENCE live** (RIDDICKVR_SIM=1, read-only per-run shadow `riddickvr-shadow-17000`,
+  `--shadow-install "F:\The Chronicles of Riddick - Assault on Dark Athena"
+  --reach-gameplay --duration 80 --advance-menu --advance-min-taps 8 --require-fresh-hook
+  --require-parallax --dump-branch any --downscale 4 --ini StereoDualRender=1`;
+  `deployed_hook_matches_build` PASS, hook `7da5d4a1db98` = repo build; 80.1 s, 54 frames,
+  `gameplay_full_bleed_reached` fill **1.00**): the per-draw classification is decisive -
+  one in-level span reads
+  `draws=547 eligible=547 skipped=29 ... coverL=0.289 coverR=0.289 luma=[L=10.3 R=10.3]
+  use=0 scale=[unknown=675 near=0 mid=2 world=58] reject=29 rc=[noarray=29]
+  gen=646 gbacked=640 gsig=[enabled=1 buf=368] cw=[on=547 off=159 calls=162194]
+  sstate=[cap=1 cmask=0x0 dmask=1 drawbuf=0x8CE0 vp=0,0,1280x605 sc=0
+  scissor=0,0,1280x605 dt=1 blend=0]`.
+  **DECISIVE:** of the **706** eligible draws ADR-0508 re-issued, exactly **547 run with
+  colour writes ON** and **159 with colour writes OFF**. The 159 are the span's *opening*
+  depth prepass (the state ADR-0509 read at the first eligible draw); the 547 are the
+  engine's **colour world pass**, which IS inside the span. `calls` rises monotonically
+  (145628 -> 162194) - the `glColorMask` IAT hook installs and tracks the engine every
+  frame. Across 29 in-level spans: 15 read `coverL 0.266..0.292` (luma ~10.3), 14 read
+  `0.000` (pre-level); every one `use=0`.
+- **VERDICT (honest):** ADR-0509's cause (1) ("the span writes no colour") is **refuted**
+  for the in-level span - the span's opening depth prepass is colour-masked (159 draws)
+  but its colour world pass (547) is not, so **the span boundary does NOT need to move**
+  (ADR-0509's option 2 is closed by measurement). The per-draw gate is a real, measured
+  improvement (the pass re-issues **547** per eye, not 706, never spending a re-issue on
+  a draw that cannot write colour), **but the eye-frame coverage is unchanged**
+  (`~0.29`, luma `~10.3` - the same range ADR-0505/0508 saw), so the masked prepass was
+  **not** the blocker: the remaining cause is ADR-0509's **cause (2) - the re-issue
+  itself** (eye-FBO state / viewport / depth / readback). Native stereo is **NOT**
+  achieved and `--require-parallax` still FAILs (`stereo_kind=shift-only`, `spread=0`,
+  0 gameplay-labelled frames - the GH #72 label flake); `StereoDualRender=0` is the
+  default and the pass is inert on its own gate, so **NO REGRESSION**
+  (`gameplay_full_bleed_reached` fill 1.00, `eye_views_scene_faithful` PASS,
+  `both_eyes_non_black`/`same_eye_resolution`/`no_vertical_disparity` PASS on the
+  presented frames).
+- **LIMITS:** one live run; its in-level spans are the flaky `cinema`-labelled ones
+  (GH #72) so the stereo acceptance could not be graded on `gameplay` frames;
+  `frame_budget` could not be graded (no host `FrameBudget` line, the intermittent
+  absence seen at wakes 103/105; the change *reduces* per-eye draws 706 -> 547 so it
+  cannot raise cost); the coverage is an 8-row-per-60-swaps estimator that cannot by
+  itself say whether `~0.29` is "mostly empty" or "a genuinely dark level"; the mask is
+  tracked only through RndrGL's static `glColorMask` import (`calls=` makes a
+  non-tracking run visible); `glDrawBuffer(GL_NONE)` is not itself gated; the 2004 build
+  is untouched; no headset.
+- **Next:** (1) **calibrate the gate, then find the re-issue fault** - compare the eye
+  frame's content in the *same span* to the engine's own presented frame (a dark engine
+  frame means the fixed `0.5` floor rejects a genuine dark scene, so the calibration is
+  the blocker; a bright engine frame means the eye frame is mostly-empty and the fault
+  is the re-issue, so log the eye FBO's own `glColorMask`/`glDrawBuffer`/`glViewport`/
+  `GL_DEPTH_TEST` *after* the pass rebinds it and the per-eye modelview in force);
+  (2) re-run `--require-parallax` and require a non-zero per-tile spread; (3) keep
+  `StereoDualRender=0`/`StereoParallaxDibr=0`/`StereoReplayProbe=0` defaults; (4) the
+  player-visible queue GH #63/#64/#61 then the P1 bugs #45/#49/#50/#51/#65;
+  (5) `DEFAULT_GAME_DIR` 2004-vs-2009; (6) GH #83/#88/#89/#74.
+- **OPS:** install untouched (READ-ONLY per-run shadow; no deploy, no install write),
+  no leftover game/host processes, live lock released, `tests/xrsim/report.json`
+  reverted to the committed baseline.
+
 ## Wake 107 - 2026-10-18 16:21 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the
   per-eye pass now READS the span's output GL state and the eye frames' mean

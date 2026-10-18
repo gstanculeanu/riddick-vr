@@ -1131,7 +1131,7 @@ def main():
             "DualSampleScaleOf" in stereo_dual_h and
             "DualRejectReasonName" in stereo_dual_h and
             "kDualMidMaxExtent" in stereo_dual_h and
-            "m_dualCensus.Add(sampled)" in stereo_renderer_cpp and
+            "m_dualCensus.Add(sampled, colourWritesOn)" in stereo_renderer_cpp and
             "m_dualCensus.Reset()" in stereo_renderer_cpp and
             "rc=[nonfloat=" in stereo_renderer_cpp and
             "sig=[%s vtype=" in stereo_renderer_cpp and
@@ -1230,6 +1230,33 @@ def main():
             "GL state (colour-write mask, depth mask, viewport, scissor, enable bits) "
             "and the eye frames' mean luminance -- ADR-0508 measured the whole span "
             "re-issued with still-unusable eye frames and no way to attribute it")
+
+    # GH #76 / GH #90 / ADR-0510: ADR-0509 read the span's output state *once per
+    # span* (cmask=0x0 at the first eligible draw), so it could not tell a depth-only
+    # stage from a mask that turns back on later.  The pass must therefore classify
+    # **at each draw**: RndrGL's statically imported `glColorMask` is IAT-hooked, the
+    # per-draw gate re-issues only draws with an RGB channel enabled (alpha alone
+    # writes nothing the eye-frame coverage reads), and the span census splits its
+    # eligible draws into colour-on/off so a run states whether the measured span ever
+    # turns colour back on.
+    dllmain_cpp = (ROOT / "src/hook/dllmain.cpp").read_text(encoding="utf-8")
+    require("DualColourMaskWritesColour" in stereo_dual_h and
+            "eligibleColourOn" in stereo_dual_h and
+            "eligibleColourOff" in stereo_dual_h and
+            "NoteColourMask" in opengl_proxy_h and
+            "ColourWriteMaskNibble" in opengl_proxy_h and
+            "ColourMaskCallCount" in opengl_proxy_h and
+            "s_colourMaskNibble" in opengl_proxy_cpp and
+            "OpenGLProxy::NoteColourMask" in opengl_proxy_cpp and
+            "Hook_glColorMask" in dllmain_cpp and
+            '"glColorMask"' in dllmain_cpp and
+            "cw=[on=%u off=%u calls=%u]" in stereo_renderer_cpp and
+            "DualColourMaskWritesColour(OpenGLProxy::ColourWriteMaskNibble())" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0510-gh76-per-draw-colour-write-gate.md").exists(),
+            "GH #76 / GH #90 / ADR-0510: the per-eye pass must classify at each draw by "
+            "the engine's colour-write mask (a glColorMask RndrGL IAT hook) and re-issue "
+            "only draws that can colour an eye frame -- ADR-0509 read the mask once per "
+            "span and could not tell a depth-only stage from a mask that turns back on")
 
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline

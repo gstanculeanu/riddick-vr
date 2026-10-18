@@ -164,6 +164,15 @@ public:
     static const GlProcNameCensus& ProcCensus();
     static const ArrayBindingTracker& ArrayBinding();
     static const AttributePathCensus& AttributePaths();
+    // GH #76/#90 (ADR-0510): the engine's **glColorMask** state, tracked from the
+    // RndrGL.dll IAT hook (the live 2009 `RndrGL.dll` statically imports
+    // `glColorMask`, so the hook installs). ADR-0509 read the mask once per span and
+    // measured `cmask=0x0` at the span's first eligible draw; the per-eye pass needs
+    // it *at each draw* to re-issue only draws that can write colour. Observed only;
+    // never changes a draw. The count makes the hook's liveness evidence.
+    static void NoteColourMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
+    static unsigned ColourWriteMaskNibble();  // bit0=red..bit3=alpha; GL default 0xF
+    static unsigned ColourMaskCallCount();
     // GH #76/#90 (ADR-0507): the `glInterleavedArrays` path. Its import table entry
     // is absent from every shipped module (ADR-0482), so this hook is expected not
     // to install -- but the census then *states* "never called" instead of assuming

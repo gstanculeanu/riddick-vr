@@ -109,6 +109,12 @@ typedef void (WINAPI *PFN_glTranslatef)(GLfloat, GLfloat, GLfloat);
 // every shipped module's import table (ADR-0482), so this IAT hook is expected to
 // fail to install; it is added so a run *states* the path is never used.
 typedef void (WINAPI *PFN_glInterleavedArrays)(GLenum format, GLsizei stride, const void* pointer);
+// GH #76/#90 (ADR-0510): the colour-write mask. ADR-0509 read it once per span
+// (measured `cmask=0x0` at the span's first eligible draw) but the per-eye pass must
+// decide *at each draw* whether the draw can colour an eye frame, so RndrGL's
+// `glColorMask` import -- present in the live 2009 `RndrGL.dll`'s static import
+// table -- is IAT-hooked (observe + forward verbatim; never changes a draw).
+typedef void (WINAPI *PFN_glColorMask)(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
 
 static PFN_glDrawElements real_glDrawElements = nullptr;
 static PFN_glCallList real_glCallList = nullptr;
@@ -124,6 +130,7 @@ static PFN_glVertex3fv real_glVertex3fv = nullptr;
 static PFN_glVertex2f real_glVertex2f = nullptr;
 static PFN_glVertex2i real_glVertex2i = nullptr;
 static PFN_glInterleavedArrays real_glInterleavedArrays = nullptr;
+static PFN_glColorMask real_glColorMask = nullptr;
 
 static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
@@ -219,6 +226,14 @@ static void WINAPI Hook_glVertex2i(GLint x, GLint y) {
 static void WINAPI Hook_glInterleavedArrays(GLenum format, GLsizei stride, const void* pointer) {
     RiddickVR::OpenGLProxy::NoteInterleavedArrays();
     if (real_glInterleavedArrays) real_glInterleavedArrays(format, stride, pointer);
+}
+
+// GH #76/#90 (ADR-0510): record the engine's colour-write mask at each draw so the
+// per-eye pass re-issues only draws that can colour an eye frame. Observe then
+// forward verbatim -- the mask the engine set is never changed by the hook.
+static void WINAPI Hook_glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
+    RiddickVR::OpenGLProxy::NoteColourMask(red, green, blue, alpha);
+    if (real_glColorMask) real_glColorMask(red, green, blue, alpha);
 }
 
 static void InstallRndrGLHooks() {
@@ -328,6 +343,14 @@ static void InstallRndrGLHooks() {
     RiddickVR::IATHook::Hook(
         hRndrGL, "OPENGL32.dll", "glInterleavedArrays",
         reinterpret_cast<void*>(Hook_glInterleavedArrays), reinterpret_cast<void**>(&real_glInterleavedArrays)
+    );
+    // GH #76/#90 (ADR-0510): the colour-write mask, so the per-eye pass can gate a
+    // re-issue on "this draw can colour the eye frame". RndrGL DOES import it
+    // (`gl_vocabulary_scan.py --imports` on the 2009 target lists `glColorMask`), so
+    // the hook installs; a failed Hook is a no-op.
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glColorMask",
+        reinterpret_cast<void*>(Hook_glColorMask), reinterpret_cast<void**>(&real_glColorMask)
     );
 }
 
