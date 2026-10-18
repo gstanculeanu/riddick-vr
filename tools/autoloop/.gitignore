@@ -1,6 +1,10 @@
-# ignore autoloop run logs (keep prompt/state/script tracked if desired)
-logs/
+# Autoloop run logs. Keep the per-run chatter ignored, but TRACK the append-only
+# run trace so an accidental overwrite is recoverable (GH #88: wake 84 replaced
+# it and lost ~107 KB / wakes 1-83 with no git copy). `logs/*` rather than `logs/`
+# so the negation below can descend into the directory.
+logs/*
 *.log
+!logs/STATE.log
 # GH #83: the single-instance lock is runtime state, not source. It is removed by
 # the runner's `finally`, but a killed runner can leave one behind for takeover.
 loop.lock.json

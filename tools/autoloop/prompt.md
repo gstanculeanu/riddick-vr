@@ -15,26 +15,31 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
 1. `Set-Location C:\Users\GigelCastel\riddick-vr`; run `git status`, `git log
    --oneline -5`. Read `tools/autoloop/STATE.md` (state from prior wakes) and the
    tail of `tools/autoloop/logs/`.
-2. `gh issue list --state open`. **Player-visible priority (do these first):**
-   - **#68 (ITERATION VEHICLE) OpenXR simulator harness** — use
-     `python tools/xrsim.py --scenario tools/scenarios/<x>.json` to reproduce and
-     validate player-visible fixes *without* a headset (it sets `RIDDICKVR_SIM=1`
-     so no desktop input). Extend it to cover whatever you are fixing.
-   - **#67 (TOP hand fix) Drive the engine's own first-person arms with the
-     controller (F.E.A.R.-VR style)** — hook the FP viewmodel draw + matrix and
-     re-project into head/controller space.
-   - **#64 Native hands look flat/2D, out of place, and leave stray procedural
-     blocks** — only fallback work once #67 is underway.
-   - **#61 Native hands untextured (grey/white)** — the baked diffuse decodes
-     white; fix or keep the skin-tone fallback.
-   - **#65 Punch/attack fires on controller swing** — first pass landed; validate
-     and tune thresholds.
-   - **#62 Block = hands in front of the HMD (not below)** — first pass landed;
-     validate and tune the envelope.
+2. `gh issue list --state open`. **Priority is the player-visible milestone, not
+   research.** Pick the top item that makes the game more *playable in a headset*,
+   in this order:
+   - **#76 NATIVE STEREO (top gap)** — per-eye view/projection so there is real
+     depth. Today the renderer is a shifted monoscopic capture (half-IPD blit),
+     i.e. the single biggest "is this actually VR?" defect and epic #57 item 1.
    - **#63 Duplicate hands** — suppress the engine's own first-person arms/hands
-     while VR/native hands render.
-   Then #46/#52/#53/#54 tracked-arms work, #34 REA engine calls, #40 ammo quad,
-   #43/#44/#45/#47-#51.
+     while the VR hands render. **#64** the overlay hands read flat/2D and leave
+     stray blocks; **#61** untextured. Fix the *overlay* path here.
+   - **#45 head judder/lag**, **#49 stuck crouch**, **#50 aim drift while
+     swinging**, **#51 block spins the view 360**, **#65 punch fires on swing** —
+     the open P1 comfort/controls bugs. Each has a deterministic probe path; use
+     `xrsim` (#68) to reproduce and to prove the fix.
+   - Then **#62** block envelope, **#43/#44** cinema vs full-bleed, **#40** ammo
+     quad, **#47** climb hints, **#46/#52/#53/#54** tracked arms.
+   - Only if nothing above is actionable: **#68** harness, **#34** REA engine
+     calls, **#55** more MOS decoding.
+   - **#67 is CAPPED (HARD RULE).** "#67 drive the engine's own FP arms" has
+     consumed ~14 consecutive correction ADRs (wake 82-98); every named
+     engine-side route has been *measure-falsified* (ADR-0488..0499), the property
+     belongs to a collectible, and the 2004/2009 paths differ. Allow **at most one**
+     #67 wake, only on a **genuinely new concrete lead**. If it falsifies, the very
+     next wake writes a short cap ADR ("no engine-side route; the baked overlay
+     stands; revisit only with a new lead") and returns to the list above. **Two
+     consecutive falsifying #67 wakes is a process failure — do not spin.**
 3. Pick ONE concrete, verifiable unit of work. Prefer the highest-priority open
    item. If the top items are blocked or need new scope, **create new GitHub
    issues** toward full VR portability (with concrete evidence: file:line,
@@ -73,7 +78,10 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
    sprawl across the 24h run). Never force-push, never rewrite history, never
    deploy binaries. Update `tools/autoloop/STATE.md`
    with: timestamp, what you did, evidence, blocker, next step. Append one line
-   to `tools/autoloop/logs/STATE.log`. Comment concise progress on the issue.
+   to the run trace with the tracked helper — **never edit that file directly**
+   (GH #88; a replace-style edit destroyed ~107 KB of history):
+   `powershell -NoProfile -File tools\autoloop\log_state.ps1 -Message "<one line>"`
+   Comment concise progress on the issue.
    Then **push to the remote**: `git push origin main` (normal push only — NEVER
    `--force`). Keeping `origin/main` current is a hard requirement.
 7. If blocked with nothing doable, document the blocker, create/refine an issue,
@@ -90,4 +98,13 @@ work this wake, then stop. Keep total effort bounded (<= 4 concurrent subagents)
 - Do NOT modify anything under the game install directory. No writing game assets.
 - Do NOT `git push --force`, delete branches, or rewrite `main`.
 - Only evidence-backed changes. Separate observations from inferences.
+- **ADR discipline (the standing ask: ADRs must stay consistent with porting
+  Riddick to VR).** One ADR per landed unit; number it `highest + 1` (never reuse
+  or skip), and its first line must name the epic #57 subsystem it advances. Do
+  not add speculative or forward-dated ADRs, and do not re-litigate a hypothesis
+  a prior ADR already closed. An ADR whose only content is "X is *not* Y" is only
+  allowed when it **closes a route** — then say so explicitly and stop that route.
+  Keep the curated ranges in `docs/adr/README.md` accurate.
 - Leave the working tree in a coherent, buildable state (or clearly document why not).
+- The run trace `tools/autoloop/logs/STATE.log` is append-only and git-tracked
+  (GH #88). Append via `tools\autoloop\log_state.ps1`, never by editing the file.

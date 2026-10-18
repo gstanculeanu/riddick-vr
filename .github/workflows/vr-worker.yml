@@ -74,6 +74,13 @@ jobs:
           python tools/scenario_tests.py --check
       - name: VR issue regression invariants (#40, #43-47)
         run: python tools/verify_reported_fixes.py
+      - name: Autoloop run trace is append-only and recoverable (GH #88)
+        shell: powershell
+        run: |
+          powershell -NoProfile -File ./tools/autoloop/log_state.ps1 -Verify
+          if ($LASTEXITCODE -ne 0) { throw 'autoloop STATE.log is not append-only (GH #88)' }
+          powershell -NoProfile -File ./tools/autoloop/log_state.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'autoloop log_state self-test failed (GH #88)' }
       - name: Verify 368-symbol OpenGL forwarder table intact
         shell: powershell
         run: |

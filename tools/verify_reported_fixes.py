@@ -1387,8 +1387,50 @@ def main():
             "profile's own scan codes (weapon select / fire / move) so a scripted "
             "run can reach the armed/fighting state the #67 state question needs")
 
+    # GH #88: the autoloop run trace (tools/autoloop/logs/STATE.log) is
+    # append-only by contract and now TRACKED, because a replace-style edit
+    # destroyed ~107 KB of wake history with no git copy (wake 84). The fix is
+    # enforced by a tracked append helper that refuses to shrink the file, a
+    # header + never-shrink check (`log_state.ps1 -Verify`), .gitignore
+    # un-ignoring the single traced file, and the standing prompt pointing wakes
+    # at the helper instead of the file.
+    log_state = (ROOT / "tools/autoloop/log_state.ps1").read_text(encoding="utf-8")
+    autoloop_ignore = (ROOT / "tools/autoloop/.gitignore").read_text(encoding="utf-8")
+    autoloop_prompt = (ROOT / "tools/autoloop/prompt.md").read_text(encoding="utf-8")
+    require("function Invoke-Append" in log_state and
+            "function Invoke-Verify" in log_state and
+            "function Invoke-SelfTest" in log_state and
+            "SHRUNK" in log_state and
+            "Add-Content" in log_state and
+            "log_state.ps1" in autoloop_prompt and
+            "logs/*" in autoloop_ignore and
+            "!logs/STATE.log" in autoloop_ignore,
+            "GH #88: the autoloop run trace must be append-only and recoverable -- "
+            "the tracked helper (log_state.ps1) refuses to shrink it, -Verify pins "
+            "the header and never-shrink check, .gitignore must un-ignore "
+            "logs/STATE.log, and the standing prompt must point wakes at the "
+            "helper rather than at the file")
+
+    # ADR hygiene: numbers must be unique, so the next ADR is max + 1 and no two
+    # units share a file prefix. The five GH #74 collisions (the PR #70 merge
+    # landed two parallel implementations) are allow-listed until that issue
+    # reconciles them; see docs/adr/README.md.
+    adr_dir = ROOT / "docs/adr"
+    known_duplicates = {"0445", "0446", "0447", "0448", "0449"}  # GH #74
+    counts = {}
+    for adr in adr_dir.glob("[0-9][0-9][0-9][0-9]-*.md"):
+        prefix = adr.name[:4]
+        counts[prefix] = counts.get(prefix, 0) + 1
+    unexpected = sorted(n for n, c in counts.items() if c > 1 and n not in known_duplicates)
+    require(not unexpected,
+            "ADR numbers must be unique -- new collision(s): {0}; renumber the new "
+            "file to max + 1 and update docs/adr/README.md".format(", ".join(unexpected)))
+    require(all(counts.get(n, 0) == 2 for n in known_duplicates),
+            "GH #74: the allow-listed ADR collisions changed -- update the guard and "
+            "docs/adr/README.md together")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-81, #83, #85, #86, #87)")
+          "#62, #64-74, #69, #71-73, #75-81, #83, #85-#88)")
     return 0
 
 
