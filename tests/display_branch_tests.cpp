@@ -15,7 +15,11 @@
 #include "display_branch.h"
 
 #include <cstdio>
+#include <string>
 
+using RiddickVR::CinemaHoldTerm;
+using RiddickVR::CinemaTerm;
+using RiddickVR::CinemaTermName;
 using RiddickVR::ComputeDisplayBranch;
 using RiddickVR::DisplayBranchConfig;
 using RiddickVR::DisplayBranchState;
@@ -129,6 +133,46 @@ int main() {
         Check(!st.fullBleedSeen, "a non-3D frame must not set the latch");
         Check(Frame(st, cfg, true, true, 1.00f), "the menu cursor is cinema");
         Check(!st.fullBleedSeen, "a menu frame must not set the latch");
+    }
+
+    // 8. GH #91: the branch-input probe must name the term that holds the
+    //    verdict cinema, and that naming must be exactly the verdict -- so a
+    //    live `DisplayBranch: ... term=...` line can be trusted without
+    //    re-deriving the branch. `haveFill=false` keeps ComputeDisplayBranch
+    //    from mutating the seeded latch state, so the comparison is exact.
+    {
+        Check(CinemaHoldTerm(false, false, true, false, false) == CinemaTerm::No3D,
+              "no perspective frame must be named the no-3d term");
+        Check(CinemaHoldTerm(true, true, true, false, false) == CinemaTerm::MenuCursor,
+              "the menu cursor must be named the menu-cursor term");
+        Check(CinemaHoldTerm(true, false, true, true, false) == CinemaTerm::ColdStartLetterbox,
+              "a letterboxed frame before any full-bleed frame must be named the latch term");
+        Check(CinemaHoldTerm(true, false, true, true, true) == CinemaTerm::None,
+              "after the full-bleed latch the letterbox term must not hold");
+        Check(CinemaHoldTerm(true, false, false, true, false) == CinemaTerm::None,
+              "with the latch off the letterbox term must not hold");
+        Check(CinemaHoldTerm(true, false, true, false, false) == CinemaTerm::None,
+              "a full-bleed 3D frame without a cursor must be gameplay");
+        Check(std::string(CinemaTermName(CinemaTerm::MenuCursor)) == "menuCursor" &&
+              std::string(CinemaTermName(CinemaTerm::None)) == "none",
+              "the cinema-term names must be stable tokens for the log");
+
+        DisplayBranchConfig cfg;
+        for (int bits = 0; bits < 32; ++bits) {
+            const bool has3d = (bits & 1) != 0;
+            const bool menu = (bits & 2) != 0;
+            const bool latch = (bits & 4) != 0;
+            const bool letterboxed = (bits & 8) != 0;
+            const bool fullBleed = (bits & 16) != 0;
+            cfg.coldStartLatch = latch;
+            DisplayBranchState st;
+            st.letterboxed = letterboxed;
+            st.fullBleedSeen = fullBleed;
+            const bool verdict = ComputeDisplayBranch(has3d, menu, 0.0f, false, cfg, st);
+            const bool named = CinemaHoldTerm(has3d, menu, latch, letterboxed, fullBleed)
+                               != CinemaTerm::None;
+            Check(named == verdict, "the named cinema term must equal the verdict");
+        }
     }
 
     if (g_failures == 0) {

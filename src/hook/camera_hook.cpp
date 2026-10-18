@@ -3955,13 +3955,52 @@ void CameraHook::Update(RiddickVRSharedState& vrState) {
     s_hapticArbiter.Reset(); // GH #32: start a fresh dispatch frame (decay already applied to the carry above)
 
     // Detect if Windows mouse cursor is visible (Menus, Loading, Dialogue UI)
+    //
+    // GH #91: a *menu* cursor must be one the player points at the game window,
+    // not merely a visible desktop cursor. GetCursorInfo reports the desktop
+    // cursor globally, so a windowed/sim run with a stray cursor and no player
+    // input reported a visible cursor on every sampled frame (286/286,
+    // cursorAgo=0), the sustained-cursor detector latched, and the renderer
+    // presented a whole in-level run (has3d=1) as CINEMA -- the measured GH #91
+    // blocker for GH #76's acceptance. Scope the sighting to the game window's
+    // client rect and log the inputs (throttled) so a run states the reason.
     CURSORINFO ci{ sizeof(CURSORINFO) };
     bool cursorShowing = false;
+    POINT cursorPos{ 0, 0 };
     if (GetCursorInfo(&ci)) {
         cursorShowing = (ci.flags & CURSOR_SHOWING) != 0;
+        cursorPos = ci.ptScreenPos;
+    }
+    HWND game = GetGameWindow();
+    if (!game || !IsWindow(game)) game = s_gameHwnd;
+    RECT client{ 0, 0, 0, 0 };
+    bool cursorOverWindow = false;
+    if (game && IsWindow(game)) {
+        GetClientRect(game, &client);
+        POINT p = cursorPos;
+        if (ScreenToClient(game, &p)) {
+            cursorOverWindow = cursorShowing &&
+                p.x >= client.left && p.x < client.right &&
+                p.y >= client.top && p.y < client.bottom;
+        }
     }
     // GH #43: feed the renderer mode detector (menus show cursor over 3D bg).
-    OpenGLProxy::NoteMenuCursor(cursorShowing);
+    OpenGLProxy::NoteMenuCursor(cursorOverWindow);
+    {
+        static uint32_t s_cursorProbeCountdown = 0;
+        if (s_cursorProbeCountdown == 0) {
+            s_cursorProbeCountdown = 120;
+            VR_LOG_INFO("MenuCursor: showing=%d overWindow=%d pos=%ld,%ld "
+                        "client=%ldx%ld fg=%d",
+                        (int)cursorShowing, (int)cursorOverWindow,
+                        (long)cursorPos.x, (long)cursorPos.y,
+                        (long)(client.right - client.left),
+                        (long)(client.bottom - client.top),
+                        (int)IsGameForeground());
+        } else {
+            --s_cursorProbeCountdown;
+        }
+    }
 
     uint32_t btns = vrState.rightController.buttons | vrState.leftController.buttons;
     // Track C #14 (southpaw): dominant/off-hand aliases resolved once in the

@@ -373,6 +373,13 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   `DisplayBranchColdStartLatch=0` for the legacy bit. The `DisplayMode` line now
   carries `latch=.. fill=.. fullBleed=..`, and the latch logs its own demotion
   once (`cold-start latch demoted ...`). See ADR-0459 / ADR-0478.
+- **GH #91 (ADR-0513).** The `DisplayMode:` line is emitted only on a change, so a
+  run that stays CINEMA prints one line and hides the cause; a throttled
+  `DisplayBranch:` probe now logs the inputs and the holding term
+  (`CinemaHoldTerm`). The measured cause was the `menuCursor` term: `GetCursorInfo`
+  reports the *desktop* cursor, which is visible every frame in a windowed/sim run,
+  so the sustained-cursor detector latched CINEMA for a whole in-level run. The
+  cursor sighting is now scoped to the game window's client rect. See ADR-0513.
 
 ## Native stereo interim: depth-based reprojection (GH #76, ADR-0501 / ADR-0502 / ADR-0503)
 - True per-eye view/projection needs the engine to render the scene twice. That is
@@ -569,7 +576,26 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   renderer's own `DisplayMode:` branch is **CINEMA for the whole run** (zero `FULL-BLEED`
   lines), so `if (!isCinema && dualUsedThisFrame)` is never taken and the harness labels
   every frame `cinema`: the **presentation branch** (GH #72) is the next blocker, not the
-  pass. `StereoDualRender=0` stays the default (no regression).
+  pass. `StereoDualRender=0` stays the default (no regression). That blocker is fixed by
+  ADR-0513 (below).
+
+- **The presentation branch is held CINEMA by a global desktop cursor; it is scoped to the
+  game window (ADR-0513, wake 111; GH #91 / GH #76).** The `DisplayMode:` line fires only on
+  a *change*, so a whole CINEMA run printed one line and its cause had to be inferred. A
+  throttled `DisplayBranch:` probe now names the holding term (`CinemaHoldTerm`:
+  `no3d` / `menuCursor` / `coldStartLetterbox` / `none`) with every input
+  (`has3d`, `has3dLatch`, `menuCursorRaw`, `cursorFrame`/`cursorAgo`, `cursorMenu`,
+  `haveFill`/`fill`/`rect`, `letterboxed`, `fullBleedSeen`). Measured live (wake 111): the
+  term was `menuCursor` on **285/286** samples with `menuCursorRaw=1` and `cursorAgo=0` on
+  **every** frame — `GetCursorInfo` reports the *desktop* cursor, which a windowed/sim run
+  keeps visible, so the sustained-cursor detector latched CINEMA for the whole in-level run.
+  The sighting is now scoped to the game window's client rect (`CameraHook::Update`, with a
+  throttled `MenuCursor: showing=… overWindow=… pos=… client=… fg=…` line; the run reads
+  `overWindow=0 pos=777,1619 client=1280x605`, i.e. the cursor is below the window). Live,
+  the branch now moves (`FULL-BLEED gameplay` … `fill=1.00 fullBleed=1`),
+  `gameplay_captures_present` PASSes (45 gameplay / 7 cinema of 52), and
+  `--require-parallax` grades — the pair is presented but still `stereo_kind=shift-only`
+  (`spread=0`), so the remaining stereo blocker is the **per-eye image** (GH #76/#90).
 
 
 

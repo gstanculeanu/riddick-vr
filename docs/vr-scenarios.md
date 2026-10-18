@@ -438,6 +438,20 @@ wakes), with `used/frames` rising 50.6% → **99.6%**, while a no-span frame sti
 every frame `cinema` — the **presentation branch** (GH #72) is the measured next blocker,
 not the pass. `StereoDualRender=0` stays the default (no regression).
 
+**ADR-0513 (wake 111; GH #91 / GH #76) fixes the presentation branch and unblocks the
+grading.** The `DisplayMode:` line fires only on a change of the verdict, so a whole
+CINEMA run printed one line and its cause had to be inferred; a throttled `DisplayBranch:`
+probe now names the holding term (`CinemaHoldTerm`: `no3d` / `menuCursor` /
+`coldStartLetterbox` / `none`). Measured live: the term was `menuCursor` on 285/286 samples
+with `menuCursorRaw=1` and `cursorAgo=0` on every frame — `GetCursorInfo` reports the
+*desktop* cursor, which a windowed/sim run keeps visible, so the sustained-cursor detector
+demoted a whole in-level run to CINEMA. The sighting is now scoped to the game window's
+client rect (`MenuCursor: showing=1 overWindow=0 pos=777,1619 client=1280x605`). Live, the
+branch now moves `FULL-BLEED gameplay … fill=1.00 fullBleed=1`,
+`gameplay_captures_present` PASSes (**45 gameplay / 7 cinema** of 52, was `0/53`), and
+`--require-parallax` **grades** — the pair is presented but still `stereo_kind=shift-only`
+(`per-tile spread=0`), so the remaining stereo blocker is the **per-eye image** (GH #76/#90).
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

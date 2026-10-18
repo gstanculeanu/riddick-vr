@@ -225,6 +225,10 @@ void OpenGLProxy::NoteMenuCursor(bool visible) {
 bool OpenGLProxy::HasMenuCursor() {
     return (s_swapFrameCount - s_lastCursorFrame <= 3);
 }
+
+uint64_t OpenGLProxy::GetLastCursorFrame() {
+    return s_lastCursorFrame;
+}
 static uint32_t s_projMatrixCount = 0;
 static uint32_t s_modelviewMatrixCount = 0;
 

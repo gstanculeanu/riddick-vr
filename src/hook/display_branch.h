@@ -78,4 +78,40 @@ inline bool ComputeDisplayBranch(bool has3dThisFrame, bool menuCursor,
     return state.letterboxed && !state.fullBleedSeen;
 }
 
+// GH #91: *which* input holds the branch on the cinema side. The `DisplayMode:`
+// line is emitted only when the verdict *changes*, so a run that never leaves
+// CINEMA prints a single line and says nothing about why -- the branch had to be
+// inferred (ADR-0512 measured exactly one `DisplayMode:` line and zero
+// `FULL-BLEED` lines for an 80 s run that was in-level). This names the holding
+// term so a live probe states it instead of requiring the inference.
+//
+// `CinemaHoldTerm(...) != None` is exactly `ComputeDisplayBranch(...)` for the
+// same inputs (see the consistency test); `menuCursor` is the *debounced*
+// cursor-menu bit the verdict uses, not the raw per-frame cursor sighting.
+enum class CinemaTerm { None, No3D, MenuCursor, ColdStartLetterbox };
+
+inline CinemaTerm CinemaHoldTerm(bool has3dThisFrame, bool menuCursor,
+                                 bool coldStartLatch, bool letterboxed,
+                                 bool fullBleedSeen) {
+    if (!has3dThisFrame) return CinemaTerm::No3D;
+    if (menuCursor) return CinemaTerm::MenuCursor;
+    if (coldStartLatch && letterboxed && !fullBleedSeen)
+        return CinemaTerm::ColdStartLetterbox;
+    return CinemaTerm::None;
+}
+
+inline const char* CinemaTermName(CinemaTerm term) {
+    switch (term) {
+        case CinemaTerm::No3D: return "no3d";
+        case CinemaTerm::MenuCursor: return "menuCursor";
+        case CinemaTerm::ColdStartLetterbox: return "coldStartLetterbox";
+        case CinemaTerm::None: return "none";
+    }
+    return "none";
+}
+
+// GH #91: the branch-input probe cadence (swaps). One `DisplayBranch:` line per
+// interval, so a run always states the terminal inputs even with no transition.
+inline constexpr unsigned kDisplayBranchProbeEverySwaps = 60;
+
 } // namespace RiddickVR

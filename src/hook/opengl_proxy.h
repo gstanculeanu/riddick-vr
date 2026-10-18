@@ -110,6 +110,10 @@ public:
     // backgrounds behind 2D UI - projection alone cannot tell them apart).
     static void NoteMenuCursor(bool visible);
     static bool HasMenuCursor();
+    // GH #91: the swap frame of the last cursor sighting, so a branch probe can
+    // state how long ago the cursor was seen against the current swap count
+    // (i.e. whether `HasMenuCursor()` is a sustained sighting or a stale one).
+    static uint64_t GetLastCursorFrame();
     static const float* GetLastProjectionMatrix();
     static const float* GetLastViewMatrix();
 

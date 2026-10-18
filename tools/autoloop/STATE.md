@@ -2,6 +2,79 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 111 - 2026-10-18 17:44 (scheduled loop)
+- **Unit:** GH **#91 / GH #76 NATIVE STEREO PRESENTATION (epic #57 DoD item 1) - the display
+  branch was held CINEMA by a GLOBAL DESKTOP CURSOR; scoping the menu-cursor sighting to the
+  game window presents in-level gameplay as FULL-BLEED (45/52) and lets `--require-parallax`
+  grade (ADR-0513)**, implementing ADR-0512's Next 1 / GH #91's Required 1+2 verbatim.
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0512's explicit Next 1 +
+  GH #91 (filed by wake 110 as the measured presentation blocker).
+- **Change (render + pure policy; opt-in, gated):**
+  - `display_branch.h`: NEW `enum class CinemaTerm {None,No3D,MenuCursor,ColdStartLetterbox}`,
+    `CinemaHoldTerm(has3d, menuCursor, coldStartLatch, letterboxed, fullBleedSeen)` and
+    `CinemaTermName` (pure; `CinemaHoldTerm(...) != None` is exactly `ComputeDisplayBranch`),
+    `kDisplayBranchProbeEverySwaps = 60`.
+  - `stereo_renderer.cpp`: throttled `DisplayBranch:` probe (every 60 swaps, **not only on a
+    transition**) logging `cinema`, `term`, `has3d`, `has3dLatch`, `menuCursorRaw`,
+    `cursorFrame`/`cursorAgo`, `cursorMenu`, `haveFill`/`fill`/`rect`, `letterboxed`,
+    `fullBleedSeen`.
+  - `camera_hook.cpp`: the menu-cursor sighting is scoped to the game window's client rect
+    (`GetGameWindow()`/`s_gameHwnd` + `ScreenToClient` + `GetClientRect`); `NoteMenuCursor`
+    is fed the scoped value; a throttled `MenuCursor: showing=.. overWindow=.. pos=.. client=..
+    fg=..` line states the reason.
+  - `opengl_proxy.{h,cpp}`: NEW `GetLastCursorFrame()`.
+  - `tests/display_branch_tests.cpp` new section 8 (the term per case + the 32-combination
+    consistency check); NEW `docs/adr/0513-gh91-menu-cursor-is-scoped-to-the-game-window.md`;
+    `docs/adr/README.md` (head -> 0513, curated range -> 0457-0513), `docs/vr-scenarios.md`,
+    `src/hook/README.md`; `verify_reported_fixes.py` new #91/ADR-0513 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 528896 B `a78d782073df`
+  + x64 host); CTest **32/32 (x86)** and **30/30 (x64)**; `verify_reported_fixes.py`,
+  `scenario_tests.py --check`, `xrsim --selftest`, `verify_hook_init.py`, `validate_addresses.py`,
+  `verify_test_artifacts.py` PASS; all 12 `tools/test_*.py` exit 0.
+- **EVIDENCE live** (RIDDICKVR_SIM=1, read-only per-run shadows, `--shadow-install
+  "F:\The Chronicles of Riddick - Assault on Dark Athena" --reach-gameplay --duration 80
+  --advance-menu --advance-min-taps 8 --require-fresh-hook --require-parallax --dump-branch any
+  --downscale 4 --ini StereoDualRender=1`; `deployed_hook_matches_build` PASS each):
+  - **Run 1 (probe only, hook `5d34b07a2a72`):** `DisplayMode:` printed **one** line (CINEMA —
+    the ADR-0512 symptom) and the new probe named the cause on **285/286** samples:
+    `DisplayBranch: swap=31 cinema=1 term=menuCursor has3d=1 has3dLatch=1 menuCursorRaw=1
+    cursorFrame=31 cursorAgo=0 cursorMenu=1 ...` and at swap=8693
+    `... fill=0.951 rect=1 letterboxed=0 fullBleedSeen=0`. `menuCursorRaw=1` and `cursorAgo=0`
+    on **every** frame — the desktop cursor is visible throughout; `has3d=1` throughout
+    (confirming Has3DThisFrame is not the cause).
+  - **Run 2 (final, hook `a78d782073df`):** the branch now moves — five `DisplayMode:` lines
+    ending `DisplayMode: FULL-BLEED gameplay (3Dfresh=1 menuCursor=0 latch=1 fill=1.00
+    fullBleed=1)` (the letterboxed startup page still demoted at `fill=0.40`); `MenuCursor:
+    showing=1 overWindow=0 pos=777,1619 client=1280x605 fg=1` (the cursor sits below the
+    605-tall game client). Harness: `gameplay_captures_present` **PASS** (45 gameplay / 7
+    cinema of 52, was 0/53), `gameplay_full_bleed_reached` PASS (fill 1.00);
+    `DualRender:` `use=1 used=7251/7282 draws=583 eligible=583 coverL=coverR=0.340
+    luma=[L=13.8 R=13.8] gate=[floor=0.170 L=1 R=1 ok=1] mv=[.. post=0.032,0.000,0.000]`.
+- **VERDICT (honest):** GH #91 is **fixed and measured** — a live in-level frame logs
+  `FULL-BLEED gameplay`, the harness labels gameplay frames `gameplay` (45/52), and the
+  full-bleed/native presentation branch is taken, so `--require-parallax` can now grade. The
+  root cause is measured, not inferred: a **global desktop cursor**, read as a sustained menu
+  cursor, demoted a whole in-level run. **Native stereo is still not visible parallax**:
+  `stereo_parallax_present` FAILs with `stereo_kind=shift-only`, per-tile `spread=0` — the
+  presented per-eye pair is a single uniform shift, not depth-dependent disparity. The gate
+  and the branch are no longer blockers; the **per-eye image** is. Filed as NEW **GH #92**.
+  **NO REGRESSION** (`StereoDualRender=0` default keeps the shipped shifted capture; the
+  letterboxed splash is still demoted; menus still reach CINEMA).
+- **LIMITS:** the fix removes the *global* cursor term (window-scoped menu cursors still
+  demote, but no headless run exercises a real menu cursor); a keyboard-only menu with the
+  cursor outside the window no longer demotes (the letterbox and `!has3d` terms still cover the
+  2D/splash case); the probe samples every 60 swaps; one live run per build; the GH #72 frame
+  label flake still sets the exact 45/7 split; the 2004 build is untouched; no headset.
+- **Next:** (1) **GH #92** — explain/move the per-eye image blocker (`spread=0`): read the two
+  eye FBOs' per-tile disparity and the actual per-eye modelview translation + eye-space depth
+  range; (2) gate on the **queried** `GL_COLOR_WRITEMASK` at the draw (ADR-0511 Next 2);
+  (3) keep `StereoDualRender=0`/`StereoParallaxDibr=0`/`StereoReplayProbe=0` defaults;
+  (4) the player-visible queue GH #63/#64/#61 then the P1 bugs #45/#49/#50/#51/#65;
+  (5) `DEFAULT_GAME_DIR` 2004-vs-2009; (6) GH #83/#88/#89/#74.
+- **OPS:** install untouched (READ-ONLY per-run shadow, no deploy/install write), no leftover
+  game/host processes, live lock released, `tests/xrsim/report.json` reverted to the committed
+  baseline.
+
 ## Wake 110 - 2026-10-18 17:27 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the per-eye
   USE gate is recalibrated against the engine's own frame and judged only on a span frame,

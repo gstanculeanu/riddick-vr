@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0512` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0513` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -80,7 +80,17 @@ every ADR names the epic #57 subsystem it advances.
   **CINEMA for the whole run** (zero `FULL-BLEED` lines), so the pair is still never
   presented and the harness cannot grade it: the **presentation branch** (GH #72) is now
   the measured blocker, not the pass.
-  **Head = `0512`; the next new ADR is `0513`.**
+  ADR-0513 instruments the branch inputs and fixes the term GH #91 names: the branch was
+  held CINEMA by a *global* desktop cursor (`GetCursorInfo` on 286/286 sampled frames,
+  `menuCursorRaw=1`, `cursorAgo=0`) that the sustained-cursor detector read as a menu, so
+  a whole in-level run was demoted. The menu-cursor sighting is scoped to the **game
+  window's client rect** (`MenuCursor: showing=1 overWindow=0 pos=777,1619 client=1280x605`),
+  plus a pure `CinemaHoldTerm` helper and a throttled `DisplayBranch:` probe. Live, the
+  branch now moves (five `DisplayMode:` lines), gameplay is labelled `gameplay` (45/52),
+  `gameplay_captures_present` PASSes, and `--require-parallax` grades — the pair is
+  presented but still `shift-only` (`spread=0`), so the remaining stereo blocker is the
+  **per-eye image** (GH #76/#90).
+  **Head = `0513`; the next new ADR is `0514`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

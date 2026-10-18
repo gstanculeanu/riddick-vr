@@ -1302,6 +1302,27 @@ def main():
             "-- ADR-0511 measured the fixed floor to be the blocker and its own log "
             "showed the verdict alternating")
 
+    # GH #91 / ADR-0513: the presentation branch was held CINEMA for a whole in-level run
+    # by a *global* desktop cursor. The fix logs the branch inputs and the holding term
+    # (a pure `CinemaHoldTerm`, so the term cannot drift from the verdict) and scopes the
+    # menu-cursor sighting to the game window's client rect. `noteMenuCursor` must be fed
+    # the scoped value, not the raw global visibility.
+    require("CinemaHoldTerm" in display_branch and
+            "CinemaTermName" in display_branch and
+            "enum class CinemaTerm" in display_branch and
+            "DisplayBranch:" in stereo_renderer_cpp and
+            "CinemaHoldTerm(" in stereo_renderer_cpp and
+            "GetLastCursorFrame" in opengl_proxy_h and
+            "OpenGLProxy::GetLastCursorFrame" in opengl_proxy_cpp and
+            "return s_lastCursorFrame;" in opengl_proxy_cpp and
+            "cursorOverWindow" in camera and
+            "ScreenToClient" in camera and
+            "OpenGLProxy::NoteMenuCursor(cursorOverWindow);" in camera and
+            (ROOT / "docs/adr/0513-gh91-menu-cursor-is-scoped-to-the-game-window.md").exists(),
+            "GH #91 / ADR-0513: the display branch must log its inputs and name the holding "
+            "term (CinemaHoldTerm), and the menu-cursor sighting must be scoped to the game "
+            "window -- a global desktop cursor held the branch CINEMA for a whole in-level run")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

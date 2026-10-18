@@ -1850,6 +1850,43 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                         (int)s_branchState.fullBleedSeen);
                 }
             }
+            // GH #91: the branch *inputs*, on a cadence (ADR-0512 measured exactly
+            // one `DisplayMode:` line for an 80 s in-level run, so the verdict's
+            // cause could not be read from the log). `term` is recomputed from the
+            // same inputs the verdict uses, so the probe names the true holding
+            // term (its unit test pins `term != none` against the verdict). `rect`
+            // is `m_hasActiveRect` -- without it `haveFill` is false and the
+            // cold-start latch can never fire.
+            {
+                static uint32_t s_branchProbeCountdown = 0;
+                if (s_branchProbeCountdown == 0) {
+                    s_branchProbeCountdown = kDisplayBranchProbeEverySwaps;
+                    const uint64_t swap = OpenGLProxy::GetSwapFrameCount();
+                    const uint64_t cursorFrame = OpenGLProxy::GetLastCursorFrame();
+                    const uint64_t cursorAgo =
+                        (swap >= cursorFrame) ? (swap - cursorFrame) : 0;
+                    const CinemaTerm term = CinemaHoldTerm(
+                        OpenGLProxy::Has3DThisFrame(), s_cursorMenu, branchLatch,
+                        s_branchState.letterboxed, s_branchState.fullBleedSeen);
+                    VR_LOG_INFO("DisplayBranch: swap=%llu cinema=%d term=%s has3d=%d "
+                                "has3dLatch=%d menuCursorRaw=%d cursorFrame=%llu cursorAgo=%llu "
+                                "cursorMenu=%d haveFill=%d fill=%.3f rect=%d letterboxed=%d "
+                                "fullBleedSeen=%d",
+                                static_cast<unsigned long long>(swap), (int)isCinema,
+                                CinemaTermName(term),
+                                (int)OpenGLProxy::Has3DThisFrame(),
+                                (int)OpenGLProxy::Has3DGameplayProjection(),
+                                (int)OpenGLProxy::HasMenuCursor(),
+                                static_cast<unsigned long long>(cursorFrame),
+                                static_cast<unsigned long long>(cursorAgo),
+                                (int)s_cursorMenu, (int)haveFill,
+                                haveFill ? activeFill : -1.0f, (int)m_hasActiveRect,
+                                (int)s_branchState.letterboxed,
+                                (int)s_branchState.fullBleedSeen);
+                } else {
+                    --s_branchProbeCountdown;
+                }
+            }
 
             // Read from default backbuffer 0
             OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
