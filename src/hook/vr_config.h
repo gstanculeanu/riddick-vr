@@ -148,11 +148,13 @@ struct VRConfig {
     // run while real gameplay still reached full-bleed, and no full-bleed page
     // appeared before gameplay. Set 0 for the legacy verdict.
     int displayBranchColdStartLatch = 1;
-    // GH #76 (interim: depth-based reprojection, ADR-0501). Replaces the single
-    // global half-IPD blit shift with a per-cell shift derived from the scene
-    // depth, so disparity varies with depth. Default OFF: it reads the engine's
-    // depth buffer once per `dibrDepthEvery` swaps (a GPU stall) and the warp is
-    // an interim until true per-eye rendering exists; needs on-headset tuning.
+    // GH #76 (interim: depth-based reprojection, ADR-0501/ADR-0502). Replaces the
+    // single global half-IPD blit shift with a per-cell shift derived from the
+    // scene depth, so disparity varies with depth. Default OFF: it reads the
+    // engine's depth buffer once per `dibrDepthEvery` frames (a GPU stall) and the
+    // warp is an interim until true per-eye rendering exists; needs on-headset
+    // tuning. The read is taken at the mid-frame depth-only clear, where the depth
+    // still holds the world pass (ADR-0502); at swap time it is uniformly far.
     // dibrCols x dibrRows is the source-image warp grid; strength scales the
     // physical warp (1.0 = correct).
     int stereoParallaxDibr = 0;

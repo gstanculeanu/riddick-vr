@@ -26,6 +26,12 @@ public:
     void OnSwapBuffers(HDC hdc);
     void OnClear(GLbitfield mask);
 
+    // GH #76 (ADR-0502): called from Hook_glClear *before* the engine clears a
+    // depth-only mask. At that instant the depth buffer still holds the world
+    // pass; the DIBR path snapshots it (throttled, opt-in) so the swap-time
+    // reprojection has a real depth source. A no-op unless StereoParallaxDibr=1.
+    void OnDepthOnlyClear();
+
     StereoPass GetCurrentPass() const { return m_currentPass; }
     void SetCurrentPass(StereoPass pass) { m_currentPass = pass; }
 

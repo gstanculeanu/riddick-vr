@@ -374,5 +374,38 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   carries `latch=.. fill=.. fullBleed=..`, and the latch logs its own demotion
   once (`cold-start latch demoted ...`). See ADR-0459 / ADR-0478.
 
+## Native stereo interim: depth-based reprojection (GH #76, ADR-0501 / ADR-0502)
+- True per-eye view/projection needs the engine to render the scene twice. That is
+  architecturally blocked here (ADR-0501): `CameraHook::StabilizeViewMatrix` -- the
+  ADR-0406 "intended seam" -- is dead code (no call sites), and the engine applies
+  its transform engine-side with an identity GL modelview (ADR-0481/0482), so the
+  hook cannot ask for a second view.
+- The interim is **opt-in** (`StereoParallaxDibr=1`, default 0):
+  `depth_parallax.h` is the pure warp math (`DepthToViewZ`, `ParallaxShiftPx`,
+  `EyeBaselineMeters`, `FocalPixelsFromProjection`, `CellMinViewZ`; unit-tested by
+  `depth_parallax`), and `stereo_renderer.cpp` replaces the single uniform-shift
+  blit with a `DibrCols x DibrRows` grid, each cell shifted by its own depth-derived
+  disparity.
+- **Depth source (ADR-0502).** At `SwapBuffers` the depth is gone (window and
+  engine FBO both read uniformly far). The hook now captures it **at the mid-frame
+  depth-only clear** (`Hook_glClear` -> `StereoRenderer::OnDepthOnlyClear()`),
+  before the engine wipes it -- the opener of the first-person window (ADR-0439).
+  It reads the **currently bound draw framebuffer** (`GetCurrentDrawFramebuffer()`,
+  which, unlike `GetLastBoundFramebuffer()`, records a rebind to 0) at its own
+  viewport, throttled by `DibrDepthEvery`, and caches it (`s_dibrCapture`).
+  `BuildDibrGrid` prefers it, and every 240 captures logs
+  `DIBR world-depth capture: clears=.. captures=.. fbo=.. WxH rawDepth=[lo..hi]`.
+- **Measured (ADR-0502):** the capture is **reliably present** (573/589 grid
+  rebuilds `src=clear`, `fbo=6`) and real (`z=[41.2..471.2] m`,
+  `fullDisp=[0.12..1.45] px`) -- but its nearest surface is `~41 m`
+  (`rawDepth min 0.905`), i.e. a **far-only pass, not the visible world pass**
+  (near plane 4.0 m). ADR-0501's "the depth-only clear precedes the world wipe"
+  hypothesis is therefore **not supported**.
+- **No-regression gate:** the warp is used only when its maximum disparity is at
+  least the legacy half-IPD convergence cue (`minSepPx = 2 * halfIpdPx`); a
+  present-but-far depth otherwise falls back to the legacy blit. Without this the
+  far-depth warp collapsed the pair to a mono duplicate (measured). The `DIBR:`
+  log line carries `src=.. minSep=.. use=..`. See ADR-0501 / ADR-0502.
+
 
 

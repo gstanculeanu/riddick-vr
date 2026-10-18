@@ -13,12 +13,14 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0501` — the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0502` — the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
-  native stereo (the interim depth-based reprojection and its depth source).
-  **Head = `0501`; the next new ADR is `0502`.**
+  native stereo (the interim depth-based reprojection and its depth source);
+  ADR-0502 captures the depth-only clear's depth and measures it far-only (the
+  world-pass-capture hypothesis is not supported).
+  **Head = `0502`; the next new ADR is `0503`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

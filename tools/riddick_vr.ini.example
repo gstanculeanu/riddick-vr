@@ -161,16 +161,17 @@ ViewmodelDriveRoll=0
 ; as 3D gameplay. Once the latch is set it never fires again (GH #44 safe).
 ; Default 1 since the 2026-10-18 live A/B (ADR-0478); set 0 for the legacy bit.
 DisplayBranchColdStartLatch=1
-; GH #76 (interim, ADR-0501): depth-based per-eye reprojection ("DIBR-lite").
-; 1 = replace the single global half-IPD blit shift with a per-cell shift that
-; depends on the scene depth, so disparity varies with depth. Default 0: it
-; reads the engine's depth buffer once per DibrDepthEvery swaps (a GPU stall)
-; and is an interim until true per-eye rendering exists. Needs on-headset tuning.
+; GH #76 (interim, ADR-0501/ADR-0502): depth-based per-eye reprojection
+; ("DIBR-lite"). 1 = replace the single global half-IPD blit shift with a
+; per-cell shift that depends on the scene depth, so disparity varies with
+; depth. Default 0: it reads the engine's depth buffer at the mid-frame
+; depth-only clear (the world pass, ADR-0502), throttled (a GPU stall), and is an
+; interim until true per-eye rendering exists. Needs on-headset tuning.
 StereoParallaxDibr=0
 ; Warp gain (1.0 = physically correct baseline* f/z).
 DibrStrength=1.0
-; Read the depth buffer at most once every N presented swaps (reuse the last
-; grid in between); 1 = every frame.
+; Capture/read the depth buffer at most once every N frames (reuse the last grid
+; in between); 1 = every frame.
 DibrDepthEvery=3
 ; Source-image warp grid: more cells = smoother parallax, more blits per eye.
 DibrCols=8

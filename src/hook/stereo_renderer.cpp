@@ -358,6 +358,33 @@ static DibrReadPixels_t DibrReadPixels() {
     return s_dibrReadPixels;
 }
 
+typedef void (WINAPI *DibrGetIntegerv_t)(GLenum, GLint*);
+
+static DibrGetIntegerv_t DibrGetIntegerv() {
+    static DibrGetIntegerv_t s_getIntegerv = nullptr;
+    static bool s_tried = false;
+    if (!s_tried) {
+        s_tried = true;
+        HMODULE hReal = OpenGLProxy::GetRealOpenGLModule();
+        if (!hReal) hReal = GetModuleHandleA("opengl32.dll");
+        if (hReal) s_getIntegerv = (DibrGetIntegerv_t)GetProcAddress(hReal, "glGetIntegerv");
+    }
+    return s_getIntegerv;
+}
+
+// Where the last usable grid's depth came from. Logged so a live run names the
+// source instead of only its outcome.
+enum class DibrSource { None = 0, Clear, Window, EngineFbo };
+
+static const char* DibrSourceName(DibrSource s) {
+    switch (s) {
+        case DibrSource::Clear:     return "clear";
+        case DibrSource::Window:    return "window";
+        case DibrSource::EngineFbo: return "fbo";
+        default:                    return "none";
+    }
+}
+
 struct DibrGrid {
     int cols = 0;
     int rows = 0;
@@ -367,6 +394,7 @@ struct DibrGrid {
     int validCells = 0;
     int depthW = 0, depthH = 0;    // depth buffer the grid was built from
     GLuint fbo = 0;                // engine FBO used (0 = window backbuffer)
+    DibrSource source = DibrSource::None;
     bool valid = false;            // a usable, depth-varying warp
 };
 
@@ -374,10 +402,36 @@ static DibrGrid s_dibrGrid;
 static std::vector<float> s_dibrDepth;
 static int s_dibrCountdown = 0;     // swaps until the next depth readback
 
+// GH #76 (ADR-0502): the world-pass depth snapshotted at a depth-only clear --
+// the instant *before* the engine wipes the depth buffer that still holds the
+// scene (the first-person-window opener, ADR-0439). At SwapBuffers the world
+// depth is gone (ADR-0501 measured it uniformly far), so this is the only
+// surface-proven source. Captured throttled, opt-in, and only ever *used* when it
+// reduces to a depth-varying warp; a missed capture is a fallback, never a crash.
+struct DibrCapture {
+    std::vector<float> depth;   // raw window depth of the bound buffer's viewport
+    int w = 0, h = 0;
+    GLuint fbo = 0;             // buffer the clear targeted (0 = window)
+    uint64_t frame = 0;         // GetSwapFrameCount() at capture time
+    float rawMin = 1.0f;        // raw depth range (1.0..1.0 => already cleared)
+    float rawMax = 1.0f;
+};
+static DibrCapture s_dibrCapture;
+static bool s_dibrCaptureValid = false;
+static int s_dibrCaptureCountdown = 0;      // depth clears until the next capture
+static uint32_t s_dibrDepthClears = 0;      // depth-only clears seen while opt-in
+static uint32_t s_dibrCaptures = 0;         // captures actually taken
+
+// Cap on how many presented frames a captured world depth may age before it is
+// treated as stale instead of being applied to a frame it no longer describes.
+static const uint64_t kDibrCaptureMaxAgeSwaps = 8;
+
 // Read the depth of the active region and reduce it to the per-cell warp. Does
 // NOT throw: every failure leaves `s_dibrGrid.valid == false` (legacy fallback).
 //
-// Two depth sources are tried, in order:
+// Three depth sources are tried, in order:
+//   0. the world-pass depth captured at the last depth-only clear (ADR-0502) --
+//      the only source measured to still carry the scene;
 //   1. the window backbuffer's depth;
 //   2. the engine's own last-bound FBO depth (measured: the engine renders the
 //      3D scene into its own FBO and presents a colour-only copy, so the window
@@ -397,11 +451,17 @@ static void BuildDibrGrid(GLint ox, GLint oy, GLint srcW, GLint srcH,
     const float fPx = FocalPixelsFromProjection(proj, srcW);
     if (!(fPx > 0.0f)) return;
 
-    // Reduce a filled depth buffer of dw x dh to the per-cell warp; returns true
-    // when the depth varies enough to be a usable signal.
-    auto reduce = [&](int dw, int dh) -> bool {
-        if (dw < 8 || dh < 8) return false;
-        s_dibrDepth.resize(static_cast<size_t>(dw) * static_cast<size_t>(dh));
+    // Reduce a filled depth buffer (`buf`, dw x dh, GL bottom-up, row-major) to
+    // the per-cell warp over the sub-rect (rx, ry, rw, rh); returns true when the
+    // depth varies enough to be a usable signal.
+    auto reduce = [&](const float* buf, int dw, int dh,
+                      int rx, int ry, int rw, int rh) -> bool {
+        if (!buf || dw < 8 || dh < 8) return false;
+        if (rx < 0) { rw += rx; rx = 0; }
+        if (ry < 0) { rh += ry; ry = 0; }
+        if (rx + rw > dw) rw = dw - rx;
+        if (ry + rh > dh) rh = dh - ry;
+        if (rw < 8 || rh < 8) return false;
         s_dibrGrid.cols = cols;
         s_dibrGrid.rows = rows;
         s_dibrGrid.depthW = dw;
@@ -410,12 +470,12 @@ static void BuildDibrGrid(GLint ox, GLint oy, GLint srcW, GLint srcH,
         float minZ = 0.0f, maxZ = 0.0f, minD = 0.0f, maxD = 0.0f;
         int valid = 0;
         for (int r = 0; r < rows; ++r) {
-            const int y0 = (r * dh) / rows;
-            const int y1 = ((r + 1) * dh) / rows;
+            const int y0 = ry + (r * rh) / rows;
+            const int y1 = ry + ((r + 1) * rh) / rows;
             for (int c = 0; c < cols; ++c) {
-                const int x0 = (c * dw) / cols;
-                const int x1 = ((c + 1) * dw) / cols;
-                const float z = CellMinViewZ(s_dibrDepth.data(), dw, dh, x0, y0, x1, y1, proj);
+                const int x0 = rx + (c * rw) / cols;
+                const int x1 = rx + ((c + 1) * rw) / cols;
+                const float z = CellMinViewZ(buf, dw, dh, x0, y0, x1, y1, proj);
                 if (!(z > 0.0f)) continue;
                 const float disp = ParallaxShiftPx(z, fPx, baselineM, g_vrConfig.dibrStrength);
                 s_dibrGrid.fullDispPx[static_cast<size_t>(r) * cols + c] = disp;
@@ -442,39 +502,143 @@ static void BuildDibrGrid(GLint ox, GLint oy, GLint srcW, GLint srcH,
         return (valid > 0) && ((maxD - minD) >= 0.5f);
     };
 
+    // 0. World-pass depth captured at the last depth-only clear (ADR-0502), the
+    //    instant before the engine cleared the depth that still held the scene.
+    if (s_dibrCaptureValid && s_dibrCapture.w >= 8 && s_dibrCapture.h >= 8 &&
+        s_dibrCapture.depth.size() >=
+            static_cast<size_t>(s_dibrCapture.w) * static_cast<size_t>(s_dibrCapture.h) &&
+        (OpenGLProxy::GetSwapFrameCount() - s_dibrCapture.frame) <= kDibrCaptureMaxAgeSwaps) {
+        int rx = 0, ry = 0, rw = s_dibrCapture.w, rh = s_dibrCapture.h;
+        // A capture on the window is in the same (window) coordinate frame, so the
+        // active rect can be mapped straight in; an engine FBO is tiled whole,
+        // exactly as the swap-time FBO read below does.
+        if (s_dibrCapture.fbo == 0 && s_dibrCapture.w == srcW && s_dibrCapture.h == srcH) {
+            rx = ox; ry = oy; rw = srcW; rh = srcH;
+        }
+        if (reduce(s_dibrCapture.depth.data(), s_dibrCapture.w, s_dibrCapture.h, rx, ry, rw, rh)) {
+            s_dibrGrid.fbo = s_dibrCapture.fbo;
+            s_dibrGrid.source = DibrSource::Clear;
+            s_dibrGrid.valid = true;
+            return;
+        }
+    }
+
     // 1. Window backbuffer depth (the read framebuffer is already 0/GL_BACK).
+    s_dibrDepth.resize(static_cast<size_t>(srcW) * static_cast<size_t>(srcH));
     read(ox, oy, srcW, srcH, 0x1902 /*GL_DEPTH_COMPONENT*/, 0x1406 /*GL_FLOAT*/,
          s_dibrDepth.data());
     s_dibrGrid.fbo = 0;
-    s_dibrGrid.valid = reduce(srcW, srcH);
-    if (s_dibrGrid.valid) return;
+    if (reduce(s_dibrDepth.data(), srcW, srcH, 0, 0, srcW, srcH)) {
+        s_dibrGrid.source = DibrSource::Window;
+        s_dibrGrid.valid = true;
+        return;
+    }
 
     // 2. The engine's own FBO depth, resolved against its own viewport.
     const GLuint fbo = OpenGLProxy::GetLastBoundFramebuffer();
     if (fbo == 0 || !OpenGLProxy::real_glBindFramebuffer) return;
-    typedef void (WINAPI *DibrGetIntegerv_t)(GLenum, GLint*);
-    static DibrGetIntegerv_t s_getIntegerv = nullptr;
-    if (!s_getIntegerv) {
-        HMODULE hReal = OpenGLProxy::GetRealOpenGLModule();
-        if (!hReal) hReal = GetModuleHandleA("opengl32.dll");
-        if (hReal) s_getIntegerv = (DibrGetIntegerv_t)GetProcAddress(hReal, "glGetIntegerv");
-    }
-    if (!s_getIntegerv) return;
+    DibrGetIntegerv_t getIntegerv = DibrGetIntegerv();
+    if (!getIntegerv) return;
     OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, fbo);
     GLint vp[4] = { 0, 0, 0, 0 };
-    s_getIntegerv(0x0BA2 /* GL_VIEWPORT */, vp);
+    getIntegerv(0x0BA2 /* GL_VIEWPORT */, vp);
     bool used = false;
     if (vp[2] >= 8 && vp[3] >= 8 && vp[0] >= 0 && vp[1] >= 0 &&
         static_cast<double>(vp[2]) * static_cast<double>(vp[3]) <= 4.0e6) {
+        s_dibrDepth.resize(static_cast<size_t>(vp[2]) * static_cast<size_t>(vp[3]));
         read(vp[0], vp[1], vp[2], vp[3], 0x1902, 0x1406, s_dibrDepth.data());
-        used = reduce(vp[2], vp[3]);
+        used = reduce(s_dibrDepth.data(), vp[2], vp[3], 0, 0, vp[2], vp[3]);
     }
-    if (used) s_dibrGrid.fbo = fbo;
+    if (used) {
+        s_dibrGrid.fbo = fbo;
+        s_dibrGrid.source = DibrSource::EngineFbo;
+    }
     OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
     s_dibrGrid.valid = used;
 }
 
 } // namespace (DIBR helpers)
+
+// GH #76 (ADR-0502): the world-pass depth snapshot. Called from Hook_glClear for
+// a depth-only clear, *before* the engine's clear executes, so the depth buffer
+// still holds the world pass. Reads the currently bound draw framebuffer's depth
+// at its own viewport and caches it for the swap-time reprojection. A no-op
+// unless the interim is opted in; throttled by DibrDepthEvery; failure is always
+// a silent fallback to the legacy uniform shift.
+void StereoRenderer::OnDepthOnlyClear() {
+    if (!g_vrConfig.stereoParallaxDibr) return;
+    ++s_dibrDepthClears;
+    if (s_dibrCaptureCountdown > 0) {
+        --s_dibrCaptureCountdown;
+        return;
+    }
+    DibrReadPixels_t read = DibrReadPixels();
+    if (!read) return;
+
+    const GLuint fbo = OpenGLProxy::GetCurrentDrawFramebuffer();
+    GLint x = 0, y = 0, w = 0, h = 0;
+    if (fbo == 0) {
+        // Default framebuffer: read the back buffer, in the window's own frame.
+        if (OpenGLProxy::real_glBindFramebuffer) {
+            OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+        }
+        if (OpenGLProxy::glReadBuffer) {
+            OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+        }
+        x = m_viewportX;
+        y = m_viewportY;
+        w = m_viewportWidth > 0 ? m_viewportWidth : m_windowWidth;
+        h = m_viewportHeight > 0 ? m_viewportHeight : m_windowHeight;
+    } else {
+        if (!OpenGLProxy::real_glBindFramebuffer) return;
+        DibrGetIntegerv_t getIntegerv = DibrGetIntegerv();
+        if (!getIntegerv) return;
+        OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, fbo);
+        GLint vp[4] = { 0, 0, 0, 0 };
+        getIntegerv(0x0BA2 /* GL_VIEWPORT */, vp);
+        x = vp[0];
+        y = vp[1];
+        w = vp[2];
+        h = vp[3];
+    }
+
+    s_dibrCaptureCountdown = g_vrConfig.dibrDepthEvery > 0 ? g_vrConfig.dibrDepthEvery : 1;
+    if (w >= 8 && h >= 8 && x >= 0 && y >= 0 &&
+        static_cast<double>(w) * static_cast<double>(h) <= 4.0e6) {
+        s_dibrCapture.depth.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
+        read(x, y, w, h, 0x1902 /* GL_DEPTH_COMPONENT */, 0x1406 /* GL_FLOAT */,
+             s_dibrCapture.depth.data());
+        s_dibrCapture.w = w;
+        s_dibrCapture.h = h;
+        s_dibrCapture.fbo = fbo;
+        s_dibrCapture.frame = OpenGLProxy::GetSwapFrameCount();
+        float lo = 1.0f, hi = 0.0f;
+        for (float d : s_dibrCapture.depth) {
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+        }
+        s_dibrCapture.rawMin = lo;
+        s_dibrCapture.rawMax = hi;
+        s_dibrCaptureValid = true;
+        ++s_dibrCaptures;
+    }
+    if (fbo != 0) {
+        OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+    }
+
+    // Periodic evidence: does the depth-only clear actually hold a world pass?
+    // rawMin < 1.0 says yes (window depth 0 = the near plane, 1 = the far plane);
+    // rawMin == rawMax == 1.0 means the buffer was already cleared (a miss).
+    static uint32_t s_dibrCaptureLogThrottle = 0;
+    if (++s_dibrCaptureLogThrottle >= 240) {
+        s_dibrCaptureLogThrottle = 0;
+        VR_LOG_INFO("DIBR world-depth capture: clears=%u captures=%u fbo=%u %dx%d "
+                    "rawDepth=[%.3f..%.3f]",
+                    s_dibrDepthClears, s_dibrCaptures, static_cast<unsigned>(s_dibrCapture.fbo),
+                    s_dibrCapture.w, s_dibrCapture.h,
+                    s_dibrCapture.rawMin, s_dibrCapture.rawMax);
+    }
+}
 
 bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
     if (m_initialized) return true;
@@ -1114,12 +1278,20 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint rightSrcX0 = ax0 + halfIpdPx + comfortPx;
             GLint rightSrcX1 = ax1 + halfIpdPx + comfortPx;
 
-            // GH #76 (interim depth-based reprojection, ADR-0501): when enabled
-            // and the engine's depth is usable, replace the single global shift
-            // with a per-cell shift derived from the scene depth, so disparity
-            // varies with depth instead of being a flat translation. Falls back
-            // to the legacy uniform shift whenever the depth read is unusable.
+            // GH #76 (interim depth-based reprojection, ADR-0501/ADR-0502): when
+            // enabled and the engine's depth is usable, replace the single global
+            // shift with a per-cell shift derived from the scene depth, so disparity
+            // varies with depth instead of being a flat translation. Falls back to
+            // the legacy uniform shift whenever the depth read is unusable.
             const float* dibrProj = OpenGLProxy::GetLastProjectionMatrix();
+            // GH #76 (ADR-0502): keep wake 99's fail-safe invariant -- the
+            // depth-varying warp must never produce *less* eye separation than the
+            // legacy half-IPD convergence cue it replaces (a depth read may sharpen
+            // stereo, never flatten it). Measured: the depth captured at the
+            // depth-only clear is a far-only pass (nearest ~41 m, ADR-0502), so its
+            // sub-2 px disparity falls back to the legacy blit rather than turning
+            // the pair into a mono duplicate.
+            const float minSepPx = 2.0f * static_cast<float>(halfIpdPx);
             bool useDibr = false;
             if (g_vrConfig.stereoParallaxDibr && dibrProj != nullptr) {
                 if (s_dibrCountdown <= 0) {
@@ -1127,21 +1299,22 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                     const float baseline = EyeBaselineMeters(m_sharedState.leftEyeView.m,
                                                              m_sharedState.rightEyeView.m, 0.065f);
                     BuildDibrGrid(ax0, ay0, spanW, spanH, dibrProj, baseline);
+                    useDibr = s_dibrGrid.valid && s_dibrGrid.maxDisp >= minSepPx;
                     static uint32_t s_dibrLogThrottle = 0;
                     if (++s_dibrLogThrottle >= 12) {
                         s_dibrLogThrottle = 0;
-                        VR_LOG_INFO("DIBR: grid=%dx%d depth=%dx%d fbo=%u depth_z=[%.2f..%.2f]m "
-                                    "fullDisp=[%.2f..%.2f]px baseline=%.3fm valid=%d/%d use=%d",
+                        VR_LOG_INFO("DIBR: src=%s grid=%dx%d depth=%dx%d fbo=%u depth_z=[%.2f..%.2f]m "
+                                    "fullDisp=[%.2f..%.2f]px baseline=%.3fm valid=%d/%d minSep=%.1f use=%d",
+                                    DibrSourceName(s_dibrGrid.source),
                                     s_dibrGrid.cols, s_dibrGrid.rows, s_dibrGrid.depthW, s_dibrGrid.depthH,
                                     (unsigned)s_dibrGrid.fbo, s_dibrGrid.minZ, s_dibrGrid.maxZ,
                                     s_dibrGrid.minDisp, s_dibrGrid.maxDisp, baseline,
                                     s_dibrGrid.validCells, s_dibrGrid.cols * s_dibrGrid.rows,
-                                    (int)s_dibrGrid.valid);
+                                    minSepPx, (int)useDibr);
                     }
-                    useDibr = s_dibrGrid.valid;
                 } else {
                     --s_dibrCountdown;
-                    useDibr = s_dibrGrid.valid;
+                    useDibr = s_dibrGrid.valid && s_dibrGrid.maxDisp >= minSepPx;
                 }
             }
 

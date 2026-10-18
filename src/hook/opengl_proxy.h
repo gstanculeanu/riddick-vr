@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <GL/gl.h>
+#include <cstdint>
 
 namespace RiddickVR {
 
@@ -177,6 +178,15 @@ public:
     // window's depth buffer reads uniformly far (measured live); this is the id
     // whose depth attachment carries the scene depth. 0 = none seen yet.
     static GLuint GetLastBoundFramebuffer();
+    // GH #76 (ADR-0502): the *currently* bound draw framebuffer (0 = window).
+    // GetLastBoundFramebuffer() deliberately ignores a rebind to 0, so it cannot
+    // say which buffer a depth-only clear is about to clear; this can. The host's
+    // world-pass depth is read at that clear, before the engine wipes it.
+    static GLuint GetCurrentDrawFramebuffer();
+    // GH #76 (ADR-0502): the presented-frame counter, so a depth buffer captured
+    // mid-frame can be stamped and dropped once it is stale instead of being
+    // applied to a much later frame.
+    static uint64_t GetSwapFrameCount();
     static PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers;
     static PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers;
     static PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D;

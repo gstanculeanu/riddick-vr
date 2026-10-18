@@ -59,6 +59,10 @@ PFNGLBINDFRAMEBUFFERPROC OpenGLProxy::real_glBindFramebuffer = nullptr;
 
 // GH #76 (ADR-0501): last non-zero draw framebuffer the engine bound.
 static GLuint s_lastBoundFramebuffer = 0;
+// GH #76 (ADR-0502): the framebuffer currently bound for drawing, *including* a
+// rebind to 0 (the window). A depth-only clear clears this one's depth buffer, so
+// the world-pass depth can be captured there before the engine wipes it.
+static GLuint s_currentDrawFramebuffer = 0;
 
 // Real WGL & GL Typedefs
 typedef HGLRC (WINAPI *PFN_wglCreateContext)(HDC);
@@ -739,6 +743,13 @@ void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
         s_viewmodelSuppressor.NoteColorClear();
     } else if (mask & 0x00000100u /* GL_DEPTH_BUFFER_BIT */) {
         s_viewmodelSuppressor.NoteDepthOnlyClear();
+        // GH #76 (ADR-0502): the depth-only clear is the instant *before* the
+        // engine wipes the depth buffer that still holds the world pass (the
+        // opener of the first-person viewmodel window, ADR-0439). Capture it
+        // there for the swap-time reprojection -- at SwapBuffers the world depth
+        // is gone (measured: uniformly far, ADR-0501). Throttled and opt-in
+        // inside the renderer, and a no-op unless StereoParallaxDibr is on.
+        StereoRenderer::Instance().OnDepthOnlyClear();
     }
     if (real_glClear) {
         real_glClear(mask);
@@ -750,8 +761,14 @@ void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffe
     // GH #76 (ADR-0501): remember the last non-zero draw framebuffer the engine
     // bound. The 3D scene's depth lives in the engine's own FBO, not in the
     // window backbuffer (measured: the window depth reads uniformly far).
-    if (framebuffer != 0 && target != 0x8CA8 /* GL_READ_FRAMEBUFFER */) {
-        s_lastBoundFramebuffer = framebuffer;
+    // GH #76 (ADR-0502): also track the *current* draw binding, including a
+    // rebind to 0, so the depth-only clear knows which buffer it is about to
+    // clear (that is the instant that still holds the world-pass depth).
+    if (target != 0x8CA8 /* GL_READ_FRAMEBUFFER */) {
+        s_currentDrawFramebuffer = framebuffer;
+        if (framebuffer != 0) {
+            s_lastBoundFramebuffer = framebuffer;
+        }
     }
     if (real_glBindFramebuffer) {
         real_glBindFramebuffer(target, framebuffer);
@@ -760,6 +777,14 @@ void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffe
 
 GLuint OpenGLProxy::GetLastBoundFramebuffer() {
     return s_lastBoundFramebuffer;
+}
+
+GLuint OpenGLProxy::GetCurrentDrawFramebuffer() {
+    return s_currentDrawFramebuffer;
+}
+
+uint64_t OpenGLProxy::GetSwapFrameCount() {
+    return s_swapFrameCount;
 }
 
 // GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program path. These are

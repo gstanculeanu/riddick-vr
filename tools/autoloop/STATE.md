@@ -2,6 +2,92 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 100 — 2026-10-18 13:10 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) — wake 99's
+  Next #1**: the world-pass depth is now captured at the **mid-frame depth-only
+  clear** (`Hook_glClear` -> `StereoRenderer::OnDepthOnlyClear()`, before the
+  engine's clear), and the capture is **measured reliably present but far-only**
+  (ADR-0502). Real C++ change -> `build-all` + CTest on both arches; 4 live runs
+  on read-only per-run shadows (no deploy, no install write); **one** reached
+  gameplay pre-gate (the counterfactual) and **one** post-gate.
+- **Why this unit:** the standing prompt's top item (#76) and ADR-0501's explicit
+  Next #1: "read the depth inside `Hook_glClear` when the mask is
+  `GL_DEPTH_BUFFER_BIT` alone (the viewmodel-window opener, ADR-0439), before the
+  engine clears it, and cache that grid for the swap."
+- **Change:**
+  - `src/hook/opengl_proxy.{h,cpp}`: track the **current** draw framebuffer
+    (`s_currentDrawFramebuffer`, incl. a rebind to `0`) + `GetCurrentDrawFramebuffer()`
+    and `GetSwapFrameCount()`; `Hook_glClear`'s depth-only branch calls
+    `StereoRenderer::Instance().OnDepthOnlyClear()` **before** `real_glClear`.
+  - `src/hook/stereo_renderer.{h,cpp}`: NEW `OnDepthOnlyClear()` (no-op unless
+    `StereoParallaxDibr=1`; throttled by `DibrDepthEvery`) reads the bound
+    framebuffer's own viewport (`glReadPixels(GL_DEPTH_COMPONENT)`) into a cached
+    `s_dibrCapture` (dims/fbo/swap-stamp/raw min-max) and logs
+    `DIBR world-depth capture: clears=.. captures=.. fbo=.. WxH rawDepth=[lo..hi]`.
+    `BuildDibrGrid` gained the snapshot as source **0** and a rectangle-aware
+    `reduce()` (a whole-viewport snapshot can be reduced over the active rect).
+  - **No-regression gate:** the warp is used only when `maxDisp >= minSepPx =
+    2*halfIpdPx` (the legacy convergence cue it replaces); the `DIBR:` log now
+    carries `src=.. minSep=.. use=..`. `StereoParallaxDibr=0` stays the default.
+  - NEW `docs/adr/0502-…`; `tools/verify_reported_fixes.py` new #76/ADR-0502
+    invariant; `docs/vr-scenarios.md`, `docs/adr/README.md` (head -> 0502),
+    `src/hook/README.md` (new interim-stereo section), `vr_config.h` +
+    `riddick_vr.ini.example` comments.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 508928 B
+  `aa59bd760005` + x64 host); **CTest 29/29 (x86) and 27/27 (x64)**; all 12
+  `tools/test_*.py` exit 0; `xrsim --selftest`, `verify_reported_fixes`,
+  `scenario_tests.py --check`, `verify_hook_init`, `validate_addresses`,
+  `verify_test_artifacts` all PASS.
+- **EVIDENCE live (`RIDDICKVR_SIM=1`, read-only per-run shadows,
+  `--reach-gameplay --duration 120 --advance-menu --advance-min-taps 8
+  --require-fresh-hook --require-parallax --downscale 4 --ini
+  StereoParallaxDibr=1`; `deployed_hook_matches_build` PASS each; hook
+  `aa59bd760005` for the gameplay run):**
+  - **Run A / Run C did not measure** (A: launcher stall, 0 frames/no window;
+    C: the harness never found the game window — `found=false` after 6 attempts,
+    `windows_reached=0`, stayed CINEMA, the known live-run flake). Recorded, not
+    graded as fix evidence.
+  - **Run B (pre-gate build, gameplay reached, 77 gameplay frames, full-bleed
+    fill 1.00):** every in-level grid was `src=clear fbo=6 depth_z=[41.5..471.2]m
+    fullDisp=[0.12..1.44]px valid=48/48 use=1` — the capture **works**. But with
+    the warp applied the pair **collapsed**: `stereo_kind=mono`, `best_dx=0`,
+    `identical=True` -> `not_mono_duplicate` and `horizontal_disparity_present`
+    **FAIL** on all 77 frames. The sub-2 px far-depth disparity is *below* the
+    legacy convergence cue -> **the counterfactual that motivates the gate**.
+  - **Run D (post-gate build, gameplay reached, 87/87 distinct gameplay frames,
+    full-bleed fill 1.00):** **573/589** grid rebuilds `src=clear` (rest
+    `src=none`), all `fbo=6 1280x605 depth_z=[41.2..471.2]m
+    fullDisp=[0.12..1.45]px valid=48/48 minSep=8.0..10.0 use=0`;
+    `DIBR world-depth capture` lines to `clears=13437 captures=3360 fbo=6
+    1280x605 rawDepth=[0.905..1.000]`. **The only graded FAIL is
+    `stereo_parallax_present`** (the honest #76 gap); `stereo_kind=shift-only`
+    (`spread=0`), `horizontal_disparity_present` PASS (`dx=-14..-24`),
+    `not_mono_duplicate` PASS (`identical=False`), no frame-time regression
+    (~28k frames / 120 s).
+- **Verdict / consequence (honest):** the capture **is** reliably present (unlike
+  ADR-0501's swap-time source), and it **is** real depth — but its nearest surface
+  is **~41 m** (`rawDepth min 0.905`, world near plane 4.0 m per ADR-0488), so it
+  is a **far-only pass, not the visible world pass**. ADR-0501's Next-1 hypothesis
+  ("the depth-only clear precedes the engine's wipe of the world pass") is
+  **not supported** — that route is **closed as the world-depth source**.
+  `--require-parallax` still fails; the milestone is not reached. The gate keeps
+  the opt-in path from *reducing* the eye separation, so there is **no
+  regression**.
+- **Blocker / honest limit:** the pass behind FBO 6's depth is **not identified**
+  (consistent with ADR-0501); the raw-min is over the whole 1280x605 buffer; the
+  `minSep` gate is a magnitude floor, not a physical one; nothing about the 2004
+  build; no headset; the disparity sign is still provisional.
+- **Next:** (1) **identify the pass** the depth-only clear's buffer belongs to /
+  find the near-world depth (dump the *colour* buffer at the same instant, or scan
+  several FBOs' depth), or capture at the projection load that *closes* the
+  viewmodel window (ADR-0439 "the world resumes"); (2) keep the `minSep` gate;
+  (3) `StereoParallaxDibr=0` stays the default; (4) GH #63/#64/#61 (hands), then
+  the P1 bugs #45/#49/#50/#51/#65; (5) `DEFAULT_GAME_DIR` 2004-vs-2009; (6) GH #83/#88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY per-run shadows under `%TEMP%`; no deploy, no install write); no
+  leftover game/host processes; live lock released. `STATE.log` **appended**
+  (never replaced — GH #88).
+
 ## Wake 99 — 2026-10-18 12:44 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1)** — the issue's
   **interim option 2** (depth-based per-eye reprojection) is implemented behind an

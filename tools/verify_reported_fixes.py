@@ -1003,6 +1003,28 @@ def main():
             "engine-FBO depth source), be opt-in via StereoParallaxDibr, and stay "
             "covered by the headless depth_parallax test")
 
+    # GH #76 / ADR-0502: the wake-99 "capture the world-pass depth at the
+    # depth-only clear" route is implemented (the capture instrument survives) and
+    # its no-regression guarantee is explicit -- a present-but-far depth must
+    # never reduce the eye separation below the legacy half-IPD cue. The guard
+    # pins the mechanism (the depth-only-clear hook, the current-draw-framebuffer
+    # tracking, the cached snapshot, the evidence line) and the `minSep` gate, so
+    # neither can be silently removed without a red.
+    require("OnDepthOnlyClear" in stereo_renderer_cpp and
+            "Instance().OnDepthOnlyClear" in opengl_proxy_cpp and
+            "GetCurrentDrawFramebuffer" in opengl_proxy_h and
+            "GetCurrentDrawFramebuffer" in opengl_proxy_cpp and
+            "s_currentDrawFramebuffer" in opengl_proxy_cpp and
+            "s_dibrCapture" in stereo_renderer_cpp and
+            "DIBR world-depth capture" in stereo_renderer_cpp and
+            "minSepPx" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0502-gh76-depth-only-clear-depth-is-a-far-pass.md").exists(),
+            "GH #76 / ADR-0502: the depth-only-clear depth capture and its "
+            "no-regression `minSep` gate must exist (the depth-only clear hooks "
+            "OnDepthOnlyClear, the current draw framebuffer is tracked, the "
+            "snapshot is cached and logged, and a warp below the legacy half-IPD "
+            "separation falls back)")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never
