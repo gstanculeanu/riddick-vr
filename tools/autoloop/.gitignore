@@ -1,3 +1,7 @@
 # ignore autoloop run logs (keep prompt/state/script tracked if desired)
 logs/
 *.log
+# GH #83: the single-instance lock is runtime state, not source. It is removed by
+# the runner's `finally`, but a killed runner can leave one behind for takeover.
+loop.lock.json
+loop.lock.json.tmp
