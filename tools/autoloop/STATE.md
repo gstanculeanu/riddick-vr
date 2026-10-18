@@ -62,6 +62,12 @@ Durable, human-readable state written by each scheduled wake. Newest at top.
   level the engine loads after the splash, not verified armed; `426x201` is the
   read client rect, not the render resolution; a pad connected at launch could
   change the XInput poll count; nothing about the 2004 build; no headset.
+  **Ops note:** my *first* live attempt was a **false red of the GH #87 kind** —
+  the game stayed alive 47 s with **0 frames and no hook log**, yet
+  `game_started` PASSed, so it was **not retried** (the early-exit retry only
+  triggers on the game *ending*). The identical rerun worked. A future wake
+  should treat "game alive but 0 frames and no fresh hook log at the end" as an
+  unmeasured attempt too (GH #87 extension).
 - **Next:** (1) sample `--ini ViewmodelObserve=1` **during** a reached level
   (the existing probe, now that a run can get there) — the #67 state question;
   (2) extend the same posted-message route to drive movement / the console
