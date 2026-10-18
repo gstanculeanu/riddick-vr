@@ -2,6 +2,115 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 93 — 2026-10-18 09:39 (scheduled loop)
+- **Unit:** GH **#67 step 1 (twelfth correction, ADR-0494)** — ADR-0493's two open
+  questions are answered **read-only** on the live 2009 `GameClasses`: (1) the
+  `VIEWMODEL` site is a **READ** of the item definition, not a set; (2) its class is
+  **`CRPG_Object_Collectible`** (slot 8 of vtable `0x10759eb4`, RTTI-verified), **not**
+  `CRPG_Object_Inventory` — and **no weapon-class vtable holds the site**, so *"the
+  player's first-person arms are the item property `VIEWMODEL`"* is **not supported**.
+  Three REA requests (`decompile 0x1026d790`, `decompile 0x10260940`, `xrefs
+  0x10265a70`) + static-table reads of the same file bytes. Read-only; no C++, no
+  build, no deploy, no install write, no live run.
+- **Why this unit:** the explicit "Next" of wake 92 / ADR-0493 ("(1) #67 step 1 —
+  resolve read-vs-set + find the consumer: `rea decompile FUN_1026d790` … and/or
+  `FUN_10260940`, plus `rea xrefs 0x10265a70`, one or two per wake") and the top
+  player-visible item (#67). It is the decisive correction: the loop must stop
+  treating `VIEWMODEL` as the FP-arms mechanism.
+- **Measured (read-only; subject `Content\GameClasses_Win32_x86.dll`, 9,016,560 B,
+  `sha256 d7e81d7d3726…`, provider Ghidra 12.1.4, `confidence=observed`,
+  `authority=shipped-artifact`; `REA_GHIDRA_STARTUP_TIMEOUT_MS=1500000`; exit 0 in
+  **390 s / 378 s / 369 s**):**
+  - **`FUN_1026d790`** (VA `0x1026d790`) = the **named-child copy helper**:
+    `pcVar2 = param_1->vtable[0x18]()` (the temporary `CStr`'s buffer),
+    `CRegistry::FindChild(param_3, pcVar2)`, then the found child's value
+    (`child->vtable[0x1b4]()` → `temp->vtable[0x14](1)`) handed to the destination's
+    `vtable[0x68]`. Direction: **definition registry → object** (a read).
+  - **`FUN_10260940`** (VA `0x10260940`) = the **shared item model-property loader**:
+    it passes the *same* helper every one of `MODEL`, `MODEL0..MODEL3`,
+    `MODEL_DUMMY` (children → object slot `0x68`), `PHYSMODEL` (slot `0x6c`),
+    `ATTACHMODEL`, `SOUND_*` (13 keys), `ICONSURFACE`/`AMMOICONSURFACE`/`HUDSURFACE`/
+    `ACTIVATIONSURFACE`/`EXTRASURFACE`, `ANIM_HOLD`/`ANIM_ATTACK`/`ANIM_BLOCK`/
+    `ANIM_RELOAD`/`ANIM_RELOAD_CROUCH`/`ANIM_EQUIP`/`ANIM_NOAMMOHOLD`/`ANIM_NOAMMO`,
+    `ANIMGRAPH2` (slot `0x80`), `EFFECTLIST`, `PICKUPMSG` (slot `0x84`). `FUN_10265a70`
+    (ADR-0493) = `FUN_10260940()` **plus** a `VIEWMODEL` read ⇒ a *loader override*.
+  - **`rea xrefs 0x10265a70`** → exactly one incoming reference, `0x10759ed4`
+    (`.rdata`); an image-wide 4-byte scan finds the same single occurrence, so the
+    site is reached **only** as a virtual slot (no caller).
+  - **The slot's vtable is `CRPG_Object_Collectible`'s**: vtable start `0x10759eb4`
+    (the `-4` at `0x10759eb0` is an MSVC RTTI COL `0x107ab9d4` →
+    `signature 0, offset 0, cdOffset 0, pTypeDescriptor 0x1082d888,
+    pClassDescriptor 0x107ab9e8`); TypeDescriptor `0x1082d888` =
+    `.?AVCRPG_Object_Collectible@@`. `VIEWMODEL` = **slot 8** (`0x10759ed4`);
+    `FUN_10265ab0` (`ATTACHPOINT`/`ATTACHROTTRACK`, ADR-0492) = **slot 12**
+    (`0x10759ee4`) of the *same* vtable ⇒ "one neighbourhood" = one class's adjacent
+    methods (`0x10265a40` slot 25).
+  - **Class registry** (`.data` 0x1082d838..0x1082dda0, records
+    `{name, factory, parent}`): `CRPG_Object` ← `CReferenceCount`; `CRPG_Object_Item` ←
+    `CRPG_Object`; **`CRPG_Object_Collectible` ← `CRPG_Object_Item`**;
+    `CRPG_Object_Inventory` ← `CRPG_Object` (**sibling branch**); `CRPG_Object_Gun`/
+    `AngelusChain` ← `CRPG_Object_Weapon`; `CRPG_Object_Melee` ← `Item`; `Ulaks` ←
+    `Melee`; `RocketMelee` ← `Summon`; `CreatureAttack`/`Ammo` ← `Item`;
+    `Char` ← `CRPG_Object`. ⇒ ADR-0492's `CRPG_Object_Inventory` attribution came from
+    `.rdata` **string-pooling order**.
+  - **Slot 8 ownership scan** (image-wide, loader address): `FUN_10260940` in
+    `CRPG_Object_Item` (vtable `0x107572dc`), `CRPG_Object_CreatureAttack`
+    (`0x1075aa0c`) and `CRPG_Object_Telephone_Receiver` (`0x1078957c`) — and
+    `FUN_10265a70` **only** in `CRPG_Object_Collectible` (`0x10759eb4`). **No
+    weapon-class vtable holds either function.**
+- **Consequence:** the property is the *collectible* class's own model reference read
+  at item-model-load time. *"The engine's first-person arms are `VIEWMODEL`"* is
+  falsified for weapons, and ADR-0492 §"the arms reach GL as an already-transformed,
+  item-owned model" is weakened. The item *model* pipeline is still the right place
+  (models are named by definition keys and routed to the object's property setters,
+  not GL state) — but the next engine-side step is the **object's property-setter
+  target** (destination `vtable[0x68]`) and the model-instance creation it feeds, a
+  *different* name than `VIEWMODEL`.
+- **Change (docs + guard only, NO C++):**
+  - **NEW `docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt`** — the three
+    requests (wall clocks + evidence ids), both decompilations **verbatim**, the
+    vtable/RTTI read, the class-registry hierarchy, the slot-8 ownership scan, the
+    local PE VA→offset reproducer, and a "not claimed" section.
+  - **NEW `docs/adr/0494-gh67-viewmodel-is-the-collectible-model-load-override.md`.**
+  - CORRECTED banners: `docs/adr/0492-…` (header + partial correction),
+    `GameClasses2009_ViewmodelProperties.txt` (§3, §3b, "not claimed"),
+    `GameClasses2009_ViewmodelDecompiled.txt` ("not claimed" extended).
+  - `tools/verify_reported_fixes.py` — new GH #67 invariant pinning the artifact
+    (hash, `CRPG_Object_Collectible`, `.?AVCRPG_Object_Collectible@@`, `0x10759eb4`,
+    `0x10759ed4`, `0x1082d888`, `FUN_1026d790`, `FUN_10260940`, `ATTACHMODEL`,
+    `PICKUPMSG`, `0x1075aa0c`, `0x1078957c`) + ADR-0494.
+  - `src/hook/README.md` (ADR-0494 bullet), `docs/vr-scenarios.md` (wake-93
+    correction).
+- **EVIDENCE offline:** `verify_reported_fixes` PASS (with the new invariant),
+  `scenario_tests.py --check` PASS, `verify_hook_init` PASS, `validate_addresses`
+  PASS, `verify_test_artifacts` PASS, `xrsim --selftest` PASS, all **12
+  `tools/test_*.py` exit 0**. **No C++ → no `build-all`/CTest** (documented).
+  Artifacts: `%TEMP%\oc_wake93\` (`decompile_d790.json`, `decompile_0940.json`,
+  `xrefs_a70.json`, + `.err` files, and the local PE/vtable/registry scan scripts).
+- **Blocker:** none. **Limits (honest):** the roles of `FUN_1026d790`'s two object
+  parameters (registry vs destination) are as Ghidra rendered them and are not fully
+  disambiguated — the read direction rests on the *usage pattern* in `FUN_10260940`
+  (a loader that fills an object from a definition), not on the parameter binding;
+  the object-side member behind destination `vtable[0x68]` is **not** traced to a
+  `CXR_ModelInstance` creation (the consumer is still not located); "a collectible is
+  the item you pick up/inspect" is an inference from the class name; whether the arms
+  are drawn at all on the sampled passive/unarmed level start (wake 89 state question)
+  is untouched; one procedure per ≈6.4 min (each `rea decompile` re-imports and
+  re-analyses — wake 92's `--snapshot` finding stands).
+- **Next:** (1) **#67 step 1 — the object's property-setter target:** decompile the
+  destination `vtable[0x68]` setter and/or `CRegistry` accessors to find where the
+  loaded model reference becomes a model instance (≈6.4 min each, 1-2 per wake);
+  alternatively chase the **`FirstPerson`/`ThirdPerson` view-mode table**
+  (`0x1083ff68`/`0x1083ff6c`, ADR-0492 §4) to the camera/body-attach code — that is
+  where the FP body/arms decision lives; (2) the "is the viewmodel drawn on this
+  level?" state question (GH #80); (3) `ViewmodelObserve=0` stays the default; (4) the
+  deploy-gated ladder on a real scene (#76 step 1, #79 hook half, #68 req 5);
+  (5) page-content discriminator for `gameplay_full_bleed_reached` (#71 req 2);
+  (6) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (7) GH #83 / GH #88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY — only an ephemeral import copy in `%TEMP%`); no leftover processes; no
+  live lock taken (no live run). `STATE.log` **appended** (never replaced — GH #88).
+
 ## Wake 92 — 2026-10-18 09:36 (scheduled loop)
 - **Unit:** GH **#67 step 1 (eleventh correction, ADR-0493)** — wake 90's recorded
   "the 9.0 MB 2009 `GameClasses` does **not** fit the provider's analysis budget"

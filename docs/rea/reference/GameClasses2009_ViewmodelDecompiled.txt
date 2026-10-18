@@ -156,6 +156,11 @@ slot `0x68` (the class's own assign/append). `in_ECX` is the `this` pointer — 
 
 ## not claimed
 
+> **EXTENDED (wake 93 / ADR-0494):** the first bullet below ("reads or sets") is
+> now resolved on the **read** side, and the owning class is
+> `CRPG_Object_Collectible` — see
+> `docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt`.
+
 - Whether `FUN_10265a70` reads or *sets* `VIEWMODEL` (its callees
   `FUN_10260940`/`FUN_1026d790` and its callers are not decompiled).
 - That `FUN_1026d790` is the property accessor, or that `CStr`'s vtable slot

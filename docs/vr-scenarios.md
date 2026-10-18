@@ -449,6 +449,30 @@ re-imported and re-analysed; the provider pins
 does not reduce cost; read-vs-set at the site is still open. Recorded in
 `docs/rea/reference/GameClasses2009_ViewmodelDecompiled.txt`.
 
+**Correction (wake 93, ADR-0494): the `VIEWMODEL` property is the *collectible*
+class's model-load override, and the site is a READ — "the arms are this property"
+is NOT supported.** ADR-0493's two open questions are answered read-only on the same
+2009 module (three requests, `exit 0`, 390/378/369 s). `FUN_1026d790` is the
+named-child copy helper (`name = arg->vtable[0x18]()`; `CRegistry::FindChild(registry,
+name)`; the found child's value → destination `vtable[0x68]`), and the item model
+loader `FUN_10260940` passes the *same* helper its own keys (`MODEL`,
+`MODEL0`..`MODEL3`, `MODEL_DUMMY`, `PHYSMODEL`, `ATTACHMODEL`, `SOUND_*`, `ANIM_*`,
+`ANIMGRAPH2`, `EFFECTLIST`, `PICKUPMSG`), so the direction is *definition → object*.
+`rea xrefs 0x10265a70` returns exactly one incoming reference, the `.rdata` vtable
+slot `0x10759ed4` (**slot 8** of the vtable at `0x10759eb4`), whose `-4` RTTI
+(`0x107ab9d4` → TypeDescriptor `0x1082d888`) names the class
+`CRPG_Object_Collectible` — **not** `CRPG_Object_Inventory` (that name's `.rdata`
+proximity is string-pooling order; the `.data` class registry has Inventory as a
+sibling of Collectible off `CRPG_Object`). Slot 8 is the model-load virtual:
+implemented by `FUN_10260940` in `CRPG_Object_Item`/`CreatureAttack`/
+`Telephone_Receiver` and **overridden** by `FUN_10265a70` in
+`CRPG_Object_Collectible`; **no weapon-class vtable** (`Gun`/`Melee`/`Ulaks`/
+`AngelusChain`) holds either function. So the engine-side search for the FP arms must
+move off this property (the *item model* pipeline is still the place: the engine
+names models by definition keys and routes them through the object's property
+setters, not GL state). Recorded in
+`docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt`.
+
 
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during

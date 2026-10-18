@@ -76,6 +76,16 @@ the 2004 module's mask scan (docs/rea/reference/GameClasses_NoviewmodelRuntime.t
 
 ## 3. `VIEWMODEL` / `ATTACHPOINT` / `ATTACHROTTRACK` are item-class property names
 
+> **CORRECTED (wake 93 / ADR-0494,
+> `GameClasses2009_ViewmodelConsumer.txt`).** The *class* is not
+> `CRPG_Object_Inventory`: the `.rdata` proximity of the name string below is
+> string-pooling order. The three names belong to **`CRPG_Object_Collectible`**,
+> whose primary vtable starts at `0x10759eb4` (RTTI TypeDescriptor `0x1082d888` =
+> `.?AVCRPG_Object_Collectible@@`); `VIEWMODEL` is **slot 8** (`0x10759ed4`) and
+> `ATTACHPOINT`/`ATTACHROTTRACK` is **slot 12** (`0x10759ee4`) of *that* vtable.
+> The slot-8 site is a **read** of the item definition (see §3b), and no weapon
+> class (`Gun`/`Melee`/`Ulaks`/`AngelusChain`) reads the name at all.
+
 At VA 0x1075a144 the `.rdata` string block is:
 
     0x1075a144  "VIEWMODEL\0"
@@ -142,6 +152,17 @@ attach point" configuration. The lookup helper (`0x10283bba`) is the object's
 > `CStr::vftable` and calls vtable slot `0x68`. The literal is passed by name into
 > `FUN_1026d790`. Read-vs-set is still unresolved (its callees/callers are not
 > decompiled).
+>
+> **RESOLVED (wake 93 / ADR-0494):** it is a **read**. `FUN_1026d790` is the
+> named-child copy helper — it resolves the name object's `vtable[0x18]` (the
+> `CStr` buffer), `CRegistry::FindChild(registry, name)`, then hands the found
+> child's value to the destination's `vtable[0x68]`. `FUN_10260940` (the function
+> `FUN_10265a70` wraps) uses the *same* helper to load `MODEL`, `MODEL0..MODEL3`,
+> `MODEL_DUMMY`, `PHYSMODEL`, `ATTACHMODEL`, `SOUND_*`, `ANIM_*`, `ANIMGRAPH2`,
+> `EFFECTLIST`, `PICKUPMSG` from the item definition, so the direction is
+> definition → object. `FUN_10265a70` = the item model loader **plus** a
+> `VIEWMODEL` read; it is slot 8 of `CRPG_Object_Collectible`'s vtable
+> (`GameClasses2009_ViewmodelConsumer.txt`).
 
     10265a70  8b 44 24 0c        mov  eax,[esp+0Ch]
     ...
@@ -210,6 +231,14 @@ request is not enough for this DLL.
 > decompilation") no longer holds — `FUN_10265a70` and `FUN_100162e0` are
 > decompiled in `GameClasses2009_ViewmodelDecompiled.txt`. `FUN_10265ab0` is
 > still raw-scan only.
+>
+> **CORRECTED (wake 93 / ADR-0494):** the "reads or writes" bullet is resolved on
+> the **read** side — `FUN_1026d790` is the named-child copy helper
+> (`FindChild(name)` → child value → destination `vtable[0x68]`), used identically
+> by the item model loader `FUN_10260940` for `MODEL`/`MODEL0..3`/`ATTACHMODEL`/…
+> The *class* is `CRPG_Object_Collectible` (not `CRPG_Object_Inventory`). Whether
+> the *player's first-person arms* are this property is **not** supported: no
+> weapon-class vtable holds the site.
 
 - **No decompilation.** `FUN_10265a70` and `FUN_10265ab0` are located by raw scan
   (SEH/leaf prologue + the property-name `push`), not recovered by Ghidra. The

@@ -304,6 +304,26 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   "persist a snapshot" route does not reduce cost. Read-vs-set at the site is
   still open (its callees/callers are not decompiled). Recorded in
   `docs/rea/reference/GameClasses2009_ViewmodelDecompiled.txt`. See ADR-0493.
+- **ADR-0494 — the `VIEWMODEL` property is the *collectible* class's model-load
+  override, and it is a **read**, not a set.** ADR-0493's two open questions are
+  answered read-only on the same 2009 module. `FUN_1026d790` is the named-child
+  copy helper (`name = arg->vtable[0x18]()`; `CRegistry::FindChild(registry, name)`;
+  the found child's value → destination `vtable[0x68]`), and the item model loader
+  `FUN_10260940` uses the *same* helper for `MODEL`/`MODEL0..MODEL3`/`MODEL_DUMMY`/
+  `PHYSMODEL`/`ATTACHMODEL`/`SOUND_*`/`ANIM_*`/`ANIMGRAPH2`/`EFFECTLIST`/`PICKUPMSG`
+  — so the direction is *definition → object* and the `VIEWMODEL` site is a **read**
+  of the item definition. `rea xrefs 0x10265a70` returns exactly one incoming
+  reference, the `.rdata` slot `0x10759ed4` (vtable slot **8** of `0x10759eb4`),
+  whose `-4` RTTI (`0x107ab9d4` → TypeDescriptor `0x1082d888`) names the class
+  **`CRPG_Object_Collectible`** — *not* `CRPG_Object_Inventory` (the name-string
+  proximity ADR-0492 relied on is string-pooling order; the `.data` class registry
+  shows Inventory as a sibling of Collectible off `CRPG_Object`). Slot 8 is the
+  model-load virtual, implemented by `FUN_10260940` in
+  `CRPG_Object_Item`/`CreatureAttack`/`Telephone_Receiver` and **overridden** by
+  `FUN_10265a70` in `CRPG_Object_Collectible`; **no weapon-class vtable**
+  (`Gun`/`Melee`/`Ulaks`/`AngelusChain`) holds either function, so "the player's
+  first-person arms are the `VIEWMODEL` property" is **not** supported. Recorded in
+  `docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt`. See ADR-0494.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

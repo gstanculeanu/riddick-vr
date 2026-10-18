@@ -1,0 +1,527 @@
+# GameClasses_Win32_x86.dll (2009 Dark Athena) -- the VIEWMODEL *consumer* site:
+# `CRPG_Object_Collectible::slot 8`, its model-property loader, and the READ direction
+# (GH #67 step 1; corrects ADR-0492 sec 2/sec 5 and ADR-0493 sec 'not claimed')
+#
+# subject : F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll
+#           size 9,016,560 B
+#           sha256 d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79
+#           image base 0x10000000   format PE   architecture x86   6 sections
+# provider: Ghidra 12.1.4 (the REA `ghidra` provider, official headless script)
+# method  : read-only. REA imports an *ephemeral* copy of the module into a temp
+#           project; the install is never written (import_mode
+#           "ephemeral-source-immutable", the provider's own analysis profile).
+#           The static tables (RTTI / vtable / class registry / PE section map) were
+#           read from the same file bytes with a local script (no REA request).
+# purpose : GH #67 step 1. ADR-0492 recorded, by raw byte scan, that the engine's
+#           `VIEWMODEL` property (with ATTACHPOINT/ATTACHROTTRACK) has exactly one
+#           code xref, the `push "VIEWMODEL"` inside FUN_10265a70, and attributed
+#           the cluster to `CRPG_Object_Inventory`. ADR-0493 decompiled FUN_10265a70
+#           (`{ FUN_10260940(); CStr("VIEWMODEL"); FUN_1026d790(); }`) and left two
+#           questions open: *read or set?*, and *who is the consumer?* This file
+#           records the two decompilations + the static-table reads that answer both
+#           in the negative: the site is a READ, on CRPG_Object_Collectible, and no
+#           weapon class (Gun/Melee/Ulaks/AngelusChain) reads that name at all -- so
+#           'the player's FP arms are this property' is NOT supported by it.
+# ------------------------------------------------------------------------------
+
+## 0. Requests made (read-only; ~6.4 min each)
+
+    $env:REA_GHIDRA_STARTUP_TIMEOUT_MS = "1500000"
+    rea decompile "...\Content\GameClasses_Win32_x86.dll" --procedure 0x1026d790 --format json
+      # exit 0, wall 390 s   evidence_id ev_0b24bca8606fde1c087f1c48f68cef36d196be5ac4920bbddc73c92e94b66edb
+    rea decompile "...\Content\GameClasses_Win32_x86.dll" --procedure 0x10260940 --format json
+      # exit 0, wall 378 s   evidence_id ev_454d2f4330305788b2eb186d3a1d58c11c504de8cf955591cd0ebcd26a6311da
+    rea xrefs     "...\Content\GameClasses_Win32_x86.dll" --address 0x10265a70 --format json
+      # exit 0, wall 369 s   evidence_id ev_5e38069e6a53dab296ca333ef3c4606762d2f31cdd60ac07afe428bf5d9b0bab
+
+    (2026-10-18, autoloop wake 93. provider.id = ghidra, provider.version = 12.1.4,
+     subject.digest.sha256 = d7e81d7d3726..., confidence = observed,
+     authority = shipped-artifact, in every response.)
+
+## 1. `rea xrefs 0x10265a70` -- the site is reached ONLY as a vtable slot
+
+    [ "0x10759ed4" ]
+
+A single incoming reference, and it is a **data** location in `.rdata` (0x1075xxxx),
+not a call. A local scan of the whole image for the little-endian pattern of
+0x10265a70 finds exactly the same one occurrence:
+
+    0x10759ed4  (in .rdata)  == 0x10265a70
+
+so no function calls `FUN_10265a70`; it is only ever reached through a virtual slot.
+
+## 2. `FUN_1026d790` -- the named-child copy helper (verbatim)
+
+Ghidra `procedure_pseudo_code`:
+
+```
+void FUN_1026d790(int param_1,undefined4 param_2,CRegistry *param_3)
+
+{
+  int iVar1;
+  char *pcVar2;
+  CRegistry *pCVar3;
+  int *piVar4;
+  undefined4 uVar5;
+  undefined1 auStack_14 [8];
+  void *pvStack_c;
+  undefined1 *puStack_8;
+  uint local_4;
+  
+  puStack_8 = &LAB_10708ba0;
+  pvStack_c = ExceptionList;
+  local_4 = 0;
+  ExceptionList = &pvStack_c;
+  if (param_3 != (CRegistry *)0x0) {
+    ExceptionList = &pvStack_c;
+    pcVar2 = (char *)(**(code **)(param_1 + 0x18))();
+    pCVar3 = CRegistry::FindChild(param_3,pcVar2);
+    if (pCVar3 != (CRegistry *)0x0) {
+      piVar4 = (int *)(**(code **)(*(int *)pCVar3 + 0x1b4))(auStack_14);
+      iVar1 = *(int *)param_3;
+      puStack_8 = (undefined1 *)CONCAT31(puStack_8._1_3_,1);
+      uVar5 = (**(code **)(*piVar4 + 0x14))(1);
+      (**(code **)(iVar1 + 0x68))(uVar5);
+      local_4 = local_4 & 0xffffff00;
+      FUN_10016920();
+    }
+  }
+  local_4 = 0xffffffff;
+  FUN_10016920();
+  ExceptionList = pvStack_c;
+  return;
+}
+```
+
+Reading (with the call sites in sec 3): `pcVar2 = param_1->vtable[0x18]()` is the
+name (the temporary `CStr` built by the caller), `CRegistry::FindChild(param_3, name)`
+looks the named child up in a registry, and the found child's value
+(`child->vtable[0x1b4]()` -> `temp->vtable[0x14](1)`) is handed to the destination's
+`vtable[0x68]`. Direction is therefore **definition registry -> object**: the object
+is filled from the definition, not written back into it.
+
+## 3. `FUN_10260940` -- the *item model-property loader* (verbatim)
+
+`FUN_10265a70` (ADR-0493) is `{ FUN_10260940(); CStr("VIEWMODEL"); FUN_1026d790(); }`,
+so this is the shared loader it extends. Ghidra `procedure_pseudo_code`:
+
+```
+void FUN_10260940(CRegistry *param_1,int *param_2,int *param_3)
+
+{
+  int iVar1;
+  char cVar2;
+  short sVar3;
+  CRegistry *pCVar4;
+  int iVar5;
+  int *piVar6;
+  char *pcVar7;
+  int in_ECX;
+  int iStack_43c;
+  int iStack_434;
+  int iStack_430;
+  undefined1 auStack_42c [8];
+  CRegistry *local_424;
+  undefined **ppuStack_41c;
+  undefined **ppuStack_418;
+  undefined **ppuStack_31c;
+  void *local_14;
+  undefined1 *puStack_10;
+  undefined4 uStack_c;
+  
+  uStack_c = 0xffffffff;
+  puStack_10 = &LAB_10707f70;
+  local_14 = ExceptionList;
+  ExceptionList = &local_14;
+  if (DAT_10849b04 != '\0') {
+    ExceptionList = &local_14;
+    FUN_100162e0("JOURNALIMAGE");
+    FUN_1026d990();
+  }
+  cVar2 = FUN_1025de40();
+  if (cVar2 == '\0') {
+    FUN_100162e0("MODEL");
+    FUN_1026d790();
+    FUN_100162e0("MODEL0");
+    FUN_1026d790();
+    FUN_100162e0("MODEL1");
+    FUN_1026d790();
+    FUN_100162e0("MODEL2");
+    FUN_1026d790();
+    FUN_100162e0("MODEL3");
+    FUN_1026d790();
+    pCVar4 = CRegistry::FindChild(param_1,"MODEL_DUMMY");
+    local_424 = pCVar4;
+    if (pCVar4 != (CRegistry *)0x0) {
+      iVar5 = (**(code **)(*(int *)pCVar4 + 0x34))();
+      iStack_430 = 0;
+      if (0 < iVar5) {
+        do {
+          piVar6 = (int *)(**(code **)(*(int *)pCVar4 + 0x3c))();
+          if (piVar6 != (int *)0x0) {
+            piVar6 = (int *)(**(code **)(*piVar6 + 0x1b4))();
+            iVar1 = *param_2;
+            puStack_10 = (undefined1 *)0x0;
+            (**(code **)(*piVar6 + 0x14))();
+            (**(code **)(iVar1 + 0x68))();
+            uStack_c = 0xffffffff;
+            FUN_10016920();
+            pCVar4 = local_424;
+          }
+          iStack_430 = iStack_430 + 1;
+        } while (iStack_430 < iVar5);
+      }
+    }
+    pCVar4 = CRegistry::FindChild(param_1,"PHYSMODEL");
+    if (pCVar4 != (CRegistry *)0x0) {
+      (**(code **)(*(int *)pCVar4 + 0x1b4))();
+      puStack_10 = (undefined1 *)0x1;
+      FUN_10017c00();
+      puStack_10._0_1_ = 2;
+      FUN_100169d0();
+      puStack_10 = (undefined1 *)CONCAT31(puStack_10._1_3_,1);
+      FUN_10016920();
+      iVar5 = *param_2;
+      (**(code **)(iStack_43c + 0x14))();
+      (**(code **)(iVar5 + 0x6c))();
+      uStack_c = 0xffffffff;
+      FUN_10016920();
+    }
+    FUN_100162e0("ATTACHMODEL");
+    FUN_1026d790();
+    FUN_100162e0("SOUND_CAST");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_CAST_PLAYER");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_CAST_PLAYER_LEFT");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_CAST_PLAYER_RIGHT");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_CAST_LEFTITEM_PLAYER");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_HOLD");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_END");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_LEARNED");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_EQUIP");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_UNEQUIP");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_DROPPED");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_PICKUP");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_ANIM0");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_ANIM1");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_ANIM2");
+    FUN_1026d840();
+    FUN_100162e0("SOUND_ANIM3");
+    FUN_1026d840();
+    FUN_10007450();
+    uStack_c = 3;
+    ppuStack_418 = TFStr<252>::vftable;
+    FUN_10003400();
+    uStack_c = 4;
+    FUN_1026de20();
+    uStack_c = 0xffffffff;
+    FUN_100016a0();
+    if (DAT_10849b04 != '\0') {
+      FUN_100162e0("ICONSURFACE");
+      FUN_1026d990();
+      FUN_100162e0("AMMOICONSURFACE");
+      FUN_1026d990();
+      FUN_100162e0("HUDSURFACE");
+      FUN_1026d990();
+      FUN_100162e0("ACTIVATIONSURFACE");
+      FUN_1026d990();
+      FUN_100162e0("EXTRASURFACE");
+      FUN_1026d990();
+    }
+    FUN_100162e0("ANIM_HOLD");
+    FUN_1026f0f0();
+    FUN_100162e0("ANIM_ATTACK");
+    FUN_1026f0f0();
+    FUN_100162e0("ANIM_BLOCK");
+    FUN_1026f0f0();
+    FUN_100162e0("ANIM_RELOAD");
+    FUN_1026f0f0();
+    FUN_100162e0("ANIM_RELOAD_CROUCH");
+    FUN_1026f0f0();
+    FUN_100162e0("ANIM_EQUIP");
+    FUN_1026f0f0();
+    FUN_100162e0("ANIM_NOAMMOHOLD");
+    FUN_1026f0f0();
+    FUN_100162e0("ANIM_NOAMMO");
+    FUN_1026f0f0();
+    if (param_1 != (CRegistry *)0x0) {
+      pCVar4 = CRegistry::FindChild(param_1,"ANIMGRAPH2");
+      if (pCVar4 != (CRegistry *)0x0) {
+        piVar6 = (int *)(**(code **)(*(int *)pCVar4 + 0x1b4))();
+        iVar5 = *param_2;
+        puStack_10 = (undefined1 *)0x5;
+        (**(code **)(*piVar6 + 0x14))();
+        (**(code **)(iVar5 + 0x80))();
+        uStack_c = 0xffffffff;
+        FUN_10016920();
+        piVar6 = (int *)FUN_1025ef50();
+        if ((piVar6 != (int *)0x0) && (iVar5 = (**(code **)(*piVar6 + 0x54))(), iVar5 != 0)) {
+          if (*(undefined4 **)(iVar5 + 0x114) == (undefined4 *)0x0) {
+            sVar3 = 0;
+          }
+          else {
+            sVar3 = (short)**(undefined4 **)(iVar5 + 0x114);
+          }
+          local_424 = (CRegistry *)(int)sVar3;
+          iStack_430 = 0;
+          if (0 < (int)local_424) {
+            do {
+              FUN_10621df0();
+              FUN_10624730();
+              FUN_10621dc0();
+              uStack_c = 6;
+              FUN_10016720(auStack_42c);
+              (**(code **)(*param_3 + 0x5f0))();
+              uStack_c = 0xffffffff;
+              FUN_10016920();
+              iStack_430 = iStack_430 + 1;
+            } while (iStack_430 < (int)local_424);
+          }
+        }
+      }
+      pCVar4 = CRegistry::FindChild(param_1,"EFFECTLIST");
+      if (pCVar4 != (CRegistry *)0x0) {
+        local_424 = (CRegistry *)(**(code **)(*(int *)pCVar4 + 0x34))();
+        iStack_430 = 0;
+        if (0 < (int)local_424) {
+          do {
+            piVar6 = (int *)(**(code **)(*(int *)pCVar4 + 0x3c))();
+            (**(code **)(*piVar6 + 0x1b4))();
+            local_14 = (void *)0x7;
+            FUN_10017c00();
+            FUN_10016920();
+            iVar5 = *param_2;
+            (**(code **)(iStack_434 + 0x14))();
+            (**(code **)(iVar5 + 0x68))();
+            uStack_c = 0xffffffff;
+            FUN_10016920();
+            iStack_430 = iStack_430 + 1;
+          } while (iStack_430 < (int)local_424);
+        }
+      }
+      iStack_430 = 0;
+      do {
+        piVar6 = (int *)FUN_1000a010();
+        uStack_c = 8;
+        pcVar7 = (char *)(**(code **)(*piVar6 + 0x14))();
+        pCVar4 = CRegistry::FindChild(param_1,pcVar7);
+        uStack_c = 0xffffffff;
+        FUN_100016a0();
+        if (pCVar4 != (CRegistry *)0x0) {
+          piVar6 = (int *)(**(code **)(*(int *)pCVar4 + 0x1b4))();
+          puStack_10 = (undefined1 *)0x9;
+          FUN_10007450();
+          ppuStack_41c = TFStr<252>::vftable;
+          puStack_10._0_1_ = 10;
+          (**(code **)(*piVar6 + 100))();
+          (**(code **)(*piVar6 + 0x1c))();
+          FUN_10007410();
+          puStack_10 = (undefined1 *)CONCAT31(puStack_10._1_3_,0xc);
+          FUN_10016920();
+          FUN_100359f0();
+          FUN_100016a0();
+          iVar5 = *param_2;
+          (*(code *)ppuStack_41c[5])();
+          (**(code **)(iVar5 + 0x68))();
+          uStack_c = 0xffffffff;
+          FUN_100016a0();
+        }
+        iStack_430 = iStack_430 + 1;
+      } while (iStack_430 < 4);
+      pCVar4 = CRegistry::FindChild(param_1,"PICKUPMSG");
+      if (pCVar4 != (CRegistry *)0x0) {
+        piVar6 = (int *)(**(code **)(*(int *)pCVar4 + 0x1b4))();
+        puStack_10 = (undefined1 *)0xd;
+        FUN_10007450();
+        ppuStack_31c = TFStr<252>::vftable;
+        puStack_10._0_1_ = 0xe;
+        (**(code **)(*piVar6 + 100))();
+        (**(code **)(*piVar6 + 0x1c))();
+        FUN_10007410();
+        puStack_10._0_1_ = 0x10;
+        FUN_10016920();
+        piVar6 = (int *)FUN_100359f0();
+        iVar5 = *param_2;
+        puStack_10 = (undefined1 *)CONCAT31(puStack_10._1_3_,0x11);
+        (**(code **)(*piVar6 + 0x14))();
+        (**(code **)(iVar5 + 0x84))();
+        uStack_c = CONCAT31(uStack_c._1_3_,0x10);
+        FUN_100016a0();
+        uStack_c = 0xffffffff;
+        FUN_100016a0();
+      }
+    }
+    ExceptionList = local_14;
+    return;
+  }
+  *(byte *)(in_ECX + 0x2f8) = *(byte *)(in_ECX + 0x2f8) | 0x10;
+  ExceptionList = local_14;
+  return;
+}
+```
+
+Its whole shape is: for each property **name**, build a temporary `CStr`
+(`FUN_100162e0("NAME")`) and copy the named child of the definition registry into the
+object being loaded (`FUN_1026d790`), plus a few typed helpers for sounds
+(`FUN_1026d840`), surfaces (`FUN_1026d990`) and animations (`FUN_1026f0f0`). The named
+keys it loads, in order, are:
+
+    (DAT_10849b04) JOURNALIMAGE (FUN_1026d990)
+    MODEL  MODEL0  MODEL1  MODEL2  MODEL3        (FUN_1026d790)
+    MODEL_DUMMY (FindChild + iterate children -> object slot 0x68)
+    PHYSMODEL (FindChild -> object slot 0x6c)
+    ATTACHMODEL                                  (FUN_1026d790)
+    SOUND_CAST SOUND_CAST_PLAYER SOUND_CAST_PLAYER_LEFT SOUND_CAST_PLAYER_RIGHT
+    SOUND_CAST_LEFTITEM_PLAYER SOUND_HOLD SOUND_END SOUND_LEARNED SOUND_EQUIP
+    SOUND_UNEQUIP SOUND_DROPPED SOUND_PICKUP SOUND_ANIM0..3   (FUN_1026d840)
+    ICONSURFACE AMMOICONSURFACE HUDSURFACE ACTIVATIONSURFACE EXTRASURFACE
+      (FUN_1026d990, only when DAT_10849b04 != 0)
+    ANIM_HOLD ANIM_ATTACK ANIM_BLOCK ANIM_RELOAD ANIM_RELOAD_CROUCH ANIM_EQUIP
+    ANIM_NOAMMOHOLD ANIM_NOAMMO                    (FUN_1026f0f0)
+    ANIMGRAPH2 (FindChild -> object slot 0x80)
+    EFFECTLIST (FindChild, iterate, object slot 0x68)
+    PICKUPMSG (FindChild -> object slot 0x84)
+
+Two consequences: (a) `FUN_1026d790` is unambiguously the "read the named child of
+the definition into the object" helper -- the same one `VIEWMODEL` is passed to -- so
+the `VIEWMODEL` site is a **read** of the item definition; (b) this loader is the
+engine's *item model* pipeline, which is the pipeline the FAMILY-open question of
+GH #63/#67 has to be answered in (models are named by definition keys, not by GL
+state).
+
+## 4. The `VIEWMODEL` site is `CRPG_Object_Collectible` slot 8 (RTTI-verified)
+
+Vtable 0x10759eb4 begins immediately after an MSVC RTTI CompleteObjectLocator at
+0x10759eb0 = 0x107ab9d4. Reading the static bytes (VA -> file offset via the PE
+section map; `.rdata` is VA 0x1073b000 raw 0x73b000, so VA 0x10759ed4 = file
+0x759ed4):
+
+    .rdata 0x10759eb4 : slot 0  0x1025e150
+    .rdata 0x10759eb8 : slot 1  0x10001690
+    .rdata 0x10759ebc : slot 2  0x10265c90
+    .rdata 0x10759ec0 : slot 3  0x100016b0
+    .rdata 0x10759ec4 : slot 4  0x100016e0
+    .rdata 0x10759ec8 : slot 5  0x1024c680
+    .rdata 0x10759ecc : slot 6  0x1024cc80
+    .rdata 0x10759ed0 : slot 7  0x1026eda0
+    .rdata 0x10759ed4 : slot 8  FUN_10265a70   <-- pushes "VIEWMODEL"
+    .rdata 0x10759ed8 : slot 9  0x10261f80
+    .rdata 0x10759edc : slot 10 0x10264fa0
+    .rdata 0x10759ee0 : slot 11 0x1024c6c0
+    .rdata 0x10759ee4 : slot 12 FUN_10265ab0   <-- ATTACHROTTRACK/ATTACHPOINT
+    .rdata 0x10759f18 : slot 25 FUN_10265a40
+
+RTTI: 0x10759eb0 = 0x107ab9d4 -> `{ signature 0, offset 0, cdOffset 0,
+pTypeDescriptor 0x1082d888, pClassDescriptor 0x107ab9e8 }`; the TypeDescriptor at
+0x1082d888 carries the name
+
+    .?AVCRPG_Object_Collectible@@
+
+so the vtable (and the sole `VIEWMODEL` slot) belongs to **`CRPG_Object_Collectible`**.
+Slot 12 of the same vtable is the `ATTACHPOINT`/`ATTACHROTTRACK` reader ADR-0492
+found -- i.e. ADR-0492's "one neighbourhood" (0x10265a40/0x10265a70/0x10265ab0) is
+one **class's** adjacent virtual methods, and the class is Collectible, not Inventory.
+
+## 5. The class registry and the hierarchy (`.data`)
+
+The `CRPG_*` class registry is a table of records `{ char* name; void* factory;
+record* parent; ... }` in `.data` around 0x1082d838..0x1082dda0. Decoded (word 0 of
+each record is the class-name pointer, word 1 the factory, word 2 the parent record):
+
+    class                        factory     parent
+    CRPG_Object                  0x1026f240  CReferenceCount
+    CRPG_Object_Item             0x10265d90  CRPG_Object
+    CRPG_Object_Collectible      0x10265e00  CRPG_Object_Item
+    CRPG_Object_Inventory        0x10269210  CRPG_Object
+    CRPG_Object_AngelusChain     0x10269740  CRPG_Object_Weapon
+    CRPG_Object_Gun              0x10269aa0  CRPG_Object_Weapon
+    CRPG_Object_Melee            0x1026b9a0  CRPG_Object_Item
+    CRPG_Object_Ulaks            0x1026ba10  CRPG_Object_Melee
+    CRPG_Object_RocketMelee      0x1026ba80  CRPG_Object_Summon
+    CRPG_Object_CreatureAttack   0x1026d4f0  CRPG_Object_Item
+    CRPG_Object_Char             0x10273150  CRPG_Object
+    CRPG_Object_Ammo             0x102741f0  CRPG_Object_Item
+
+`CRPG_Object_Collectible` sits between `CRPG_Object_Item` and its own subclasses;
+`CRPG_Object_Inventory` is a *sibling* branch off `CRPG_Object`, not the owner of the
+`VIEWMODEL` slot. The .rdata proximity ADR-0492 relied on (`"VIEWMODEL" 0x1075a144`,
+`"CRPG_Object_Inventory" 0x1075a16c`) is string-pooling order, not class membership.
+
+## 6. Which classes own the loader, and where the `VIEWMODEL` override sits
+
+An image-wide scan for the 4-byte value of each address, resolved to the vtable that
+holds it (walk back to the preceding RTTI pointer) and its RTTI name:
+
+    FUN_10260940 (the loader)     0x107572fc -> vtable 0x107572dc slot  8  CRPG_Object_Item
+    FUN_10260940 (the loader)     0x1075aa2c -> vtable 0x1075aa0c slot  8  CRPG_Object_CreatureAttack
+    FUN_10260940 (the loader)     0x1078959c -> vtable 0x1078957c slot  8  CRPG_Object_Telephone_Receiver
+    FUN_10265a70 (VIEWMODEL)      0x10759ed4 -> vtable 0x10759eb4 slot  8  CRPG_Object_Collectible
+    FUN_10265ab0 (ATTACH*)        0x10759ee4 -> vtable 0x10759eb4 slot 12  CRPG_Object_Collectible
+
+Slot 8 is the item's **model-load virtual**. The base implementation is
+`FUN_10260940` (Item / CreatureAttack / Telephone_Receiver); `CRPG_Object_Collectible`
+**overrides** it with `FUN_10265a70`, which calls the base loader and then *also* reads
+`VIEWMODEL`. No vtable of any weapon class (`Gun`, `Melee`, `Ulaks`, `AngelusChain`, ...)
+holds either function, and the `VIEWMODEL` literal has no other code xref, so the
+`VIEWMODEL` property is read only by the collectible class's own model-load override.
+
+## 7. What this resolves (GH #67 step 1) and what it does not
+
+Resolved:
+
+- **read, not set:** the `VIEWMODEL` literal is a *definition key read* at
+  model-load time (`FindChild(name)` -> child value -> object property slot 0x68;
+  sec 2/3). ADR-0492's "read-vs-set not resolved" is closed on the READ side.
+- **the owner:** `CRPG_Object_Collectible` slot 8 (RTTI-verified, sec 4) -- ADR-0492's
+  `CRPG_Object_Inventory` attribution is corrected (sec 5).
+- **the consumer path:** it is the item *model* pipeline (`FUN_10260940`'s key list,
+  sec 3): the engine names item models by definition keys, including a `VIEWMODEL`
+  override on the collectible class.
+
+Not resolved / honest limits:
+
+- **It is NOT established that the player's first-person arms are this property.**
+  No weapon class reads `VIEWMODEL`; the property is read only by the *collectible*
+  class's model-load override. (That a collectible is the item you pick up / inspect is
+  an inference from the class name and the class list in sec 5, not a measurement.)
+  ADR-0492's consequence "the arms reach GL as an already-transformed, item-owned model"
+  is therefore weakened: the only item-owned model reference the engine reads under this
+  name belongs to the collectible class.
+- The object-side member that receives the value (destination vtable slot 0x68) is not
+  traced to a `CXR_ModelInstance` creation; that consumer is still not located.
+- The roles of `FUN_1026d790`'s two object parameters (registry vs destination) are as
+  Ghidra rendered them and are not fully disambiguated; the direction claim rests on
+  the *usage pattern* in `FUN_10260940` (a loader that fills an object from a
+  definition), not on the parameter binding.
+- Nothing about the 2004 (*Escape from Butcher Bay*) module: this file is the 2009
+  build only.
+- Whether the arms are drawn at all on the sampled passive/unarmed level start
+  (ADR-0491/0492's open state question) is untouched here.
+
+## 8. Reproducer for the static-table reads (no REA request)
+
+The vtable/RTTI/class-registry/hierarchy facts come from the file bytes. A PE section
+map (6 sections) resolves VA -> file offset; `.rdata` VA 0x1073b000 / raw 0x73b000,
+`.data` VA 0x10820000 / raw 0x820000:
+
+    # vtable start: walk back from the slot while the preceding dword is a .text pointer
+    slot  = 0x10759ed4                       # -> start 0x10759eb4, slot index 8
+    col   = u32(0x10759eb0)                  # 0x107ab9d4 (MSVC RTTI COL)
+    td    = u32(col + 0x0C)                  # 0x1082d888
+    name  = cstr(td + 8)                     # '.?AVCRPG_Object_Collectible@@'
+    # class registry records: {name, factory, parent} at 0x1082d838..0x1082dda0
+    # 4-byte occurrence scan for 0x10265a70 / 0x10260940 over the whole image
+

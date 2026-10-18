@@ -1,5 +1,16 @@
 # ADR-0492: The engine's first-person viewmodel is an item *property* of `CRPG_Object_Inventory`, not a GL pass (GH #67 step 1, engine-side identification)
 
+> **CORRECTED IN PART (wake 93 / ADR-0494).** The property names and their single
+> code xrefs are as recorded here, but the *class* attribution is wrong: the vtable
+> holding the `VIEWMODEL` site (`0x10759ed4`, slot 8) is
+> **`CRPG_Object_Collectible`**'s (RTTI `0x1082d888`), not
+> `CRPG_Object_Inventory`'s — the `.rdata` name-string proximity was string
+> pooling. The site is also resolved to be a **read** of the item definition
+> (`FUN_1026d790` = named-child copy helper), and **no weapon class reads
+> `VIEWMODEL`**, so "the first-person arms are this property" is not supported.
+> See `docs/adr/0494-gh67-viewmodel-is-the-collectible-model-load-override.md`
+> and `docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt`.
+
 - Status: Accepted (scheduled autoloop wake 90, GH #67)
 - Date: 2026-10-18
 - Related: GH #67 (this), GH #63 / GH #66 (the suppression boundary), GH #68

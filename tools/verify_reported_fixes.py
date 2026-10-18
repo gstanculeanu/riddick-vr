@@ -507,6 +507,36 @@ def main():
             "--snapshot measured NOT to be a cross-call cache and 0x100162e0 identified "
             "as CStr::CStr (ADR-0493)")
 
+    # GH #67 step 1 (twelfth correction, ADR-0494): the two questions ADR-0493 named
+    # are answered -- the VIEWMODEL site is a READ (FUN_1026d790 is the named-child
+    # copy helper, used identically by the item model loader FUN_10260940 for
+    # MODEL/MODEL0..3/ATTACHMODEL/...), and the owning class is
+    # CRPG_Object_Collectible (vtable 0x10759eb4, slot 8 = 0x10759ed4, RTTI
+    # 0x1082d888), NOT CRPG_Object_Inventory. No weapon-class vtable holds the site,
+    # so "the player's FP arms are this property" is not supported. Pin the artifact
+    # + the ADR so the correction cannot silently rot.
+    vm_cons = ROOT / "docs/rea/reference/GameClasses2009_ViewmodelConsumer.txt"
+    _vm_cons_text = vm_cons.read_text(encoding="utf-8") if vm_cons.exists() else ""
+    require(vm_cons.exists() and
+            "d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79" in _vm_cons_text and
+            "CRPG_Object_Collectible" in _vm_cons_text and
+            ".?AVCRPG_Object_Collectible@@" in _vm_cons_text and
+            "0x10759eb4" in _vm_cons_text and
+            "0x10759ed4" in _vm_cons_text and
+            "0x1082d888" in _vm_cons_text and
+            "FUN_1026d790" in _vm_cons_text and
+            "FUN_10260940" in _vm_cons_text and
+            "ATTACHMODEL" in _vm_cons_text and
+            "PICKUPMSG" in _vm_cons_text and
+            "0x1075aa0c" in _vm_cons_text and
+            "0x1078957c" in _vm_cons_text and
+            (ROOT / "docs/adr/0494-gh67-viewmodel-is-the-collectible-model-load-override.md").exists() and
+            "ADR-0494" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8"),
+            "GH #67: the VIEWMODEL property must stay recorded as a *read* of the item "
+            "definition by CRPG_Object_Collectible's model-load override (slot 8 of "
+            "vtable 0x10759eb4), with the base loader FUN_10260940's key list and the "
+            "measured absence from every weapon-class vtable (ADR-0494)")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.
