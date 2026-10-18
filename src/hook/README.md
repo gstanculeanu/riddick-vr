@@ -120,14 +120,39 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   selects the opener). The signature is PROVISIONAL and is confirmed via the
   per-frame `Viewmodel suppression [#N]: last frame draws=.. suppressed=..` log
   line on a headset before it is trusted. See ADR-0439.
-- **`NearPlaneDrop` is inert on the 2009 target as measured (ADR-0487).** The
-  engine loads its projection through `glLoadMatrixf` (never `glFrustum`), and
-  the hook's `m[14]/(m[10]-1)` near extraction rejects every load, so the pass
-  trace shows `P?` and the near-drop test never has an input. On a live level
-  `ViewmodelWindowOpener=2` counted `arrayIn=0` in 21/21 intervals while
-  `ViewmodelObserve=1` was on. The opener stays supported (a fixed extraction
-  would make it usable); do not read a silent near-drop window as "the engine
-  has no short near plane".
+- **`NearPlaneDrop` now fires: the engine's projection is z-flipped, and the
+  near extraction was the gap (ADR-0487 → ADR-0488).** The engine loads its
+  projection through `glLoadMatrixf` (never `glFrustum`), and its matrix carries
+  `m[11] == +1` with `m[10] = +(f+n)/(f-n)` — the opposite z orientation to the
+  classic GL form — so the classic `m[14]/(m[10]-1)` returned **-far** and
+  rejected every load (the pass trace read `P?`, `worldNear_` was never set).
+  `projection_near.h` (`ExtractProjectionNear`, pure, unit-tested by
+  `projection_near`) implements both orientations, keyed on the sign of `m[11]`.
+  Measured live (wake 87): the world pass is `P4.0` (`m10=1.00391 m11=+1
+  m14=-8.01566` → near 4.0 / far 2048), a second pass is `P1.8`, and the sampled
+  near-plane-drop pass is `P0.1`. With `ViewmodelWindowOpener=2` the window now
+  opens (measured: 1322 in-window draws at one interval, `viewmodel_pass_identified`
+  PASS) — the opener's premise is expressed on the engine, and the previous
+  "never opens" reading is retracted. The raw matrix and both extractions are
+  logged (`ViewmodelProbe proj [#N]: … classic=.. near=..`) so the convention
+  stays auditable; XRSIM grades `projection_near_extracted` (`FAIL` if the
+  extraction still rejects the engine's matrix).
+- **ADR-0489 — the window's contents are sampled per interval, and the strict
+  gate keeps the last one.** `viewmodel_probe_stats` now retains **every**
+  `ViewmodelProbe submission fp:` sample (the per-label slot still holds the
+  last), because a run samples one in-window draw per 300-swap interval and the
+  intervals differ: on the wake-87 level the depth-only window sampled a
+  **14688-count volumetric** draw (extent 0.80 × 0.88 × 0.30) in **1 of 18**
+  intervals and the near-plane-drop window the same 14688-count mesh in **1 of
+  3** — while both runs' *last* interval was the 2520-count / 12-count plane.
+  The strict `viewmodel_candidate_is_volumetric` (ADR-0484) therefore still
+  FAILs on both (`planar/screen-space`), and a separate graded check
+  `viewmodel_volumetric_candidate_sampled` reports the observation
+  (`N/M sampled interval(s) had a volumetric in-window draw`). **Because both
+  openers sample the same 14688-count mesh, that check is not evidence that the
+  window isolates the arms** — the biggest in-window draw is still the wrong
+  candidate; only the *sampling* bug is fixed here, not the identification.
+
 - **GH #67 step 2 — observation-only identification.** The same depth-only-clear
   boundary also drives a non-suppressing probe: `ViewmodelObserve=1` opens the
   window and records, per sampled frame, how many draws fell **inside/outside**

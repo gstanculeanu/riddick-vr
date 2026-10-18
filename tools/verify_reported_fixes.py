@@ -342,14 +342,56 @@ def main():
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
             "viewmodel_opener_never_fired_is_visible" in xrsim_tool and
             "ADR-0487" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8") and
-            (ROOT / "docs/adr/0487-gh67-window-opener-does-not-isolate-the-viewmodel.md").exists(),
+            (ROOT / "docs/adr/0487-gh67-window-opener-does-not-isolate-the-viewmodel.md").exists() and
+            # GH #67 step 1 (sixth correction, ADR-0488): the near-plane extraction
+            # is the measurement the NearPlaneDrop opener depends on. The engine's
+            # z-flipped convention (m[11] > 0) must be handled by a pure, headless
+            # helper the hook uses, the raw matrix + both extractions must be
+            # logged, and XRSIM must grade the record (a still-rejecting
+            # extraction FAILs rather than skipping).
+            "ExtractProjectionNear" in
+            (ROOT / "src/hook/projection_near.h").read_text(encoding="utf-8") and
+            "kProjectionNearUnknown" in
+            (ROOT / "src/hook/projection_near.h").read_text(encoding="utf-8") and
+            (ROOT / "src/hook/projection_near.h").exists() and
+            "ExtractProjectionNear(m)" in proxy and
+            "ViewmodelProbe proj" in proxy and
+            "classic=%.6f near=%.6f" in proxy and
+            "projection_near.h" in cmake_text and
+            "projection_near_tests.cpp" in cmake_text and
+            "add_test(NAME projection_near" in cmake_text and
+            "VIEWMODEL_PROJECTION_RE" in xrsim_tool and
+            "viewmodel_projection_stats" in xrsim_tool and
+            '"projection_near_extracted"' in xrsim_tool and
+            "viewmodel_projection_near_extracted" in xrsim_tool and
+            "viewmodel_projection_rejected_load_is_not_known" in xrsim_tool and
+            "test_viewmodel_projection_lines_are_parsed" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "test_projection_near_check_grades_the_extraction" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0488-gh67-projection-near-convention.md").exists() and
+            # GH #67 step 1 (seventh correction, ADR-0489): every sampled interval
+            # must be retained (the last one is still the strict gate's sample) and
+            # the run must report the volumetric in-window observation separately,
+            # so a mesh seen once is neither discarded nor mistaken for an
+            # identified pass.
+            "viewmodel_candidate_best" in xrsim_tool and
+            '"samples": submission_sample_list' in xrsim_tool and
+            '"viewmodel_volumetric_candidate_sampled"' in xrsim_tool and
+            "viewmodel_candidate_best_is_volumetric" in xrsim_tool and
+            "viewmodel_candidate_best_falls_back_to_last" in xrsim_tool and
+            "test_viewmodel_volumetric_sample_is_reported_apart_from_the_strict_gate" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0489-gh67-all-sampled-intervals.md").exists(),
             "GH #67: the submitted-vertex capture (client array sampled at "
             "glDrawElements, array vs display-list split by the FP window, the "
             "window's largest decodable draw as the arms candidate) must be "
             "inert by default, parsed by XRSIM and unit-tested (ADR-0482/0483), "
             "and the sampled candidate's *shape* must be graded -- a planar "
             "in-window draw is a screen-space element, not the viewmodel "
-            "(ADR-0484)")
+            "(ADR-0484); the perspective near plane must come from the engine's "
+            "own z-flipped convention so the NearPlaneDrop opener is measurable "
+            "(ADR-0488)")
 
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,

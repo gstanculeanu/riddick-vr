@@ -423,6 +423,17 @@ VIEWMODEL_SUBMISSION_SAMPLE_RE = re.compile(
     r"ViewmodelProbe submission (fp|world): first=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
     r"min=\(([-\d.]+),([-\d.]+),([-\d.]+)\) max=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
     r"n=(\d+)(?: count=(\d+))? indexType=(\d+) vertexType=(\d+) valid=([01])")
+# GH #67 step 1 (sixth correction, ADR-0488): the projection matrix behind each
+# sampled perspective load, so the engine's near-plane convention is auditable
+# (the pass trace's `P?` was a hook-side extraction failure). `classic` is the
+# previous `m14/(m10-1)`; on the engine's z-flipped matrix it is `-far`, which is
+# why every load read `P?`. `near` is the (now corrected) extraction, 0 = unknown.
+# `m10`/`m11`/`m14`/`m15` are column-major as `glLoadMatrixf` takes them.
+VIEWMODEL_PROJECTION_RE = re.compile(
+    r"ViewmodelProbe proj \[#(\d+)\]: m0=([-\d.]+) m5=([-\d.]+) m10=([-\d.]+) "
+    r"m11=([-\d.]+) m14=([-\d.]+) m15=([-\d.]+) persp=([01]) "
+    r"classic=([-\d.]+) near=([-\d.]+)")
+
 _MATRIX_ROW_RE = re.compile(r"\[([-\d.eE ]+)\]")
 
 # GH #71 requirement 1 / GH #80 follow-up: the sim input bridge's observation
@@ -1180,6 +1191,38 @@ def viewmodel_window_ran(probe):
     }
 
 
+def viewmodel_projection_stats(log_text):
+    """GH #67 step 1 (sixth correction, ADR-0488): the projections behind the probe.
+
+    Pure. Each ``ViewmodelProbe proj`` line records one sampled perspective load's
+    matrix depth row (``m10``/``m11``/``m14``/``m15``), the *classic* extraction
+    ``m14/(m10-1)`` and the hook's extraction (``near``, 0 = unknown). Returns
+    ``{"lines": [...], "perspective": int, "near_known": int, "distinct": int}``;
+    an empty ``lines`` list means a pre-#0488 hook (or ``ViewmodelObserve=0``), so
+    callers must *skip*, not fail.
+    """
+    lines = []
+    for m in VIEWMODEL_PROJECTION_RE.finditer(log_text or ""):
+        lines.append({
+            "index": int(m.group(1)),
+            "m0": float(m.group(2)), "m5": float(m.group(3)),
+            "m10": float(m.group(4)), "m11": float(m.group(5)),
+            "m14": float(m.group(6)), "m15": float(m.group(7)),
+            "perspective": m.group(8) == "1",
+            "classic": float(m.group(9)), "near": float(m.group(10)),
+        })
+    known = [ln for ln in lines if ln["perspective"] and ln["near"] > 0.0]
+    return {
+        "lines": lines,
+        "perspective": sum(1 for ln in lines if ln["perspective"]),
+        "near_known": len(known),
+        # How many distinct (m10, m11, m14, near) tuples the run loaded: the count
+        # of projection conventions present is the evidence a near-plane *drop*
+        # between passes is even expressible (the NearPlaneDrop opener's premise).
+        "distinct": len({(ln["m10"], ln["m11"], ln["m14"], ln["near"]) for ln in lines}),
+    }
+
+
 def viewmodel_probe_stats(log_text):
     """GH #67 step 2: summarise the observation-only first-person viewmodel probe.
 
@@ -1256,8 +1299,10 @@ def viewmodel_probe_stats(log_text):
             "inside_sampled": m.group(9) == "1", "outside_sampled": m.group(10) == "1",
         })
     submission_samples = {}
+    submission_sample_list = []
     for m in VIEWMODEL_SUBMISSION_SAMPLE_RE.finditer(text):
         sample = {
+            "label": m.group(1),
             "first": [float(m.group(2)), float(m.group(3)), float(m.group(4))],
             "min": [float(m.group(5)), float(m.group(6)), float(m.group(7))],
             "max": [float(m.group(8)), float(m.group(9)), float(m.group(10))],
@@ -1269,6 +1314,13 @@ def viewmodel_probe_stats(log_text):
         # GH #67 (ADR-0484): the sample's geometry -- planar (a screen-space
         # element) or volumetric (a mesh, the required shape of an arms mesh).
         sample["geometry"] = viewmodel_candidate_geometry(sample)
+        submission_sample_list.append(sample)
+        # GH #67 (seventh correction, ADR-0489): the per-label slot keeps the LAST
+        # sample (back-compatible), but every sampled interval is now retained --
+        # a run samples one draw per 300-swap interval and the contents differ
+        # between intervals (measured: the same near-plane-drop run sampled both a
+        # 14688-count volumetric mesh and a 2520-count plane), so grading only the
+        # last interval made the verdict depend on which interval was sampled last.
         submission_samples[m.group(1)] = sample
     return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates,
             "program_lines": program,
@@ -1286,7 +1338,33 @@ def viewmodel_probe_stats(log_text):
                 "list_outside": sum(s["list_outside"] for s in submission),
                 "fp": submission_samples.get("fp"),
                 "world": submission_samples.get("world"),
+                "samples": submission_sample_list,
             } if submission else None}
+
+
+def viewmodel_candidate_best(samples):
+    """GH #67 step 1 (seventh correction, ADR-0489): the run's best first-person
+    candidate, over *every* sampled interval.
+
+    Pure. ``samples`` is the parsed ``submission.samples`` list (each entry
+    carries ``label``/``count``/``geometry``). Returns
+    ``{"sampled", "volumetric", "best", "geometry", "last"}`` where ``best`` is
+    the largest-count *volumetric* sample when any interval sampled one, else the
+    last sample (so a plain run still reports its most recent observation). The
+    graded shape question is "did the window ever hold a 3-D mesh", so it must not
+    be decided by the arbitrary last interval of the run.
+    """
+    fps = [s for s in (samples or []) if s.get("label") == "fp"]
+    vols = [s for s in fps if (s.get("geometry") or {}).get("volumetric")]
+    pick = max(vols, key=lambda s: s.get("count") or 0) if vols else (fps[-1] if fps else None)
+    return {
+        "sampled": len(fps),
+        "volumetric": len(vols),
+        "best": pick,
+        "geometry": (pick or {}).get("geometry"),
+        "last": fps[-1] if fps else None,
+    }
+
 
 
 def content_gate_stats(host_log):
@@ -2698,14 +2776,15 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
         checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
                        "ok": True, "skip": True,
                        "detail": "no ViewmodelProbe lines (ViewmodelObserve=0 or pre-#67 host)"})
-    # GH #67 step 1 (ADR-0484): identifying the *window* is not identifying the
-    # *viewmodel*. The window's largest decodable draw must be a 3-D mesh; a
-    # planar sample is a screen-space element (on the 2009 target the measured
-    # sample is min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000): dz/dx=0.056,
-    # a flat plane -- the startup splash's overlay, not the engine's arms). Only
-    # graded when the probe actually captured a first-person sample, so a run
-    # without ViewmodelObserve=1 is unaffected.
-    fp_sample = (probe.get("submission") or {}).get("fp")
+    # GH #67 step 1 (ADR-0484/0487, unchanged): identifying the *window* is not
+    # identifying the *viewmodel*. The last sampled interval's largest decodable
+    # in-window draw must be a 3-D mesh; a planar sample is a screen-space
+    # element (the measured target sample is min=(-0.450,-0.450,-0.050)
+    # max=(0.450,0.450,0.000): dz/dx=0.056, a flat plane). Only graded when the
+    # probe actually captured a first-person sample, so a run without
+    # ViewmodelObserve=1 is unaffected.
+    sub = probe.get("submission") or {}
+    fp_sample = sub.get("fp")
     if fp_sample is not None:
         geo = fp_sample.get("geometry") or viewmodel_candidate_geometry(fp_sample)
         volumetric = bool(geo and geo["volumetric"])
@@ -2737,6 +2816,68 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
                        "check": "viewmodel_candidate_is_volumetric",
                        "ok": True, "skip": True,
                        "detail": "no first-person submission sample (ViewmodelObserve=0)"})
+    # GH #67 step 1 (seventh correction, ADR-0489): the strict gate above is graded
+    # on the *last* sampled interval (ADR-0484/0487 semantics, unchanged). That is
+    # arbitrary -- a run samples one in-window draw per 300-swap interval and their
+    # contents differ -- so the run also reports, as its own check, whether *any*
+    # sampled interval's largest in-window draw was volumetric. Measured (wake 87):
+    # the answer is yes for BOTH openers (1/18 intervals with the depth-only clear,
+    # 1/3 with the near-plane drop, the same 14688-count mesh), so this is an
+    # observation about the window's contents, NOT evidence that the window
+    # isolates the arms. Graded whenever a sample exists so "no volumetric sample"
+    # can never read as silence.
+    best = viewmodel_candidate_best(sub.get("samples") or [])
+    if best["sampled"]:
+        pick = best["best"]
+        geo = best["geometry"] or {}
+        detail = (f"{best['volumetric']}/{best['sampled']} sampled interval(s) had a "
+                  f"volumetric in-window draw; best count={pick.get('count')} "
+                  f"extent={geo.get('extent')} ratio={geo.get('thickness_ratio')}")
+        last = best["last"]
+        if last is not None and last is not pick:
+            lag = last.get("geometry") or {}
+            detail += (f"; last interval count={last.get('count')} "
+                       f"ratio={lag.get('thickness_ratio')}")
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_volumetric_candidate_sampled",
+                       "ok": best["volumetric"] > 0, "detail": detail})
+    else:
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_volumetric_candidate_sampled",
+                       "ok": True, "skip": True,
+                       "detail": "no first-person submission sample (ViewmodelObserve=0)"})
+
+    # GH #67 step 1 (sixth correction, ADR-0488): the near-plane extraction the
+    # NearPlaneDrop opener depends on. The pass trace read `P?` on every
+    # projection load because the classic `m[14]/(m[10]-1)` returns -far on the
+    # engine's z-flipped matrix (measured), so `worldNear_` was never set. Graded
+    # only when the run carries the projection record (#0488+ hook with
+    # ViewmodelObserve=1); a pre-#0488 hook has no such line and is skipped.
+    proj = viewmodel_projection_stats(fresh_log)
+    if proj["lines"]:
+        first = proj["lines"][0]
+        if proj["perspective"] == 0:
+            checks.append({"group": "viewmodel", "check": "projection_near_extracted",
+                           "ok": False,
+                           "detail": (f"{len(proj['lines'])} projection record(s) but none "
+                                      "classified perspective")})
+        else:
+            ok = proj["near_known"] > 0
+            detail = (f"{proj['near_known']}/{proj['perspective']} perspective load(s) "
+                      f"with a near plane, {proj['distinct']} distinct matrix/matrices; "
+                      f"first m10={first['m10']:.5f} m11={first['m11']:.3f} "
+                      f"m14={first['m14']:.5f} classic={first['classic']:.3f} "
+                      f"near={first['near']:.4f}")
+            if not ok:
+                detail += (" -- the extraction still rejects the engine's matrix, so the "
+                           "NearPlaneDrop opener cannot fire")
+            checks.append({"group": "viewmodel", "check": "projection_near_extracted",
+                           "ok": ok, "detail": detail})
+    else:
+        checks.append({"group": "viewmodel", "check": "projection_near_extracted",
+                       "ok": True, "skip": True,
+                       "detail": ("no ViewmodelProbe proj lines (pre-#0488 hook or "
+                                  "ViewmodelObserve=0)")})
     # 4. comfort
     # GH #68 requirement 5 (comfort rules): the locomotion comfort vignette must
     # actually apply while the scripted run is moving/turning. The mock host
@@ -2947,6 +3088,71 @@ def cmd_selftest(require_image_deps=False):
         ran["ran"] is True and ran["intervals"] == 1 and ran["in_window_draws"] == 0 and
         absent["ran"] is False and absent["intervals"] == 0)
 
+    # GH #67 step 1 (sixth correction, ADR-0488): the near-plane extraction. The
+    # engine's projection is z-flipped (m11 > 0), so the classic `m14/(m10-1)`
+    # reads -far; the shipped hook must report a real near plane for both the
+    # world pass (4.0) and the sampled near-plane-drop pass (0.1).
+    proj_text = (
+        "ViewmodelProbe proj [#300]: m0=0.63021 m5=-1.33333 m10=1.00391 "
+        "m11=1.00000 m14=-8.01566 m15=0.00000 persp=1 classic=-2048.007812 "
+        "near=4.000000\n"
+        "ViewmodelProbe proj [#600]: m0=0.57748 m5=-1.22177 m10=1.00010 "
+        "m11=1.00000 m14=-0.20001 m15=0.00000 persp=1 classic=-2048.600098 "
+        "near=0.100000\n")
+    ps = viewmodel_projection_stats(proj_text)
+    results["viewmodel_projection_near_extracted"] = (
+        ps["perspective"] == 2 and ps["near_known"] == 2 and ps["distinct"] == 2 and
+        abs(ps["lines"][0]["near"] - 4.0) < 1e-6 and
+        ps["lines"][0]["classic"] < 0.0 and
+        abs(ps["lines"][1]["near"] - 0.1) < 1e-6)
+    results["viewmodel_projection_absent_has_no_lines"] = (
+        viewmodel_projection_stats("")["lines"] == [] and
+        viewmodel_projection_stats("")["near_known"] == 0 and
+        viewmodel_projection_stats("")["perspective"] == 0)
+    # A rejected load (near=0) must not count as a known near plane, so the graded
+    # check can fail an inoperative extraction rather than pass it silently.
+    rejected = viewmodel_projection_stats(
+        "ViewmodelProbe proj [#300]: m0=0.63021 m5=-1.33333 m10=1.00391 "
+        "m11=1.00000 m14=-8.01566 m15=0.00000 persp=1 classic=-2048.007812 "
+        "near=0.000000\n")
+    results["viewmodel_projection_rejected_load_is_not_known"] = (
+        rejected["perspective"] == 1 and rejected["near_known"] == 0)
+
+    # GH #67 step 1 (seventh correction, ADR-0489): the shape verdict must be the
+    # run's *best* sampled interval, not its last -- a run samples one draw per
+    # interval and their contents differ (measured: one run sampled a 14688-count
+    # volumetric mesh AND a 2520-count plane).
+    mixed = viewmodel_probe_stats(
+        "[INFO] ViewmodelProbe submission [#1500]: arrayIn=1322 arrayOut=27180 "
+        "listIn=0 listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.450,-0.400,0.050) "
+        "min=(-0.400,-0.445,0.000) max=(0.450,0.400,0.300) n=24 count=14688 "
+        "indexType=5123 vertexType=5126 valid=1\n"
+        "[INFO] ViewmodelProbe submission [#1800]: arrayIn=650 arrayOut=33513 "
+        "listIn=0 listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.400,-0.400,0.000) "
+        "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+        "indexType=5123 vertexType=5126 valid=1\n")
+    best = viewmodel_candidate_best(mixed["submission"]["samples"])
+    results["viewmodel_candidate_best_is_volumetric"] = (
+        best["sampled"] == 2 and best["volumetric"] == 1 and
+        best["best"]["count"] == 14688 and best["geometry"]["volumetric"] is True and
+        best["last"]["count"] == 2520 and
+        # The back-compatible per-label slot still holds the LAST sample.
+        mixed["submission"]["fp"]["count"] == 2520 and
+        len(mixed["submission"]["samples"]) == 2)
+    planar_only = viewmodel_probe_stats(
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=1 arrayOut=9 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.400,-0.400,0.000) "
+        "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+        "indexType=5123 vertexType=5126 valid=1\n")["submission"]["samples"]
+    results["viewmodel_candidate_best_falls_back_to_last"] = (
+        viewmodel_candidate_best(planar_only)["best"]["count"] == 2520 and
+        viewmodel_candidate_best(planar_only)["volumetric"] == 0 and
+        viewmodel_candidate_best([])["sampled"] == 0 and
+        viewmodel_candidate_best([])["best"] is None)
+
     skipped = []
     if not have_image_deps():
         skipped = ["shifted_pair_passes", "identical_pair_fails",
@@ -3024,6 +3230,7 @@ def cmd_evaluate_only(args):
                         "content_gate": content_gate_stats(host_text),
                         "capture_gate": capture_gate_stats(parse_gate_samples(host_text)),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
+                        "viewmodel_projection": viewmodel_projection_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
                         "stereo_kind": stereo_kind_stats(checks),
@@ -3263,6 +3470,7 @@ def main(argv=None):
                         "content_gate": content_gate_stats(host_log),
                         "capture_gate": capture_gate_stats(parse_gate_samples(host_log)),
                         "viewmodel_probe": viewmodel_probe_stats(fresh),
+                        "viewmodel_projection": viewmodel_projection_stats(fresh),
                         "eye_frames": eye_frame_stats(artifacts),
                         "vertical_disparity": vertical_disparity_stats(checks),
                         "stereo_kind": stereo_kind_stats(checks),

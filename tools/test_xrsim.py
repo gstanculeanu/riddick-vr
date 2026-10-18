@@ -1129,6 +1129,53 @@ def test_viewmodel_candidate_check_fails_on_a_planar_sample(td):
     assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
 
 
+def test_viewmodel_volumetric_sample_is_reported_apart_from_the_strict_gate(td):
+    """GH #67 step 1 (ADR-0489): a run samples one in-window draw per interval and
+    their contents differ (measured: a near-plane-drop run sampled a 14688-count
+    volumetric mesh at one interval and the 2520-count plane at the last). The
+    strict gate (last interval, ADR-0484 semantics) still FAILS -- a mesh seen once
+    is not an identified pass -- but the run must *report* the volumetric sample in
+    its own graded check instead of discarding it."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    mesh_then_plane = (
+        "[INFO] ViewmodelProbe submission [#1500]: arrayIn=1322 arrayOut=27180 "
+        "listIn=0 listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.450,-0.400,0.050) "
+        "min=(-0.400,-0.445,0.000) max=(0.450,0.400,0.300) n=24 count=14688 "
+        "indexType=5123 vertexType=5126 valid=1\n"
+        "[INFO] ViewmodelProbe submission [#1800]: arrayIn=650 arrayOut=33513 "
+        "listIn=0 listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.400,-0.400,0.000) "
+        "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+        "indexType=5123 vertexType=5126 valid=1\n")
+    passed, checks = xrsim.evaluate(_args(), art, "", mesh_then_plane)
+    strict = [c for c in checks if c["check"] == "viewmodel_candidate_is_volumetric"][0]
+    assert strict["ok"] is False and not strict.get("skip"), strict
+    assert "count=2520" in strict["detail"] and "planar" in strict["detail"], strict
+    seen = [c for c in checks if c["check"] == "viewmodel_volumetric_candidate_sampled"][0]
+    assert seen["ok"] is True and not seen.get("skip"), seen
+    assert "1/2 sampled interval(s)" in seen["detail"] and "count=14688" in seen["detail"], seen
+    assert "last interval count=2520" in seen["detail"], seen
+    assert passed is False, [c for c in checks if not c.get("skip") and not c["ok"]]
+    # A run with no volumetric sample must FAIL that observation, not skip it.
+    passed, checks = xrsim.evaluate(_args(), art, "", _VM_SUBMISSION_PLANAR)
+    seen = [c for c in checks if c["check"] == "viewmodel_volumetric_candidate_sampled"][0]
+    assert seen["ok"] is False and "0/1 sampled interval(s)" in seen["detail"], seen
+    # No sample at all -> skipped.
+    _, checks = xrsim.evaluate(_args(), art, "", "")
+    seen = [c for c in checks if c["check"] == "viewmodel_volumetric_candidate_sampled"][0]
+    assert seen["ok"] is True and seen.get("skip") is True, seen
+    # The parser keeps every sample; the per-label slot is the last (old semantics).
+    sub = xrsim.viewmodel_probe_stats(mesh_then_plane)["submission"]
+    assert len(sub["samples"]) == 2 and sub["fp"]["count"] == 2520, sub["fp"]
+    best = xrsim.viewmodel_candidate_best(sub["samples"])
+    assert best["best"]["count"] == 14688 and best["last"]["count"] == 2520, best
+
+
+
 def test_viewmodel_candidate_check_skipped_without_a_sample(td):
     """A run without ViewmodelObserve=1 (or a pre-#67 host) must skip the
     geometric check, never fail it."""
@@ -1174,6 +1221,66 @@ def test_viewmodel_probe_check_fails_when_the_opener_never_fires(td):
     ran = xrsim.viewmodel_window_ran(xrsim.viewmodel_probe_stats(never))
     assert ran == {"ran": True, "intervals": 2, "in_window_draws": 0}, ran
     assert xrsim.viewmodel_window_ran(xrsim.viewmodel_probe_stats(""))["ran"] is False
+
+
+def test_viewmodel_projection_lines_are_parsed(td):
+    """GH #67 step 1 (ADR-0488): the projection record is parsed with both
+    extractions -- the classic one (which the shipped engine makes -far) and the
+    hook's near plane -- plus the matrix depth row and the distinct-matrix count."""
+    log = (
+        "[INFO] ViewmodelProbe proj [#1]: m0=1.33333 m5=-1.33333 m10=1.00391 "
+        "m11=1.00000 m14=-8.01566 m15=0.00000 persp=1 classic=-2048.007812 "
+        "near=4.000000\n"
+        "[INFO] ViewmodelProbe proj [#600]: m0=0.57748 m5=-1.22177 m10=1.00010 "
+        "m11=1.00000 m14=-0.20001 m15=0.00000 persp=1 classic=-2048.600098 "
+        "near=0.100000\n")
+    s = xrsim.viewmodel_projection_stats(log)
+    assert s["perspective"] == 2 and s["near_known"] == 2 and s["distinct"] == 2, s
+    assert s["lines"][0]["m11"] == 1.0 and s["lines"][0]["classic"] < 0.0, s["lines"][0]
+    assert abs(s["lines"][0]["near"] - 4.0) < 1e-6, s["lines"][0]
+    assert abs(s["lines"][1]["near"] - 0.1) < 1e-6, s["lines"][1]
+    assert xrsim.viewmodel_projection_stats("")["lines"] == []
+    # A load the hook could not extract (near=0) is not a known near plane.
+    rejected = xrsim.viewmodel_projection_stats(
+        "[INFO] ViewmodelProbe proj [#1]: m0=0.63021 m5=-1.33333 m10=1.00391 "
+        "m11=1.00000 m14=-8.01566 m15=0.00000 persp=1 classic=-2048.007812 "
+        "near=0.000000\n")
+    assert rejected["perspective"] == 1 and rejected["near_known"] == 0, rejected
+
+
+def test_projection_near_check_grades_the_extraction(td):
+    """GH #67 step 1 (ADR-0488): the projection record is graded only when it is
+    present. An extraction that still rejects every load must FAIL (never skip as
+    "pre-#0488 host"), and a fixed extraction must PASS and name the near plane."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    engine = ("m0=0.63021 m5=-1.33333 m10=1.00391 m11=1.00000 m14=-8.01566 "
+              "m15=0.00000 persp=1")
+    # The pre-fix form: every load rejected.
+    passed, checks = xrsim.evaluate(
+        _args(), art, "",
+        f"[INFO] ViewmodelProbe proj [#300]: {engine} classic=-2048.007812 "
+        "near=0.000000\n")
+    rec = [c for c in checks if c["check"] == "projection_near_extracted"][0]
+    assert rec["ok"] is False and not rec.get("skip"), rec
+    assert "rejects the engine's matrix" in rec["detail"], rec
+    assert passed is False, [c for c in checks if not c.get("skip") and not c["ok"]]
+    # The fixed form: near 4.0 for the world pass.
+    passed, checks = xrsim.evaluate(
+        _args(), art, "",
+        f"[INFO] ViewmodelProbe proj [#300]: {engine} classic=-2048.007812 "
+        "near=4.000000\n")
+    rec = [c for c in checks if c["check"] == "projection_near_extracted"][0]
+    assert rec["ok"] is True and not rec.get("skip"), rec
+    assert "near=4.0000" in rec["detail"], rec
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
+    # No projection record (pre-#0488 hook) -> skipped, not failed.
+    passed, checks = xrsim.evaluate(_args(), art, "", "[INFO] unrelated\n")
+    rec = [c for c in checks if c["check"] == "projection_near_extracted"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
 
 
 # ----------------------- per-frame camera transform (GH #68 requirement 1)
@@ -2168,7 +2275,10 @@ def main() -> int:
              test_viewmodel_candidate_geometry_distinguishes_plane_from_mesh,
              test_viewmodel_candidate_check_fails_on_a_planar_sample,
              test_viewmodel_candidate_check_skipped_without_a_sample,
+             test_viewmodel_volumetric_sample_is_reported_apart_from_the_strict_gate,
              test_viewmodel_probe_check_fails_when_the_opener_never_fires,
+             test_viewmodel_projection_lines_are_parsed,
+             test_projection_near_check_grades_the_extraction,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

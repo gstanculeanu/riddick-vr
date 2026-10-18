@@ -354,6 +354,24 @@ projection load is `P?` (the hook's near extraction rejects this engine's
 inside the window, so an inoperative opener is visible as a failed
 identification.
 
+**Correction (wake 87, ADR-0488/0489):** the `P?` above was the **hook's** bug,
+not the engine's. This engine's projection is z-flipped (`m[11] == +1`,
+`m[10] = +(f+n)/(f-n)`), so the classic `m[14]/(m[10]-1)` read **-far**
+(measured `-2048.0078`) and rejected every load. `src/hook/projection_near.h` now
+handles both orientations, and the pass trace reads real planes
+(`P4.0 … P1.8 … P0.1` = world 4.0 / another pass 1.8 / near-plane-drop pass 0.1).
+`--ini ViewmodelWindowOpener=2` now **opens** (3 intervals, up to 1322 in-window
+draws). The raw matrix and both extractions are logged (`ViewmodelProbe proj`),
+XRSIM grades `projection_near_extracted`, and the report carries
+`viewmodel_projection`. **Neither opener makes the arms the largest in-window
+draw**: on the same level the depth-only window sampled a 14688-count volumetric
+mesh in 1/18 intervals and the near-drop window the same mesh in 1/3, while both
+runs' *last* interval was a plane — so the strict
+`viewmodel_candidate_is_volumetric` still FAILs and the new
+`viewmodel_volumetric_candidate_sampled` reports the mesh observation without
+claiming the pass was identified.
+
+
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
 renderer init), the host logging `Game Connected: WAITING` for the whole (short)

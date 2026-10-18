@@ -8,6 +8,7 @@
 #include "gl_matrix_tracker.h"
 #include "vertex_program_observe.h"
 #include "vertex_submission_observe.h"
+#include "projection_near.h"
 #include "logging.h"
 #include <string>
 
@@ -520,20 +521,35 @@ void WINAPI OpenGLProxy::Hook_glLoadMatrixf(const GLfloat *m) {
 
     if (s_currentMatrixMode == 0x1701 /* GL_PROJECTION */) {
         // GH #66: classify from the ORIGINAL matrix (before any aspect correction).
-        // Perspective has m[15]==0; near = m[14] / (m[10] - 1).
-        const bool loadIsPerspective = fabsf(m[15]) < 0.01f;
-        float loadNear = 0.0f;
-        if (loadIsPerspective) {
-            const float denom = m[10] - 1.0f;
-            if (fabsf(denom) > 1.0e-6f) {
-                const float n = m[14] / denom;
-                if (n == n && n > 0.0f && n < 1.0e9f) loadNear = n; // rejects NaN/inf/negative
-            }
-        }
+        // Perspective has m[15]==0.
+        const bool loadIsPerspective = IsPerspectiveProjection(m);
+        // GH #67 step 1 (sixth correction, ADR-0488): the near plane comes from the
+        // engine's own convention (m[11] > 0 => z-flipped), not the classic GL one
+        // -- see projection_near.h for the measurement. The previous inline form
+        // (`m[14]/(m[10]-1)`) returned -far on every engine load, which is why the
+        // pass trace read `P?` and NearPlaneDrop could never open.
+        const float loadNear = ExtractProjectionNear(m);
         s_viewmodelSuppressor.NoteProjectionLoad(loadIsPerspective, loadNear);
         memcpy(s_lastProjection, m, sizeof(s_lastProjection));
         s_hasProjection = true;
         s_projMatrixCount++;
+
+        // GH #67 step 1 (sixth correction, ADR-0488): the projection matrix
+        // itself. The pass trace read `P?` on every projection load, i.e. the near
+        // extraction rejected the engine's matrix -- but the matrix was never
+        // logged, so *why* was unmeasured (the classic VR-projection line below
+        // prints only m[0]/m[5] and takes an early return). Log the depth row plus
+        // the classic extraction's raw result on the same cadence as the other
+        // summary lines, so the convention is auditable in the log of any run.
+        // Observation only: nothing here changes a forwarded matrix.
+        if (s_projMatrixCount == 1 || s_projMatrixCount % 300 == 0) {
+            const float classicDenom = m[10] - 1.0f;
+            const float classicNear = fabsf(classicDenom) > 1.0e-6f
+                ? (m[14] / classicDenom) : 0.0f;
+            VR_LOG_INFO("ViewmodelProbe proj [#%u]: m0=%.5f m5=%.5f m10=%.5f m11=%.5f m14=%.5f m15=%.5f persp=%u classic=%.6f near=%.6f",
+                s_projMatrixCount, m[0], m[5], m[10], m[11], m[14], m[15],
+                loadIsPerspective ? 1u : 0u, classicNear, loadNear);
+        }
 
         bool isPerspective = (fabsf(m[15]) < 0.01f && m[0] > 0.10f && m[0] < 4.0f);
         if (isPerspective) {

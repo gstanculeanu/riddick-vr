@@ -58,6 +58,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/gl_matrix_tracker.h
         src/hook/vertex_program_observe.h
         src/hook/vertex_submission_observe.h
+        src/hook/projection_near.h
         src/hook/display_branch.h
         src/hook/sim_input_bridge.h
         src/hook/sim_input_bridge_win32.cpp
@@ -214,6 +215,15 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME vertex_submission_observe COMMAND riddick_vr_vertex_submission_tests)
+
+    # GH #67 step 1 (sixth correction, ADR-0488): the perspective near plane from
+    # the engine's own (z-flipped) projection convention -- the measurement the
+    # NearPlaneDrop opener depends on. Pure, headless.
+    add_executable(riddick_vr_projection_near_tests tests/projection_near_tests.cpp)
+    target_include_directories(riddick_vr_projection_near_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME projection_near COMMAND riddick_vr_projection_near_tests)
 
     # GH #61: the baked diffuse + the arm mesh UVs must be skin-toned, never a
     # white / flat patch (refutes the "decodes white" premise that disabled it).

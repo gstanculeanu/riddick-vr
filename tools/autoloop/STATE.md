@@ -2,6 +2,94 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 87 — 2026-10-18 07:00 (scheduled loop)
+- **Unit:** GH **#67 step 1 (sixth + seventh corrections)** — the near-plane
+  extraction was the *hook's* bug, and fixing it makes the `NearPlaneDrop` opener
+  fire; plus the observation probe now keeps **every** sampled interval instead of
+  only the last (`projection_near.h` + hook use + 2 ADRs + xrsim parser/checks +
+  C++ unit tests + updated README/vr-scenarios). Real C++ change → `build-all.ps1`
+  + CTest on both architectures; live runs on a read-only shadow (no deploy, no
+  install write).
+- **Why this unit:** the explicit "Next" #1 of wake 86 (ADR-0487: "log
+  `m[10]`/`m[14]` and fix the near extraction … making `NearPlaneDrop` testable")
+  and the top player-visible item (#67). The hook also had to be measured first:
+  a one-line diagnostic (`ViewmodelProbe proj`) was added, built, and run **before**
+  the fix was chosen, so the convention is measured, not guessed.
+- **Measured (live, `RIDDICKVR_SIM=1`, read-only per-run shadow, `--reach-gameplay
+  --duration 45 --advance-menu --advance-min-taps 8 --require-fresh-hook
+  --ini ViewmodelObserve=1 --ini ViewmodelTrace=1`; hook `sha256=4c9744b31a34`
+  496128 B = repo build, `deployed_hook_matches_build` PASS):** the engine's
+  projection is **z-flipped**: world pass `m10=1.00391 m11=+1.00000
+  m14=-8.01566 m15=0`. The classic extraction reads **`-far`** (`-2048.0078`,
+  negative → rejected → the `P?` of ADR-0487 on *every* load); the z-flipped
+  `-m14/(m10+1)` reads **near 4.0** (far 2048). Three other matrices sampled:
+  near 1.8 (far 72002) and near 0.1 (far 2000.1) — the near-plane-drop signature.
+  Discriminator: `sign(m[11])` (`m[11] < 0` = classic GL, `eye_frames.log`'s host
+  matrix → 0.05).
+- **Change:**
+  - `src/hook/projection_near.h` (new): `IsPerspectiveProjection` +
+    `ExtractProjectionNear` (both orientations, `kProjectionNearUnknown` for
+    ortho/degenerate/NaN/inf/negative), pure + headless.
+  - `src/hook/opengl_proxy.cpp`: uses it (replacing the inline classic form) and
+    logs `ViewmodelProbe proj [#N]: m0=.. m5=.. m10=.. m11=.. m14=.. m15=..
+    persp=.. classic=.. near=..` on the standard cadence (observation only).
+  - `tests/projection_near_tests.cpp` (new, CTest `projection_near`).
+  - `tools/xrsim.py`: `VIEWMODEL_PROJECTION_RE` + `viewmodel_projection_stats`
+    (+ report key `viewmodel_projection`) and the graded check
+    `projection_near_extracted` (`FAIL` if the record exists and the extraction
+    still yields no near plane — never a silent skip); **and** ADR-0489:
+    `submission.samples` now keeps every sampled `fp`/`world` record,
+    `viewmodel_candidate_best(samples)` (pure) summarises the run, the strict
+    `viewmodel_candidate_is_volumetric` semantics are **unchanged** (still graded
+    on the last interval) and the new graded
+    `viewmodel_volumetric_candidate_sampled` reports whether **any** interval's
+    in-window draw was volumetric.
+  - `docs/adr/0488-gh67-projection-near-convention.md` +
+    `docs/adr/0489-gh67-all-sampled-intervals.md` (new); `src/hook/README.md`
+    retracts the "NearPlaneDrop is inert" note; `docs/vr-scenarios.md` gets the
+    wake-87 correction; `tools/verify_reported_fixes.py` #67 invariant extended
+    for both.
+- **EVIDENCE live (2 runs, same build) — the opener now fires, and neither opener
+  isolates the arms:**
+  - opener `2` (near-plane drop): pass trace now `P4.0 P4.0 P4.0 P4.0 C P4.0 P0.1
+    … D d10 … P4.0`; `viewmodel_pass_identified` **PASS** (3 intervals, up to
+    **1322** in-window draws — previously 0/21); `projection_near_extracted`
+    **PASS** (`332/332` perspective loads with a near plane, 3 distinct matrices);
+    strict `viewmodel_candidate_is_volumetric` **FAIL** (last interval `count=2520`,
+    `extent [0.9,0.9,0.05]`, ratio 0.056); `viewmodel_volumetric_candidate_sampled`
+    **PASS** (`1/3` intervals had a volumetric in-window draw, `count=14688`,
+    `extent [0.85,0.845,0.3]`, ratio 0.353); `XRSIM RESULT: FAIL` (honest).
+  - opener `1` (depth-only clear, control): 18 intervals / up to 4564 in-window
+    draws; strict check **FAIL** (last `count=12`, ratio 0.0); volumetric-sample
+    check **PASS** (`1/18`, the **same** `count=14688` mesh, ratio 0.341);
+    `projection_near_extracted` **PASS**; `XRSIM RESULT: FAIL`. **The same mesh is
+    inside both windows → the shape check does not identify the viewmodel; only
+    the *sampling* bug was fixed.** Both runs reached the level
+    (`gameplay_full_bleed_reached` PASS, 32/32 gameplay captures).
+- **EVIDENCE offline:** `build-all.ps1` clean (x64 host + x86 hook); **CTest
+  25/25 (x64) and 27/27 (x86)** (new `projection_near`); all **12 `tools/test_*.py`
+  exit 0**; `tools/test_xrsim.py` +2 (projection record parse; the projection check
+  FAILs on a still-rejecting record and PASSes when fixed) +1 (strict gate vs the
+  volumetric-sample report); `xrsim --selftest` +5 (`viewmodel_projection_near_extracted`,
+  `…_absent_has_no_lines`, `…_rejected_load_is_not_known`,
+  `viewmodel_candidate_best_is_volumetric`, `…_falls_back_to_last`);
+  `verify_reported_fixes`, `scenario_tests.py --check`, `verify_test_artifacts`,
+  `verify_hook_init`, `validate_addresses` all PASS. Artifacts: `%TEMP%\oc_wake87`.
+- **Blocker:** none. **Limits (honest):** 1 run per opener, 45 s, one install, one
+  hook build; the near/far pairs are inferred from the matrix algebra (round
+  4.0/2048, 0.1/2000.1, 1.8/72002), not read from the engine; the 14688-count
+  mesh's identity is unknown and it appears in **both** openers; the level's state
+  is not established (no movement) and the branch signal still cannot tell the
+  card from a level (GH #72 req 2); `ViewmodelWindowOpener=2` opening a window is
+  not the arms being in it.
+- **Next:** (1) #67 step 1 — replace "largest in-window array draw" with a
+  discriminator that does not depend on the window (near-field test in view space,
+  or an engine-side identification of the viewmodel pass); (2) keep the
+  depth-only-clear window only as the #63 suppression boundary; (3) deploy-gated
+  ladder on a real scene (#76 step 1, #79 hook half, #68 req 5);
+  (4) page-content discriminator for `gameplay_full_bleed_reached` (GH #71 req 2);
+  (5) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (6) GH #83 manual-session blind spot.
+
 ## Wake 86 — 2026-10-18 06:29 (scheduled loop)
 - **Unit:** GH **#67 step 1 (fifth correction)** — a live **A/B of the two window
   openers on a reached level**: the depth-only-clear window opens but holds only
