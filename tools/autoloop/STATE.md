@@ -2,6 +2,90 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 95 — 2026-10-18 10:56 (scheduled loop)
+- **Unit:** GH **#67 step 1 (fourteenth correction, ADR-0496)** — ADR-0494's
+  remaining "Next **1a**" ("the object's property-setter target (destination
+  `vtable[0x68]`) and the model-instance creation it feeds") is **closed read-only**
+  and **not supported**: `vtable[0x68]` is a **per-class virtual** (1,319 MSVC RTTI
+  vtables, **874 distinct** slot-0x68 targets; 582 into `.text`), and on the class
+  whose slot-8 loader *is* the item model loader (`CRPG_Object_Item`) slot 0x68 is a
+  **second property loader** (`FUN_10252d70` = `FUN_10260940()` + SPAWN/PROJECTILE/
+  SPAWNEFFECT/SUMMON_PROJECTILECLASS[_PLAYER]/GIVEONPICKUP/MELEE_HITSOUND, `ret 0xC`),
+  not a model-instance creator. The disassembly of `FUN_1026d790` shows the value
+  goes to a **separate** object's `vtable[0x68]` in a one-argument virtual dispatch
+  (so the slot *stores* the model reference). One REA request + static census; **no
+  C++, no build, no deploy, no install write, no live run.**
+- **Why this unit:** the explicit "Next" #1 of wake 94 / ADR-0495 (and ADR-0494's
+  (1a)). With ADR-0495 (1b) already closed, this closes the **last named engine-side
+  route** of #67 step 1, so the loop stops re-trying static identification and must
+  confront the **state question** (wake 89 / GH #80).
+- **Measured (read-only; subject `Content\GameClasses_Win32_x86.dll`, 9,016,560 B,
+  `sha256 d7e81d7d3726…`, provider Ghidra 12.1.4, `confidence=observed`,
+  `authority=shipped-artifact`; `REA_GHIDRA_STARTUP_TIMEOUT_MS=1500000`, exit 0 in
+  **380 s**):**
+  - **`FUN_1026d790` (capstone disasm):** `arg5` = the registry → `CRegistry::FindChild`
+    (`0x10283bba`); `arg6` = a **different** object → `[vtable+0x68]` called with
+    `ECX=dest` and one value arg (`mov esi,[esp+2Ch]; mov edi,[esi]; … mov
+    edx,[edi+68h]; push eax; mov ecx,esi; call edx`). So the model reference is
+    *stored* via a per-class virtual, not created.
+  - **Slot 0x68 census (static):** 1,319 RTTI vtables, **874 distinct** targets,
+    **582** into `.text`, **737** into adjacent `.rdata` (vtable shorter than 27
+    slots — not claimed). Largest family `0x104b17d0` (24 `CMWnd_CubeMenu_*`
+    classes). `CRPG_Object*` targets differ per class: base `0x1025df20`, `_Item`
+    `0x10252d70`, `_Weapon` `0x1024c320`, `_Inventory` `0x1024ebb0`, `_Melee`/
+    `_Ulaks` `0x1024cc80`, `_Char` `0x1024cdd0`, `_Ammo` `0x10273d60`.
+  - **`rea decompile 0x10252d70` (exit 0, 380 s,
+    `ev_45c80b840286f193cd0f146d8987b7ccbd0f694060a2ad78b50071a45018eb75`):**
+    `void FUN_10252d70(void){ FUN_10260940(); if ((*(byte*)(in_ECX+0x2f8) & 0x10)==0)
+    { …7 CStr loads… } }` — the six literals Ghidra left unnamed were recovered by
+    local capstone disassembly (`0x1075112c` "SPAWN", `0x1074b6a0` "PROJECTILE",
+    `0x10757df8` "SPAWNEFFECT", `0x10757de0` "SUMMON_PROJECTILECLASS", `0x10757dc0`
+    "SUMMON_PROJECTILECLASS_PLAYER", `0x10757db0` "GIVEONPICKUP", `0x10757da0`
+    "MELEE_HITSOUND").
+- **Consequence:** "(1a) leads to the model-instance creation" is **not supported**;
+  the slot stores the reference and the instance creation is elsewhere. With
+  ADR-0495, **every named engine-side route of ADR-0494 is exhausted** (geometric
+  ADR-0481..0491, name tables ADR-0492/0495, `VIEWMODEL` ADR-0493/0494, destination
+  slot this ADR). The remaining route is the **state question**: whether the engine
+  draws its FP arms *at all* on the sampled **passive/unarmed** level start — a
+  harness problem (a scripted run that reaches an armed/fighting state, GH #80), not
+  another byte scan.
+- **Change (docs + guard only, NO C++):**
+  - **NEW `docs/rea/reference/GameClasses2009_ModelSetterSlot68.txt`** — subject
+    hash, the request + wall clock + evidence id, both disassemblies, the
+    decompilation, the census, the `CRPG_Object*` table, and a "not claimed" section.
+  - **NEW `docs/adr/0496-gh67-slot68-is-a-per-class-virtual-not-the-model-instance-creation.md`.**
+  - `tools/verify_reported_fixes.py` — new GH #67 invariant pinning the artifact
+    (hash, `0x10252d70`, `FUN_10260940`, `SPAWNEFFECT`,
+    `SUMMON_PROJECTILECLASS_PLAYER`, `GIVEONPICKUP`, `MELEE_HITSOUND`,
+    `0x104b17d0`) + ADR-0496.
+  - `src/hook/README.md` (ADR-0496 bullet), `docs/vr-scenarios.md` (wake-95
+    correction).
+- **EVIDENCE offline:** `verify_reported_fixes` PASS (with the new invariant),
+  `scenario_tests.py --check` PASS, `verify_hook_init` PASS, `validate_addresses`
+  PASS, `verify_test_artifacts` PASS, `xrsim --selftest` PASS, all **12
+  `tools/test_*.py` exit 0**. **No C++ → no `build-all`/CTest** (documented).
+  Artifacts: `%TEMP%\oc_wake95\` (`scan_slot68.py`, `disasm_2d70.py`, `disasm_d790.py`,
+  `decompile_2d70.json`, + `.out.txt` logs).
+- **Blocker:** none. **Limits (honest):** the destination object's **class is not
+  identified** (`arg6` is distinct from the registry `arg5`; roles named from the
+  `FindChild` call, not caller types); the guard `this[0x2f8] & 0x10` is not
+  identified; slot-0x68 readings for vtables shorter than 27 slots are adjacent
+  `.rdata` and not claimed; `FUN_10252d70`'s six unnamed literals are named by local
+  disassembly (not by Ghidra); nothing about the FP arms or the 2004 build; whether
+  the arms are drawn on the passive/unarmed level start is untouched (wake 89 /
+  GH #80).
+- **Next:** (1) **the state question (now the only route for the arms)** — make a
+  scripted run reach an **armed/fighting** state so the existing viewmodel
+  window/census can observe the engine's own arms (extend the simulator-only bridge
+  / harness; GH #80); (2) `ViewmodelObserve=0` stays the default; (3) the
+  deploy-gated ladder on a real scene (#76 step 1, #79 hook half, #68 req 5);
+  (4) page-content discriminator for `gameplay_full_bleed_reached` (#71 req 2);
+  (5) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (6) GH #83 / GH #88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY; only an ephemeral `%TEMP%` import copy); no leftover processes; no
+  live lock taken (no live run). `STATE.log` **appended** (never replaced — GH #88).
+
 ## Wake 94 — 2026-10-18 10:16 (scheduled loop)
 - **Unit:** GH **#67 step 1 (thirteenth correction, ADR-0495)** — ADR-0494's
   "Next 1b" (chase the `FirstPerson`/`ThirdPerson` "view-mode table" to the
