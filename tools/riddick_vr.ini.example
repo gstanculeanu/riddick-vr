@@ -176,3 +176,10 @@ DibrDepthEvery=3
 ; Source-image warp grid: more cells = smoother parallax, more blits per eye.
 DibrCols=8
 DibrRows=6
+; GH #76 option 1 (ADR-0504): evidence-only probe for the per-eye *replay* route.
+; The engine submits eye-space geometry with an identity modelview, so a per-eye
+; camera is a pure translation of every eye-space vertex; every N swaps this logs
+; the eye-space offset implied by the live per-eye views and the residual of
+; translate(-offset)*headView vs that view. Changes no rendering. 0 = off.
+StereoReplayProbe=0
+StereoReplayProbeEvery=300

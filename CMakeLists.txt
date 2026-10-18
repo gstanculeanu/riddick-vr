@@ -61,6 +61,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/immediate_mode_observe.h
         src/hook/projection_near.h
         src/hook/depth_parallax.h
+        src/hook/stereo_replay.h
         src/hook/display_branch.h
         src/hook/sim_input_bridge.h
         src/hook/sim_input_bridge_win32.cpp
@@ -245,6 +246,17 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME depth_parallax COMMAND riddick_vr_depth_parallax_tests)
+
+    # GH #76 (option 1): the per-eye replay maths -- the host's per-eye views are
+    # a rigid eye-space translation of the head view, so the eye offset + replay
+    # modelview reproduce them exactly. Pure, headless (stereo_replay.h); also
+    # cross-checks the host's independent view construction (src/host/eye_frame.h).
+    add_executable(riddick_vr_stereo_replay_tests tests/stereo_replay_tests.cpp)
+    target_include_directories(riddick_vr_stereo_replay_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/host
+    )
+    add_test(NAME stereo_replay COMMAND riddick_vr_stereo_replay_tests)
 
     # GH #61: the baked diffuse + the arm mesh UVs must be skin-toned, never a
     # white / flat patch (refutes the "decodes white" premise that disabled it).

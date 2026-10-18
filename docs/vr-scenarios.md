@@ -303,6 +303,17 @@ render seam, not another depth readback. Also recorded:
 `CameraHook::StabilizeViewMatrix` (the ADR-0406 "intended seam") is **dead code**
 (no call sites); head-look is injected as mouse movement, so per-eye dual
 rendering has no engine hook seam on this title.
+**ADR-0504 (wake 102) opens option (1) with a concrete mechanism:** the engine
+submits **eye-space** client-array geometry (`glDrawElements`; no `glDrawArrays`,
+identity `GL_MODELVIEW`, ADR-0481/0482), so a per-eye camera is a *pure modelview
+translation* of every vertex. `src/hook/stereo_replay.h` lands the tested replay
+maths (eye-space offset `d_eye = R_head^T (eyePos - headPos)`, replay
+`GL_MODELVIEW = translate(-d_eye)`, `ReplayViewResidual`) with a
+scene-faithfulness gate: the mock host's **placeholder** per-eye baseline (origin
+at the world origin; GH #77/ADR-0463) is refused and the head-local `+/-halfIpd`
+fallback is used. The opt-in `StereoReplayProbe=1` (evidence only) logs it live —
+`baseline=0.0650m src=fallback offL=(-0.0325,0,0) offR=(+0.0325,0,0) residual ~1.68`.
+Option (1)'s remaining unit is a **draw recorder + replay** (separately scoped).
 
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim

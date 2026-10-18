@@ -417,6 +417,22 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   interim has **no usable depth source**; the scan is evidence-only (it never
   rewrites the snapshot or the warp) and `StereoParallaxDibr=0` stays the default.
   GH #76's remaining route is option (1), a separately scoped second engine view.
+- **Option 1 opened (ADR-0504, wake 102).** The depth hunt is closed and option (1)
+  is the route: the engine submits **eye-space** client-array geometry
+  (`glDrawElements`) with an identity `GL_MODELVIEW` (ADR-0481/0482), so a per-eye
+  camera is a *pure modelview translation* of every vertex. `src/hook/stereo_replay.h`
+  lands the tested replay maths — the eye-space offset
+  `d_eye = R_head^T (eyePos - headPos)`, the replay `GL_MODELVIEW` (`translate(-d_eye)`),
+  and `ReplayViewResidual` — and gates the offset on the published per-eye views
+  being **scene-faithful** (rotation matches the head; origin within 0.25 m); the
+  mock host's **placeholder** baseline (origin at the world origin; GH #77/ADR-0463)
+  is refused and the head-local `+/-halfIpd` fallback is used instead. `StereoReplayProbe=1`
+  (opt-in, evidence only — no render change) logs
+  `StereoReplay: swap=.. baseline=.. srcL=.. srcR=.. offL=.. offR=.. residualL=.. residualR=..`.
+  Live: `baseline=0.0650m`, `src=fallback`, `offL=(-0.0325,0,0) offR=(+0.0325,0,0)`,
+  `residual ~ 1.68` (the placeholder's offset from the head). The remaining unit is
+  a **draw recorder + per-eye replay** (record the frame's `glDrawElements` calls and
+  replay them with that translation); it is separately scoped and not landed here.
 
 
 

@@ -196,6 +196,13 @@ void LoadVRConfig() {
         if (cfg.dibrRows > 64) cfg.dibrRows = 64;
         VR_LOG_INFO("Stereo parallax (DIBR interim): enabled=%d strength=%.2f depth_every=%d grid=%dx%d",
             cfg.stereoParallaxDibr, cfg.dibrStrength, cfg.dibrDepthEvery, cfg.dibrCols, cfg.dibrRows);
+        // GH #76 (option 1, ADR-0504): evidence-only per-eye replay probe.
+        cfg.stereoReplayProbe = ReadInt(iniPath, "StereoReplayProbe", cfg.stereoReplayProbe) ? 1 : 0;
+        cfg.stereoReplayProbeEvery = ReadInt(iniPath, "StereoReplayProbeEvery", cfg.stereoReplayProbeEvery);
+        if (cfg.stereoReplayProbeEvery < 1) cfg.stereoReplayProbeEvery = 1;
+        if (cfg.stereoReplayProbeEvery > 100000) cfg.stereoReplayProbeEvery = 100000;
+        VR_LOG_INFO("Stereo replay probe: enabled=%d every=%d swaps (evidence only)",
+            cfg.stereoReplayProbe, cfg.stereoReplayProbeEvery);
         VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,

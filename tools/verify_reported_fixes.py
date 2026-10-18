@@ -1051,6 +1051,33 @@ def main():
             "its evidence lines) must exist as the instrument behind the measured "
             "negative 'no readable FBO holds the near world pass'")
 
+    # GH #76 / ADR-0504: the interim depth route is closed (ADR-0501/0502/0503),
+    # so option 1 opens. The engine submits *eye-space* client-array geometry with
+    # an identity modelview (ADR-0481/0482), so a per-eye camera is a pure
+    # modelview translation: the per-eye replay maths must exist (headless,
+    # tested), the scene-faithfulness gate must refuse the mock host's placeholder
+    # per-eye baseline (GH #77 / ADR-0463) instead of trusting it, and the live
+    # provenance probe must stay opt-in (evidence only -- no render change).
+    stereo_replay_h = (ROOT / "src/hook/stereo_replay.h").read_text(encoding="utf-8")
+    require("inline void BuildEyeReplayModelview" in stereo_replay_h and
+            "inline bool EyeSpaceCameraOffsetFromViews" in stereo_replay_h and
+            "kReplayMaxEyeOffsetMeters" in stereo_replay_h and
+            "ReplayViewRotationMatchesHead" in stereo_replay_h and
+            "inline float ReplayViewResidual" in stereo_replay_h and
+            "stereo_replay.h" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            (ROOT / "tests/stereo_replay_tests.cpp").exists() and
+            "stereo_replay" in (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            "StereoReplayProbe" in (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8") and
+            "stereoReplayProbe" in (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8") and
+            '"StereoReplay: swap=' in stereo_renderer_cpp and
+            "srcL=" in stereo_renderer_cpp and
+            "stereoReplayProbe" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0504-gh76-option1-eye-space-replay-mechanism.md").exists(),
+            "GH #76 / ADR-0504: the option-1 per-eye replay maths (stereo_replay.h "
+            "+ its headless test), the scene-faithfulness gate that refuses the "
+            "mock host's placeholder per-eye baseline, and the opt-in live "
+            "provenance probe must exist -- option 1 rests on them")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

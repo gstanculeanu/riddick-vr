@@ -4,6 +4,7 @@
 #include "vr_config.h" // GH #9: ComfortEnabled / ComfortMaxDim gate
 #include "display_branch.h" // GH #72 req 1: cold-start full-bleed latch
 #include "depth_parallax.h" // GH #76 interim: depth-based per-eye reprojection
+#include "stereo_replay.h"  // GH #76 option 1: per-eye replay maths + probe
 #include "logging.h"
 #include <tlhelp32.h>
 #include <algorithm>
@@ -1228,6 +1229,50 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 VR_LOG_INFO("Resizing Stereo Eye Framebuffers to match OpenXR headset (%ux%u -> %ux%u)",
                     m_eyeWidth, m_eyeHeight, m_sharedState.renderWidth, m_sharedState.renderHeight);
                 CreateEyeBuffers(m_sharedState.renderWidth, m_sharedState.renderHeight);
+            }
+        }
+
+        // GH #76 (option 1, ADR-0504): evidence-only per-eye replay probe. The
+        // engine submits eye-space geometry with an identity modelview, so a
+        // per-eye camera is a pure translation of every eye-space vertex; this
+        // confirms live that the host's per-eye views are exactly that, and logs
+        // the offset the replay would apply. It changes no rendering.
+        if (g_vrConfig.stereoReplayProbe) {
+            static uint32_t s_lastReplayProbeSwap = 0;
+            const uint32_t every = (uint32_t)(g_vrConfig.stereoReplayProbeEvery > 0
+                                                  ? g_vrConfig.stereoReplayProbeEvery : 1);
+            if (s_swapCount - s_lastReplayProbeSwap >= every) {
+                s_lastReplayProbeSwap = s_swapCount;
+                if (m_sharedState.hmdPose.isValid) {
+                    const float headPos[3] = {m_sharedState.hmdPose.position.x,
+                                              m_sharedState.hmdPose.position.y,
+                                              m_sharedState.hmdPose.position.z};
+                    const float headQuat[4] = {m_sharedState.hmdPose.orientation.x,
+                                               m_sharedState.hmdPose.orientation.y,
+                                               m_sharedState.hmdPose.orientation.z,
+                                               m_sharedState.hmdPose.orientation.w};
+                    float headView[16];
+                    ReplayViewFromPose(headPos, headQuat, headView);
+                    const float baseline = ReplayBaselineMeters(m_sharedState.leftEyeView.m,
+                                                                m_sharedState.rightEyeView.m, 0.065f);
+                    const float halfIpd = 0.5f * baseline;
+                    float offL[3], offR[3];
+                    bool usedL = false, usedR = false;
+                    const bool okL = EyeSpaceCameraOffsetFromViews(m_sharedState.leftEyeView.m,
+                        m_sharedState.rightEyeView.m, headPos, headQuat, false, halfIpd, offL, &usedL);
+                    const bool okR = EyeSpaceCameraOffsetFromViews(m_sharedState.leftEyeView.m,
+                        m_sharedState.rightEyeView.m, headPos, headQuat, true, halfIpd, offR, &usedR);
+                    const float resL = okL ? ReplayViewResidual(headView, m_sharedState.leftEyeView.m, offL) : -1.0f;
+                    const float resR = okR ? ReplayViewResidual(headView, m_sharedState.rightEyeView.m, offR) : -1.0f;
+                    // resL/resR are ~0 only when the published per-eye views are
+                    // scene-faithful (a real runtime); a large residual names the
+                    // mock host's placeholder baseline (ADR-0463 / GH #77).
+                    VR_LOG_INFO("StereoReplay: swap=%u baseline=%.4fm srcL=%s srcR=%s "
+                                "offL=(%.4f,%.4f,%.4f) offR=(%.4f,%.4f,%.4f) residualL=%.6f residualR=%.6f",
+                                s_swapCount, baseline,
+                                usedL ? "views" : "fallback", usedR ? "views" : "fallback",
+                                offL[0], offL[1], offL[2], offR[0], offR[1], offR[2], resL, resR);
+                }
             }
         }
 

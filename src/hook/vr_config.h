@@ -162,6 +162,15 @@ struct VRConfig {
     int dibrDepthEvery = 3;
     int dibrCols = 8;
     int dibrRows = 6;
+    // GH #76 (option 1, ADR-0504): evidence-only probe for the per-eye replay
+    // route. The engine submits eye-space geometry with an identity modelview
+    // (ADR-0481/0482), so a per-eye camera is a pure translation of every
+    // eye-space vertex; this logs, every `stereoReplayProbeEvery` swaps, the
+    // eye-space offset implied by the live per-eye views and the residual of
+    // `translate(-offset) * headView` vs that view. It never changes rendering.
+    // Default OFF.
+    int stereoReplayProbe = 0;
+    int stereoReplayProbeEvery = 300;
 };
 
 extern VRConfig g_vrConfig;

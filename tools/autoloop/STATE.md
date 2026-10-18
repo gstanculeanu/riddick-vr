@@ -2,6 +2,89 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 102 — 2026-10-18 14:15 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) — option 1 is
+  scoped and its first tested primitive lands (ADR-0504)**: the engine's
+  **eye-space** client-array geometry makes a per-eye camera a *pure modelview
+  translation*, so the replay maths + a live provenance probe are landed
+  (`src/hook/stereo_replay.h`, CTest `stereo_replay`, opt-in `StereoReplayProbe`).
+  New issue **GH #90** scopes the remaining draw-recorder + replay unit. Real C++
+  change -> `build-all` + CTest both arches; one live xrsim run on a read-only
+  per-run shadow (no deploy, no install write).
+- **Why this unit:** wake 101 (ADR-0503) closed the issue's interim option 2 by
+  measurement ("no hook-readable FBO holds the near world pass") and said option 1
+  "needs a separately scoped engine render seam". ADR-0481/0482's own finding —
+  the engine renders **eye-space** client-array geometry with an **identity
+  `GL_MODELVIEW`** — is exactly what makes a replay possible (a camera move is a
+  uniform translation of eye-space vertices), so the route is not blocked; it was
+  never scoped.
+- **Change (maths + instrument only, no render change):**
+  - NEW `src/hook/stereo_replay.h` (pure, headless): `ReplayViewFromPose`,
+    `ReplayEyePositionFromView`, `EyeSpaceCameraOffset` (`d_eye = R_head^T (eyePos
+    - headPos)`), `EyeSpaceCameraOffsetFromViews` with a **scene-faithfulness gate**
+    (`kReplayMaxEyeOffsetMeters = 0.25 m`, rotation match), `BuildEyeReplayModelview`
+    (`translate(-d_eye)`), `ReplayViewResidual`, `ReplayBaselineMeters`.
+  - `stereo_renderer.cpp` `OnSwapBuffers`: opt-in `StereoReplayProbe=1` (new INI
+    keys `StereoReplayProbe`/`StereoReplayProbeEvery`, default 0/300) logs
+    `StereoReplay: swap=.. baseline=.. srcL=.. srcR=.. offL=(..) offR=(..)
+    residualL=.. residualR=..`. **Evidence only** — it never touches the warp or
+    the snapshot, so `StereoParallaxDibr=0`/shift-stereo are unaffected.
+  - NEW `tests/stereo_replay_tests.cpp` (CTest `stereo_replay`, both arches),
+    `tools/verify_reported_fixes.py` new #76/ADR-0504 invariant, NEW
+    `docs/adr/0504-…`, `docs/adr/README.md` (head -> 0504), `docs/vr-scenarios.md`,
+    `src/hook/README.md`, `tools/riddick_vr.ini.example`.
+  - NEW **GH #90** `[FEATURE] GH #76 option 1: per-eye replay of the engine's
+    eye-space draws`.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 514048 B
+  `7e95f8c9a98e` + x64 host); **CTest 30/30 (x86) and 28/28 (x64)** (+1 each);
+  all 12 `tools/test_*.py` exit 0; `verify_reported_fixes`, `scenario_tests.py
+  --check`, `verify_hook_init`, `validate_addresses`, `verify_test_artifacts`,
+  `xrsim --selftest` PASS.
+- **EVIDENCE live (`RIDDICKVR_SIM=1`, read-only per-run shadow, `--reach-gameplay
+  --duration 70 --advance-menu --advance-min-taps 8 --require-fresh-hook
+  --downscale 4 --ini StereoReplayProbe=1`; `deployed_hook_matches_build` PASS,
+  hook `7e95f8c9a98e`):** 4 probe lines (swaps 300/600/900/1200), all the same:
+  `baseline=0.0650m srcL=fallback srcR=fallback offL=(-0.0325,0.0000,0.0000)
+  offR=(0.0325,0.0000,0.0000) residualL=1.685053 residualR=1.685053`.
+  - **`baseline=0.0650m`** — the IPD is recovered from the published view
+    translations. **`src=fallback`** — the published per-eye views are **not
+    scene-faithful**, so the gate refuses them: the hook-side confirmation of
+    GH #77/ADR-0463 (the hook receives the *synthetic placeholder*, whose origin is
+    the world origin, not the sim-reconstructed `eye=sim` views). **`off = ±half-IPD
+    on eye-space X`** — exactly the replay offset the mechanism predicts (a pure
+    translation, no rotation). **`residual ≈ 1.68 ≈ -headPos.y`** — the placeholder
+    differs from `translate(-offset)*headView` by the missing head origin, naming it
+    cleanly (and the offline test proves the residual is `< 1e-5` for the host's
+    *scene-faithful* views, head yaws 0..-140 deg).
+- **Verdict / consequence (honest):** GH #76's option 1 is **not** "architecturally
+  blocked"; it is **scoped with a measured mechanism** and its first primitive is
+  landed + tested. **Stereo is NOT fixed** — `--require-parallax` still fails and
+  the shift-stereo remains; the remaining unit (record the frame's `glDrawElements`
+  draws and replay them per eye with `BuildEyeReplayModelview`, leaving the
+  immediate-mode HUD unshifted) is the real, larger engineering job, opened as
+  GH #90.
+- **Blocker / honest limit:** no draw recorder yet; the live graded run did not
+  reach full-bleed gameplay (2 captures; the known launcher/full-bleed flake) — the
+  probe fires on every live frame, so the provenance measurement does not depend on
+  it; the HUD/world boundary the replay must respect is not yet decided; a real
+  headset (`eye=runtime`) would be needed to exercise the `src=views` path; nothing
+  about the 2004 build; no headset.
+- **Next:** (1) **GH #90** — the draw recorder + per-eye replay (record
+  `glDrawElements` with its client arrays; replay per eye with the per-eye
+  projection + `translate(-offset)`; keep the immediate-mode HUD screen-aligned;
+  off by default); (2) re-run `--require-parallax` after it and require a non-zero
+  per-tile disparity spread; (3) `StereoParallaxDibr=0` and `StereoReplayProbe=0`
+  stay the defaults; (4) player-visible queue GH #63/#64/#61 then the P1 bugs
+  #45/#49/#50/#51/#65 (all code-complete, headset/deploy-blocked); (5)
+  `DEFAULT_GAME_DIR` 2004-vs-2009; (6) GH #83/#88/#89/#74.
+- **Ops note:** a leftover `riddickvr-host` from the first (2004-install) attempt
+  held `dist\riddickvr-host.exe` and failed `build-all`'s Copy-Item; killed it and
+  re-ran clean. The 2004 install has no `DarkAthena.exe`, so the harness needs the
+  F: 2009 shadow (the recorded 2004-vs-2009 mismatch).
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY per-run shadows; no deploy, no install write); no leftover game/host
+  processes; live lock released. `STATE.log` **appended** (never replaced — GH #88).
+
 ## Wake 101 — 2026-10-18 13:45 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) — wake 100's
   Next #1**: the hook now records **every** framebuffer object the engine allocates
