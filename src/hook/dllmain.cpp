@@ -83,6 +83,19 @@ typedef void (WINAPI *PFN_glCallList)(GLuint list);
 // (RndrGL imports glVertexPointer/glNormalPointer/glColorPointer; it never uses
 // glDrawArrays or a buffer object, so the pointer is always a client pointer).
 typedef void (WINAPI *PFN_glVertexPointer)(GLint size, GLenum type, GLsizei stride, const void* pointer);
+// GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode path, which the
+// submitted-vertex observer never counted. The shipped 2009 RndrGL.dll imports
+// glBegin/glEnd/glVertex3f/glVertex3fv (and the 2-D glVertex2f/glVertex2i) -- see
+// docs/rea/reference/RndrGL_GL_Path.txt section 2 and
+// `python tools/gl_vocabulary_scan.py --imports` -- so a mesh it submits with
+// glBegin(..) { glVertex3f(..) } glEnd() produces no glDrawElements call and no
+// sample at all. Intercepted for observation only (never suppressed).
+typedef void (WINAPI *PFN_glBegin)(GLenum mode);
+typedef void (WINAPI *PFN_glEnd)(void);
+typedef void (WINAPI *PFN_glVertex3f)(GLfloat x, GLfloat y, GLfloat z);
+typedef void (WINAPI *PFN_glVertex3fv)(const GLfloat* v);
+typedef void (WINAPI *PFN_glVertex2f)(GLfloat x, GLfloat y);
+typedef void (WINAPI *PFN_glVertex2i)(GLint x, GLint y);
 // GH #67 step 1: RndrGL composes object transforms from glLoadMatrixf +
 // glPushMatrix/glTranslatef/glPopMatrix (it does not import glMultMatrixf /
 // glRotatef -- docs/rea/reference/RndrGL_GL_Path.txt section 3). Intercept those
@@ -100,6 +113,12 @@ static PFN_glLoadIdentity real_glLoadIdentity = nullptr;
 static PFN_glPushMatrix real_glPushMatrix = nullptr;
 static PFN_glPopMatrix real_glPopMatrix = nullptr;
 static PFN_glTranslatef real_glTranslatef = nullptr;
+static PFN_glBegin real_glBegin = nullptr;
+static PFN_glEnd real_glEnd = nullptr;
+static PFN_glVertex3f real_glVertex3f = nullptr;
+static PFN_glVertex3fv real_glVertex3fv = nullptr;
+static PFN_glVertex2f real_glVertex2f = nullptr;
+static PFN_glVertex2i real_glVertex2i = nullptr;
 
 static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
@@ -147,6 +166,41 @@ static void WINAPI Hook_glPopMatrix(void) {
 static void WINAPI Hook_glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
     RiddickVR::OpenGLProxy::NoteModelviewTranslatef(x, y, z);
     if (real_glTranslatef) real_glTranslatef(x, y, z);
+}
+
+// GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. These
+// mirror the glDrawElements/glCallList hooks' contract -- observe, then forward
+// verbatim, never suppress -- so enabling observation cannot change a frame. The
+// counter is inert unless ViewmodelObserve=1, and the per-vertex hooks are a
+// single observe-check + a few compares once a block is open.
+static void WINAPI Hook_glBegin(GLenum mode) {
+    RiddickVR::OpenGLProxy::NoteImmediateBegin();
+    if (real_glBegin) real_glBegin(mode);
+}
+
+static void WINAPI Hook_glEnd(void) {
+    RiddickVR::OpenGLProxy::NoteImmediateEnd();
+    if (real_glEnd) real_glEnd();
+}
+
+static void WINAPI Hook_glVertex3f(GLfloat x, GLfloat y, GLfloat z) {
+    RiddickVR::OpenGLProxy::NoteImmediateVertex3(x, y, z);
+    if (real_glVertex3f) real_glVertex3f(x, y, z);
+}
+
+static void WINAPI Hook_glVertex3fv(const GLfloat* v) {
+    if (v) RiddickVR::OpenGLProxy::NoteImmediateVertex3(v[0], v[1], v[2]);
+    if (real_glVertex3fv) real_glVertex3fv(v);
+}
+
+static void WINAPI Hook_glVertex2f(GLfloat x, GLfloat y) {
+    RiddickVR::OpenGLProxy::NoteImmediateVertex2(x, y);
+    if (real_glVertex2f) real_glVertex2f(x, y);
+}
+
+static void WINAPI Hook_glVertex2i(GLint x, GLint y) {
+    RiddickVR::OpenGLProxy::NoteImmediateVertex2(static_cast<float>(x), static_cast<float>(y));
+    if (real_glVertex2i) real_glVertex2i(x, y);
 }
 
 static void InstallRndrGLHooks() {
@@ -218,6 +272,36 @@ static void InstallRndrGLHooks() {
         "glTranslatef",
         reinterpret_cast<void*>(Hook_glTranslatef),
         reinterpret_cast<void**>(&real_glTranslatef)
+    );
+    // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode path. RndrGL
+    // binds these (measured: `python tools/gl_vocabulary_scan.py --imports` lists
+    // glBegin/glEnd/glVertex3f/glVertex3fv/glVertex2f/glVertex2i among its 96 static
+    // OPENGL32 imports) and the probe counted none of them, so a mesh submitted as
+    // glBegin..glEnd was invisible to every previous sample. Observation only: each
+    // hook forwards to the saved original (the proxy's own forwarder) unconditionally.
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glBegin",
+        reinterpret_cast<void*>(Hook_glBegin), reinterpret_cast<void**>(&real_glBegin)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glEnd",
+        reinterpret_cast<void*>(Hook_glEnd), reinterpret_cast<void**>(&real_glEnd)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glVertex3f",
+        reinterpret_cast<void*>(Hook_glVertex3f), reinterpret_cast<void**>(&real_glVertex3f)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glVertex3fv",
+        reinterpret_cast<void*>(Hook_glVertex3fv), reinterpret_cast<void**>(&real_glVertex3fv)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glVertex2f",
+        reinterpret_cast<void*>(Hook_glVertex2f), reinterpret_cast<void**>(&real_glVertex2f)
+    );
+    RiddickVR::IATHook::Hook(
+        hRndrGL, "OPENGL32.dll", "glVertex2i",
+        reinterpret_cast<void*>(Hook_glVertex2i), reinterpret_cast<void**>(&real_glVertex2i)
     );
 }
 

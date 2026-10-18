@@ -246,6 +246,32 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   the measured 3/18 and 3/19 runs FAIL. The remaining route to GH #67 step 1 is
   the engine-side identification of the viewmodel pass, not another geometric
   heuristic.
+- **ADR-0491 — the census now covers *every* submission mechanism the shipped module
+  binds, including the one every previous correction missed: immediate mode.** The
+  eight corrections above sampled only `glDrawElements`/`glCallList`, but the live
+  2009 `RndrGL.dll` **imports the immediate-mode path** (`glBegin`/`glEnd`/
+  `glVertex3f`/`glVertex3fv`/`glVertex2f`/`glVertex2i` among its 96 static
+  `OPENGL32.dll` imports; measured read-only this wake with
+  `python tools/gl_vocabulary_scan.py --imports`), and the reference explicitly left
+  "**do the first-person arms turn out to use immediate mode?**" as an open
+  follow-up. A mesh submitted with `glBegin(..) { glVertex3f(..) } glEnd()` emits
+  **no** draw call, so it produced no sample in any prior correction — no array or
+  list reading could ever have been the arms.
+  `immediate_mode_observe.h` (pure; unit-tested by `immediate_mode_observe`) counts,
+  per 300-swap interval and split by the first-person window at each `glBegin`:
+  blocks (`beganIn/Out`, `endIn/Out`), 3-D vs 2-D vertices (`v3In/Out`, `v2In/Out`;
+  2-D is kept separate so "the window is screen-space HUD" is distinguishable) and
+  the window's **largest** block with exact bounds (one `glBegin`..`glEnd` batch is
+  one submitted mesh — the immediate-mode analogue of ADR-0483). `InstallRndrGLHooks`
+  IAT-hooks the six entry points and forwards each verbatim (never suppresses;
+  observation-only, off unless `ViewmodelObserve=1`). `OnSwapBuffers` logs
+  `ViewmodelProbe immediate [#N]: …` and the candidate in the existing
+  `ViewmodelProbe submission fpimm:` form, so XRSIM grades it with the *same*
+  planar-vs-volumetric shape predicate as `fp`/`world`/`near`.
+  `viewmodel_in_window_immediate_geometry` PASSes when the window held 3-D
+  immediate-mode vertices, **FAILs** when the census ran and it held none, and
+  SKIPs on a pre-#0491 hook; finding immediate geometry in the window is removing a
+  mechanism blind spot, **not** identifying the arms. See ADR-0491.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

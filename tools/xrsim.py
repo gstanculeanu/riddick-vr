@@ -423,10 +423,22 @@ VIEWMODEL_SUBMISSION_RE = re.compile(
 # logged, not guessed). `count` and ` inside=` are optional so a pre-0483 /
 # pre-0490 hook log still parses.
 VIEWMODEL_SUBMISSION_SAMPLE_RE = re.compile(
-    r"ViewmodelProbe submission (fp|world|near): first=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
+    r"ViewmodelProbe submission (fp|world|near|fpimm): first=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
     r"min=\(([-\d.]+),([-\d.]+),([-\d.]+)\) max=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
     r"n=(\d+)(?: count=(\d+))? indexType=(\d+) vertexType=(\d+) valid=([01])"
     r"(?: inside=([01]))?")
+# GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The
+# submitted-vertex observer counts only glDrawElements/glCallList, so the shipped
+# module's immediate-mode path (glBegin/glEnd + glVertex3f/glVertex3fv/glVertex2f/
+# glVertex2i -- all measured in its static OPENGL32 import table) was never
+# counted; a mesh submitted with glBegin..glEnd produced no sample at all. These
+# tallies are per interval, split by window side: `v3In`/`v2In` are the 3-D and
+# 2-D vertices whose block began inside the first-person window. `openIn` says an
+# in-window block was still open at the sample; `sample=1` says the window held at
+# least one block (its largest, `n`/bounds, is logged as the `fpimm` sample).
+VIEWMODEL_IMMEDIATE_RE = re.compile(
+    r"ViewmodelProbe immediate \[#(\d+)\]: beganIn=(\d+) beganOut=(\d+) endIn=(\d+) "
+    r"endOut=(\d+) v3In=(\d+) v3Out=(\d+) v2In=(\d+) v2Out=(\d+) openIn=([01]) sample=([01])")
 # GH #67 step 1 (sixth correction, ADR-0488): the projection matrix behind each
 # sampled perspective load, so the engine's near-plane convention is auditable
 # (the pass trace's `P?` was a hook-side extraction failure). `classic` is the
@@ -1250,6 +1262,31 @@ def viewmodel_near_field_coverage(probe):
     }
 
 
+def viewmodel_immediate_census(probe):
+    """GH #67 step 1 (ninth correction, ADR-0491): the census of the first-person
+    window's submission *mechanism*.
+
+    Pure. ``probe`` is :func:`viewmodel_probe_stats` output. Returns the parsed
+    immediate-mode tallies plus ``ran``: False for a pre-#0491 hook (no
+    ``ViewmodelProbe immediate`` line) so callers SKIP rather than fail.
+    ``vertex3_inside`` counts the 3-D immediate-mode vertices
+    (``glVertex3f``/``glVertex3fv``) whose ``glBegin`` block opened *inside* the
+    first-person window -- the mechanism question the reference left open ("if the
+    first-person arms turn out to use immediate mode"), and one the array/list
+    sampling could never answer because such a mesh emits no ``glDrawElements``.
+    ``vertex2_inside`` is the 2-D path (HUD/screen-space), kept separate so "the
+    window is 2-D immediate geometry" is distinguishable from "it is a 3-D mesh".
+    """
+    imm = (probe or {}).get("immediate")
+    out = {"ran": bool(imm), "intervals": 0, "began_inside": 0, "began_outside": 0,
+           "ends_inside": 0, "ends_outside": 0, "vertex3_inside": 0,
+           "vertex3_outside": 0, "vertex2_inside": 0, "vertex2_outside": 0,
+           "open_inside": 0, "sampled_intervals": 0, "fpimm": None}
+    if imm:
+        out.update(imm)
+    return out
+
+
 def viewmodel_probe_stats(log_text):
     """GH #67 step 2: summarise the observation-only first-person viewmodel probe.
 
@@ -1357,6 +1394,18 @@ def viewmodel_probe_stats(log_text):
         # 14688-count volumetric mesh and a 2520-count plane), so grading only the
         # last interval made the verdict depend on which interval was sampled last.
         submission_samples[m.group(1)] = sample
+    # GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. Absent
+    # on a pre-#0491 hook / ViewmodelObserve=0, so this is additive too.
+    immediate = []
+    for m in VIEWMODEL_IMMEDIATE_RE.finditer(text):
+        immediate.append({
+            "index": int(m.group(1)),
+            "began_inside": int(m.group(2)), "began_outside": int(m.group(3)),
+            "ends_inside": int(m.group(4)), "ends_outside": int(m.group(5)),
+            "vertex3_inside": int(m.group(6)), "vertex3_outside": int(m.group(7)),
+            "vertex2_inside": int(m.group(8)), "vertex2_outside": int(m.group(9)),
+            "open_inside": m.group(10) == "1", "sampled": m.group(11) == "1",
+        })
     return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates,
             "program_lines": program,
             "program": {
@@ -1374,8 +1423,27 @@ def viewmodel_probe_stats(log_text):
                 "fp": submission_samples.get("fp"),
                 "world": submission_samples.get("world"),
                 "near": submission_samples.get("near"),
+                # GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode
+                # candidate (the window's largest glBegin..glEnd block, ADR-0483's
+                # "largest mesh" in immediate form); None on a pre-#0491 hook.
+                "fpimm": submission_samples.get("fpimm"),
                 "samples": submission_sample_list,
-            } if submission else None}
+            } if submission else None,
+            "immediate_lines": immediate,
+            "immediate": {
+                "intervals": len(immediate),
+                "began_inside": sum(x["began_inside"] for x in immediate),
+                "began_outside": sum(x["began_outside"] for x in immediate),
+                "ends_inside": sum(x["ends_inside"] for x in immediate),
+                "ends_outside": sum(x["ends_outside"] for x in immediate),
+                "vertex3_inside": sum(x["vertex3_inside"] for x in immediate),
+                "vertex3_outside": sum(x["vertex3_outside"] for x in immediate),
+                "vertex2_inside": sum(x["vertex2_inside"] for x in immediate),
+                "vertex2_outside": sum(x["vertex2_outside"] for x in immediate),
+                "open_inside": sum(1 for x in immediate if x["open_inside"]),
+                "sampled_intervals": sum(1 for x in immediate if x["sampled"]),
+                "fpimm": submission_samples.get("fpimm"),
+            } if immediate else None}
 
 
 def viewmodel_candidate_best(samples, label="fp"):
@@ -2952,6 +3020,71 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
                        "check": "viewmodel_near_field_candidate_identifies_pass",
                        "ok": covers and volumetric and near_field, "detail": detail})
 
+    # GH #67 step 1 (ninth correction, ADR-0491): the *mechanism* census. Every
+    # prior correction sampled only `glDrawElements` (client arrays) and
+    # `glCallList` (display lists), but the shipped 2009 RndrGL.dll also **imports
+    # the immediate-mode path** (measured: `glBegin`/`glEnd`/`glVertex3f`/
+    # `glVertex3fv`/`glVertex2f`/`glVertex2i` among its 96 static OPENGL32 imports)
+    # and the reference's own open question was "do the first-person arms use
+    # immediate mode?". A mesh submitted with `glBegin(..) { glVertex3f(..) }
+    # glEnd()` produces **no** `glDrawElements` call, so no array sample could ever
+    # be the arms. This grades the census: PASS when the window held 3-D
+    # immediate-mode vertices (the arms *could* be that geometry), FAIL when the
+    # census ran and the window held none (the hypothesis is falsified for this
+    # target, and the arms must be arrays/lists/absent). A pre-#0491 hook has no
+    # census line and is SKIPPED, never failed.
+    imm = viewmodel_immediate_census(probe)
+    imm_samples = list(sub.get("samples") or [])
+    if imm["fpimm"] and not any(s.get("label") == "fpimm" for s in imm_samples):
+        # A log whose submission-interval line is absent (a short run) still carries
+        # the immediate candidate, so grade it rather than silently skipping.
+        imm_samples.append(imm["fpimm"])
+    imm_best = viewmodel_candidate_best(imm_samples, "fpimm")
+    if not imm["ran"]:
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_in_window_immediate_geometry",
+                       "ok": True, "skip": True,
+                       "detail": ("no `ViewmodelProbe immediate` line (pre-#0491 hook "
+                                  "or ViewmodelObserve=0)")})
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_immediate_candidate_is_volumetric",
+                       "ok": True, "skip": True,
+                       "detail": ("no immediate-mode census (pre-#0491 hook or "
+                                  "ViewmodelObserve=0)")})
+    else:
+        v3 = imm["vertex3_inside"]
+        detail = (f"{imm['intervals']} sampled interval(s): in-window blocks="
+                  f"{imm['began_inside']} (3-D vertices v3In={v3}, 2-D v2In="
+                  f"{imm['vertex2_inside']}); outside blocks={imm['began_outside']} "
+                  f"(v3Out={imm['vertex3_outside']} v2Out={imm['vertex2_outside']}); "
+                  f"{imm['sampled_intervals']} interval(s) kept a block sample")
+        if v3 == 0:
+            detail += (" -- the first-person window held NO 3-D immediate-mode "
+                       "vertices, so 'the arms are submitted with glBegin..glEnd' is "
+                       "NOT supported on this target")
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_in_window_immediate_geometry",
+                       "ok": v3 > 0, "detail": detail})
+        if imm_best["sampled"]:
+            geo = imm_best["geometry"] or {}
+            pick = imm_best["best"]
+            vol_detail = (f"largest in-window block count={pick.get('count')} "
+                          f"extent={geo.get('extent')} "
+                          f"thickness_ratio={geo.get('thickness_ratio')}")
+            if not geo.get("volumetric"):
+                vol_detail += (" -- the window's largest immediate block is "
+                               "planar/screen-space, so it is not the arms mesh")
+            checks.append({"group": "viewmodel",
+                           "check": "viewmodel_immediate_candidate_is_volumetric",
+                           "ok": imm_best["volumetric"] > 0, "detail": vol_detail})
+        else:
+            checks.append({"group": "viewmodel",
+                           "check": "viewmodel_immediate_candidate_is_volumetric",
+                           "ok": True, "skip": True,
+                           "detail": ("the census ran but no sample interval held an "
+                                      "in-window glBegin..glEnd block, so there is no "
+                                      "immediate candidate to grade")})
+
     # GH #67 step 1 (sixth correction, ADR-0488): the near-plane extraction the
     # NearPlaneDrop opener depends on. The pass trace read `P?` on every
     # projection load because the classic `m[14]/(m[10]-1)` returns -far on the
@@ -3314,6 +3447,36 @@ def cmd_selftest(require_image_deps=False):
         viewmodel_sample_is_near_field(None) is False and
         viewmodel_sample_is_near_field({"min": [-16.0, 0.0, 0.0], "max": [16.0, 16.0, 16.0],
                                         "valid": True}) is True)
+
+    # GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census -- the
+    # submission path (glBegin/glEnd + glVertex3f/glVertex2f) the shipped module
+    # imports and no previous correction counted. The census line is parsed into the
+    # probe, the window's largest block parses as the `fpimm` sample with the same
+    # shape grade as `fp`/`near`, and a pre-#0491 log reports the census absent
+    # (`ran` False) rather than zeros.
+    imm_text = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=0 arrayOut=900 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=0 outSample=1 "
+        "nearSample=0\n"
+        "[INFO] ViewmodelProbe immediate [#300]: beganIn=2 beganOut=5 endIn=2 endOut=5 "
+        "v3In=122 v3Out=900 v2In=0 v2Out=0 openIn=0 sample=1\n"
+        "[INFO] ViewmodelProbe submission fpimm: first=(0.100,0.200,0.050) "
+        "min=(-0.400,-0.450,0.000) max=(0.450,0.400,0.300) n=120 count=120 "
+        "indexType=0 vertexType=5126 valid=1\n"
+        "[INFO] ViewmodelProbe immediate [#600]: beganIn=0 beganOut=4 endIn=0 endOut=4 "
+        "v3In=0 v3Out=700 v2In=0 v2Out=0 openIn=0 sample=0\n")
+    iprobe = viewmodel_probe_stats(imm_text)
+    ic = viewmodel_immediate_census(iprobe)
+    ibest = viewmodel_candidate_best(iprobe["submission"]["samples"], "fpimm")
+    results["viewmodel_immediate_census_is_parsed"] = (
+        ic["ran"] is True and ic["intervals"] == 2 and ic["began_inside"] == 2 and
+        ic["began_outside"] == 9 and ic["vertex3_inside"] == 122 and
+        ic["vertex3_outside"] == 1600 and ic["sampled_intervals"] == 1 and
+        iprobe["submission"]["fpimm"]["count"] == 120 and
+        ibest["sampled"] == 1 and ibest["volumetric"] == 1 and
+        ibest["best"]["geometry"]["volumetric"] is True and
+        viewmodel_immediate_census(viewmodel_probe_stats(""))["ran"] is False and
+        viewmodel_immediate_census(viewmodel_probe_stats(""))["vertex3_inside"] == 0)
 
     skipped = []
     if not have_image_deps():

@@ -58,6 +58,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/gl_matrix_tracker.h
         src/hook/vertex_program_observe.h
         src/hook/vertex_submission_observe.h
+        src/hook/immediate_mode_observe.h
         src/hook/projection_near.h
         src/hook/display_branch.h
         src/hook/sim_input_bridge.h
@@ -215,6 +216,15 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME vertex_submission_observe COMMAND riddick_vr_vertex_submission_tests)
+
+    # GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census -- the
+    # submission path (glBegin/glEnd + glVertex3f/2f) the shipped module imports and
+    # no previous probe counted. Pure, headless.
+    add_executable(riddick_vr_immediate_mode_tests tests/immediate_mode_observe_tests.cpp)
+    target_include_directories(riddick_vr_immediate_mode_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME immediate_mode_observe COMMAND riddick_vr_immediate_mode_tests)
 
     # GH #67 step 1 (sixth correction, ADR-0488): the perspective near plane from
     # the engine's own (z-flipped) projection convention -- the measurement the

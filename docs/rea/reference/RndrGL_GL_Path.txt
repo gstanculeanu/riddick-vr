@@ -50,6 +50,16 @@ in RndrGL.dll's import table sees every engine draw.
   intercepted in this pass: suppressing `glBegin` without the matching `glEnd`
   would be a GL error, so a begin/end pair gate is left as a follow-up if the
   first-person arms turn out to use immediate mode.
+  **CORRECTION (ADR-0491, wake 89):** the *observation* half of that follow-up has
+  landed. The live 2009 `RndrGL.dll` binds `glBegin`, `glEnd`, `glVertex3f`,
+  `glVertex3fv`, `glVertex2f` and `glVertex2i` (re-measured read-only with
+  `python tools/gl_vocabulary_scan.py --imports`), and `InstallRndrGLHooks` now
+  IAT-hooks all six, forwarding each verbatim (observation only, off unless
+  `ViewmodelObserve=1`). `immediate_mode_observe.h` censuses the first-person
+  window by mechanism (blocks + 3-D/2-D vertices + the largest block's exact
+  bounds), so "the arms are submitted with `glBegin`..`glEnd`" is now measurable.
+  Suppression of the immediate path is still deliberately **not** implemented (the
+  begin/end pairing rule above still holds).
 
 ### Open question: the display-list path
 `glCallList` is imported by RndrGL, but **no** shipped module imports the list

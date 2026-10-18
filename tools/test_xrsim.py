@@ -1727,6 +1727,90 @@ def test_viewmodel_probe_submission_lines_are_parsed(td):
     assert xrsim.viewmodel_probe_stats("")["submission"] is None
 
 
+def test_immediate_mode_census_is_parsed_and_graded(td):
+    """GH #67 step 1 (ninth correction, ADR-0491): the census of the first-person
+    window's submission *mechanism* must be parsed out of the hook log.
+
+    Every prior correction sampled only ``glDrawElements``/``glCallList``, but the
+    shipped RndrGL.dll imports the immediate-mode path, so a mesh submitted with
+    ``glBegin..glEnd`` emitted no draw call and could never appear in a sample. The
+    census must therefore be parsed (window-side block/vertex tallies, the 2-D path
+    kept separate from the 3-D one), the window's largest block must surface as the
+    ``fpimm`` sample with the same shape grade as ``fp``/``near``, and a pre-#0491
+    log must report the census *absent* (``ran`` False), never zeros."""
+    log = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=0 arrayOut=900 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=0 outSample=1\n"
+        "[INFO] ViewmodelProbe immediate [#300]: beganIn=2 beganOut=5 endIn=2 endOut=5 "
+        "v3In=122 v3Out=900 v2In=0 v2Out=0 openIn=0 sample=1\n"
+        "[INFO] ViewmodelProbe submission fpimm: first=(0.100,0.200,0.050) "
+        "min=(-0.400,-0.450,0.000) max=(0.450,0.400,0.300) n=120 count=120 "
+        "indexType=0 vertexType=5126 valid=1\n"
+        "[INFO] ViewmodelProbe immediate [#600]: beganIn=1 beganOut=4 endIn=1 endOut=4 "
+        "v3In=0 v3Out=700 v2In=12 v2Out=0 openIn=0 sample=1\n"
+        "[INFO] ViewmodelProbe submission fpimm: first=(0.000,0.000,0.000) "
+        "min=(0.000,0.000,0.000) max=(100.000,50.000,0.000) n=12 count=12 "
+        "indexType=0 vertexType=5126 valid=1\n")
+    probe = xrsim.viewmodel_probe_stats(log)
+    lines = probe["immediate_lines"]
+    assert len(lines) == 2, lines
+    assert lines[0]["began_inside"] == 2 and lines[0]["vertex3_inside"] == 122, lines[0]
+    assert lines[0]["vertex2_inside"] == 0 and lines[0]["open_inside"] is False, lines[0]
+    assert lines[1]["vertex2_inside"] == 12 and lines[1]["vertex3_outside"] == 700, lines[1]
+    census = xrsim.viewmodel_immediate_census(probe)
+    assert census["ran"] is True and census["intervals"] == 2, census
+    assert census["began_inside"] == 3 and census["began_outside"] == 9, census
+    assert census["vertex3_inside"] == 122 and census["vertex3_outside"] == 1600, census
+    assert census["vertex2_inside"] == 12, census
+    # The immediate candidate is graded by the same shape predicate as fp/near: the
+    # volume is best (the planar 2-D block is the last one, but best-of-run wins).
+    best = xrsim.viewmodel_candidate_best(probe["submission"]["samples"], "fpimm")
+    assert best["sampled"] == 2 and best["best"]["count"] == 120, best
+    assert best["geometry"]["volumetric"] is True, best
+    assert xrsim.viewmodel_probe_stats("")["immediate"] is None
+    absent = xrsim.viewmodel_immediate_census(xrsim.viewmodel_probe_stats(""))
+    assert absent["ran"] is False and absent["vertex3_inside"] == 0, absent
+    # Additive: a pre-#0491 submission log still parses, with no census.
+    legacy = xrsim.viewmodel_probe_stats(
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=1 arrayOut=9 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0\n")
+    assert legacy["submission"] is not None and legacy["immediate"] is None, legacy
+    # The graded census: 3-D in-window immediate geometry PASSes the mechanism
+    # check and the window's largest block is graded by the same shape predicate.
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    passed, checks = xrsim.evaluate(_args(), art, "", log)
+    rec = [c for c in checks if c["check"] == "viewmodel_in_window_immediate_geometry"][0]
+    assert rec["ok"] is True and not rec.get("skip"), rec
+    assert "v3In=122" in rec["detail"] and "v2In=12" in rec["detail"], rec
+    shape = [c for c in checks if c["check"] == "viewmodel_immediate_candidate_is_volumetric"][0]
+    assert shape["ok"] is True and not shape.get("skip"), shape
+    # A census that ran with NO in-window 3-D immediate geometry must FAIL (the
+    # "the arms are submitted with glBegin..glEnd" hypothesis is falsified for this
+    # target), and there is then no immediate candidate to grade.
+    none3d = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=19 arrayOut=89 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0 nearSample=0\n"
+        "[INFO] ViewmodelProbe immediate [#300]: beganIn=0 beganOut=4 endIn=0 endOut=4 "
+        "v3In=0 v3Out=700 v2In=3 v2Out=0 openIn=0 sample=0\n")
+    passed, checks = xrsim.evaluate(_args(), art, "", none3d)
+    rec = [c for c in checks if c["check"] == "viewmodel_in_window_immediate_geometry"][0]
+    assert rec["ok"] is False and not rec.get("skip"), rec
+    assert "NOT supported" in rec["detail"], rec
+    shape = [c for c in checks if c["check"] == "viewmodel_immediate_candidate_is_volumetric"][0]
+    assert shape.get("skip") is True, shape
+    # A pre-#0491 hook has no census line at all -> both checks SKIP, never fail.
+    pre = ("[INFO] ViewmodelProbe submission [#300]: arrayIn=19 arrayOut=89 listIn=0 "
+           "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0 nearSample=0\n")
+    passed, checks = xrsim.evaluate(_args(), art, "", pre)
+    rec = [c for c in checks if c["check"] == "viewmodel_in_window_immediate_geometry"][0]
+    assert rec.get("skip") is True and rec["ok"] is True, rec
+    shape = [c for c in checks if c["check"] == "viewmodel_immediate_candidate_is_volumetric"][0]
+    assert shape.get("skip") is True and shape["ok"] is True, shape
+
+
 def test_confirm_key_messages_are_wellformed(td):
     """GH #71 req 1: the posted confirm tap must be a well-formed Win32
     keydown/WM_CHAR/keyup triple with a correct lParam (repeat bit + key-up

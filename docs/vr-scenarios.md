@@ -391,6 +391,27 @@ is volumetric), and both runs FAIL (3/18, 3/19) — the honest verdict. The
 remaining route to GH #67 step 1 is the engine-side identification of the
 viewmodel pass.
 
+**Correction (wake 89, ADR-0491): the census now covers the submission
+*mechanism*, including the immediate-mode path every previous sample missed.** The
+eight corrections above sampled only `glDrawElements` (client arrays) and
+`glCallList` (display lists) — but the live 2009 `RndrGL.dll` also **imports the
+immediate-mode path** (`glBegin`/`glEnd`/`glVertex3f`/`glVertex3fv`/`glVertex2f`/
+`glVertex2i` among its 96 static `OPENGL32.dll` imports; re-measured read-only with
+`python tools/gl_vocabulary_scan.py --imports`), and the reference's own open
+question was "do the first-person arms use immediate mode?". A mesh submitted as
+`glBegin(..) { glVertex3f(..) } glEnd()` emits **no** draw call, so no array or
+list sample could ever have been the arms. `InstallRndrGLHooks` now IAT-hooks the
+six entry points (observation only; forwarded verbatim, never suppressed, off
+unless `ViewmodelObserve=1`) and `immediate_mode_observe.h` censuses the window:
+blocks, 3-D vs 2-D vertices, and the window's largest block with exact bounds,
+logged as `ViewmodelProbe immediate [#N]: …` plus a
+`ViewmodelProbe submission fpimm:` candidate that shares the existing
+planar-vs-volumetric shape gate. XRSIM grades
+`viewmodel_in_window_immediate_geometry` (PASS on 3-D in-window immediate
+vertices, FAIL when the census ran and there were none, SKIP on a pre-#0491 hook)
+and `viewmodel_immediate_candidate_is_volumetric`. Finding immediate geometry in
+the window removes the mechanism blind spot; it does **not** identify the arms.
+
 
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during

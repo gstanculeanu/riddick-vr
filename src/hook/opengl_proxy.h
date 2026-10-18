@@ -134,6 +134,18 @@ public:
     static void NoteDrawElementsSubmission(GLenum mode, GLsizei count, GLenum type, const void* indices);
     static void NoteDrawListSubmission();
 
+    // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The
+    // shipped RndrGL.dll *imports* glBegin/glEnd/glVertex3f/glVertex3fv (and the
+    // 2-D glVertex2f/glVertex2i) -- the reference's own open question was "do the
+    // first-person arms use immediate mode?" -- and the submitted-vertex observer
+    // never counted that path, so a mesh submitted with glBegin..glEnd produced no
+    // sample at all. These feed immediate_mode_observe.h from the RndrGL IAT hooks
+    // in dllmain.cpp. Inert unless ViewmodelObserve=1.
+    static void NoteImmediateBegin();
+    static void NoteImmediateVertex3(float x, float y, float z);
+    static void NoteImmediateVertex2(float x, float y);
+    static void NoteImmediateEnd();
+
     // GL 1.1 functions retrieved dynamically
     static PFN_glBindTexture glBindTexture;
     static PFN_glGenTextures glGenTextures;

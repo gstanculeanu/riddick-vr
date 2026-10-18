@@ -8,6 +8,7 @@
 #include "gl_matrix_tracker.h"
 #include "vertex_program_observe.h"
 #include "vertex_submission_observe.h"
+#include "immediate_mode_observe.h"
 #include "projection_near.h"
 #include "logging.h"
 #include <string>
@@ -114,6 +115,11 @@ static VertexProgramObserver s_vertexProgramObserver;
 // Fed by the RndrGL glVertexPointer/glDrawElements/glCallList hooks in
 // dllmain.cpp; inert unless ViewmodelObserve=1.
 static VertexSubmissionObserver s_vertexSubmissionObserver;
+// GH #67 step 1 (ninth correction, ADR-0491): the *mechanism* census -- the
+// immediate-mode path (glBegin/glEnd + glVertex3f/glVertex3fv/glVertex2f/
+// glVertex2i) that the shipped RndrGL.dll imports and no probe ever counted.
+// Fed by the RndrGL IAT hooks in dllmain.cpp; inert unless ViewmodelObserve=1.
+static ImmediateModeObserver s_immediateModeObserver;
 static bool s_hasProjection = false;
 static bool s_has3DGameplayProjection = false;
 // GH #43/#44: per-frame 3D freshness. Menus/cinematics use ortho/2D
@@ -459,6 +465,34 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
         if (vs.hasOutsideSample) LogVertexSubmissionSample("world", vs.outsideSample);
         if (vs.hasNearSample) LogVertexSubmissionCandidate("near", vs.nearSample, vs.nearSampleInside);
     }
+    // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The
+    // submitted-vertex observer above counts only glDrawElements/glCallList, so a
+    // mesh submitted with `glBegin(GL_TRIANGLE_STRIP); glVertex3f(..); glEnd();`
+    // produced no sample at all -- which is exactly the mechanism question the
+    // reference left open ("if the first-person arms turn out to use immediate
+    // mode"). One census line per sampled frame plus, when the window held one, the
+    // bounds of its LARGEST immediate block, logged in the existing
+    // `ViewmodelProbe submission <label>:` form so the harness parses it as the
+    // `fpimm` sample and applies the same planar-vs-volumetric shape gate.
+    if (s_immediateModeObserver.Observing() && (s_swapFrameCount % 300) == 0) {
+        const ImmediateModeSnapshot im = s_immediateModeObserver.ComputeSnapshot();
+        VR_LOG_INFO("ViewmodelProbe immediate [#%llu]: beganIn=%u beganOut=%u endIn=%u endOut=%u "
+                    "v3In=%u v3Out=%u v2In=%u v2Out=%u openIn=%u sample=%u",
+            static_cast<unsigned long long>(s_swapFrameCount),
+            im.beganInside, im.beganOutside, im.endsInside, im.endsOutside,
+            im.vertex3Inside, im.vertex3Outside, im.vertex2Inside, im.vertex2Outside,
+            im.openInside ? 1u : 0u, im.hasInsideSample ? 1u : 0u);
+        if (im.hasInsideSample) {
+            const ImmediateBlockSample& s = im.insideSample;
+            VR_LOG_INFO("ViewmodelProbe submission fpimm: first=(%.3f,%.3f,%.3f) "
+                        "min=(%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f) n=%u count=%u "
+                        "indexType=0 vertexType=%u valid=%u",
+                s.first[0], s.first[1], s.first[2],
+                s.min[0], s.min[1], s.min[2],
+                s.max[0], s.max[1], s.max[2],
+                s.vertices, s.vertices, kGlFloat, s.valid ? 1u : 0u);
+        }
+    }
     s_driveCorrectionCached = false;
     StereoRenderer::Instance().OnSwapBuffers(hdc);
     return real_wglSwapBuffers ? real_wglSwapBuffers(hdc) : SwapBuffers(hdc);
@@ -695,6 +729,9 @@ void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
     // observation shares the same switch, so one live run yields the geometry
     // sample alongside the (silent) ARB tallies.
     s_vertexSubmissionObserver.Configure(g_vrConfig.viewmodelObserve != 0);
+    // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census shares
+    // the same live switch (ViewmodelObserve=1) and is inert otherwise.
+    s_immediateModeObserver.Configure(g_vrConfig.viewmodelObserve != 0);
     if (mask & 0x00004000u /* GL_COLOR_BUFFER_BIT */) {
         s_viewmodelSuppressor.NoteColorClear();
     } else if (mask & 0x00000100u /* GL_DEPTH_BUFFER_BIT */) {
@@ -853,6 +890,30 @@ void OpenGLProxy::NoteDrawElementsSubmission(GLenum mode, GLsizei count, GLenum 
 void OpenGLProxy::NoteDrawListSubmission() {
     if (!s_vertexSubmissionObserver.Observing()) return;
     s_vertexSubmissionObserver.NoteListDraw(s_viewmodelSuppressor.WindowOpen());
+}
+
+// GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The
+// window state is read once per block (at glBegin), which is what classifies the
+// whole primitive batch; a vertex outside glBegin..glEnd is ignored by the
+// observer. Inert unless ViewmodelObserve=1, and it never suppresses a draw.
+void OpenGLProxy::NoteImmediateBegin() {
+    if (!s_immediateModeObserver.Observing()) return;
+    s_immediateModeObserver.NoteBegin(s_viewmodelSuppressor.WindowOpen());
+}
+
+void OpenGLProxy::NoteImmediateVertex3(float x, float y, float z) {
+    if (!s_immediateModeObserver.Observing()) return;
+    s_immediateModeObserver.NoteVertex3(x, y, z);
+}
+
+void OpenGLProxy::NoteImmediateVertex2(float x, float y) {
+    if (!s_immediateModeObserver.Observing()) return;
+    s_immediateModeObserver.NoteVertex2(x, y);
+}
+
+void OpenGLProxy::NoteImmediateEnd() {
+    if (!s_immediateModeObserver.Observing()) return;
+    s_immediateModeObserver.NoteEnd();
 }
 
 } // namespace RiddickVR

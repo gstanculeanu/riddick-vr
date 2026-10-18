@@ -400,7 +400,7 @@ def main():
             "VIEWMODEL_NEAR_FIELD_MAX_ABS" in xrsim_tool and
             "viewmodel_sample_is_near_field" in xrsim_tool and
             "viewmodel_near_field_coverage" in xrsim_tool and
-            "(fp|world|near)" in xrsim_tool and
+            "(fp|world|near|fpimm)" in xrsim_tool and
             "nearSample=" in xrsim_tool and
             '"viewmodel_near_field_candidate_identifies_pass"' in xrsim_tool and
             "viewmodel_near_field_sample_is_parsed_and_graded" in xrsim_tool and
@@ -413,7 +413,40 @@ def main():
             "test_viewmodel_near_field_check_skipped_without_a_near_sample" in
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
             "ADR-0490" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8") and
-            (ROOT / "docs/adr/0490-gh67-window-independent-near-field-candidate-falsified.md").exists(),
+            (ROOT / "docs/adr/0490-gh67-window-independent-near-field-candidate-falsified.md").exists() and
+            # GH #67 step 1 (ninth correction, ADR-0491): the mechanism census. Every
+            # prior correction sampled only glDrawElements/glCallList, but the shipped
+            # RndrGL.dll *imports* the immediate-mode path (glBegin/glEnd/glVertex3f/
+            # glVertex3fv/glVertex2f/glVertex2i), so a mesh submitted with
+            # glBegin..glEnd emitted no draw call and could never appear in a sample.
+            # The census must be a pure, unit-tested observer, IAT-hooked in RndrGL and
+            # forwarded verbatim, logged in the existing `submission <label>:` form
+            # (label `fpimm`) so the same planar/volumetric shape gate applies, and
+            # graded by XRSIM (a pre-#0491 hook has no census line and is skipped).
+            (ROOT / "src/hook/immediate_mode_observe.h").exists() and
+            "ImmediateModeObserver" in (ROOT / "src/hook/immediate_mode_observe.h").read_text(encoding="utf-8") and
+            "ImmediateBlockSample" in (ROOT / "src/hook/immediate_mode_observe.h").read_text(encoding="utf-8") and
+            "NoteImmediateBegin" in dllmain and "Hook_glBegin" in dllmain and
+            '"glBegin"' in dllmain and '"glEnd"' in dllmain and
+            '"glVertex3f"' in dllmain and '"glVertex3fv"' in dllmain and
+            '"glVertex2f"' in dllmain and '"glVertex2i"' in dllmain and
+            "real_glVertex3fv" in dllmain and
+            "NoteImmediateBegin" in proxy and "NoteImmediateVertex3" in proxy and
+            "NoteImmediateVertex2" in proxy and "NoteImmediateEnd" in proxy and
+            "ViewmodelProbe immediate" in proxy and
+            "ViewmodelProbe submission fpimm" in proxy and
+            "immediate_mode_observe.h" in cmake_text and
+            "immediate_mode_observe_tests.cpp" in cmake_text and
+            "add_test(NAME immediate_mode_observe" in cmake_text and
+            "VIEWMODEL_IMMEDIATE_RE" in xrsim_tool and
+            "viewmodel_immediate_census" in xrsim_tool and
+            '"viewmodel_in_window_immediate_geometry"' in xrsim_tool and
+            '"viewmodel_immediate_candidate_is_volumetric"' in xrsim_tool and
+            "viewmodel_immediate_census_is_parsed" in xrsim_tool and
+            "test_immediate_mode_census_is_parsed_and_graded" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "ADR-0491" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0491-gh67-immediate-mode-submission-census.md").exists(),
             "GH #67: the submitted-vertex capture (client array sampled at "
             "glDrawElements, array vs display-list split by the FP window, the "
             "window's largest decodable draw as the arms candidate) must be "
