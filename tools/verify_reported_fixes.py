@@ -1323,6 +1323,25 @@ def main():
             "term (CinemaHoldTerm), and the menu-cursor sighting must be scoped to the game "
             "window -- a global desktop cursor held the branch CINEMA for a whole in-level run")
 
+    # GH #92 / ADR-0514: the *presented* pair reads as one uniform shift (spread 0), but
+    # the presented BMPs alone cannot say whether the per-eye frames themselves are a
+    # uniform shift or whether a different (legacy) pair was presented. The pass must
+    # therefore log both eyes' applied offsets and align the same rows of *both* eye FBOs
+    # in the same swap (Required 1+2 of GH #92).
+    require("DualAlignPair" in stereo_dual_h and
+            "DualRowBestShift" in stereo_dual_h and
+            "struct DualPairAlignment" in stereo_dual_h and
+            "kDualPairRows" in stereo_dual_h and
+            "SampleDualPair" in stereo_renderer_cpp and
+            "SampleDualPair();" in stereo_renderer_cpp and
+            "pair=[cap=%d dx=%d rows=%d spread=%d id=%d]" in stereo_renderer_cpp and
+            "offL=%.4f,%.4f,%.4f offR=%.4f,%.4f,%.4f" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0514-gh92-eye-pair-disparity-probe.md").exists(),
+            "GH #92 / ADR-0514: the per-eye pair must be measured directly -- both eyes' "
+            "applied offsets logged and the same rows of both eye FBOs aligned -- so the "
+            "run says whether the eye images differ by a uniform shift or carry "
+            "depth-dependent disparity")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

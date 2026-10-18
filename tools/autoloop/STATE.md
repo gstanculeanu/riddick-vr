@@ -2,6 +2,85 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 112 - 2026-10-18 18:05 (scheduled loop)
+- **Unit:** GH **#92 / GH #76 NATIVE STEREO (epic #57 DoD item 1) - the per-eye pair is
+  measured *directly* (both eyes' applied offsets + the same rows of both eye FBOs) and
+  the measurement is decisive: the two eye images are **BYTE-IDENTICAL** even though the
+  two eyes are translated by different offsets, so the per-eye `translate(-off)` at the
+  draw site has no effect (ADR-0514)**, implementing GH #92's Required 1+2 verbatim.
+- **Why this unit:** standing-prompt top item (#76) + ADR-0513's explicit Next 1 +
+  GH #92 (filed by wake 111 as the measured per-eye-image blocker).
+- **Change (evidence only; opt-in, gated; no draw/presentation change):**
+  - `stereo_dual.h`: NEW `DualPairAlignment`, `DualRowBestShift` (per-row best horizontal
+    shift by MAD over the interior, flat rows refused), `DualAlignPair` (all sampled rows;
+    `bestDx` median, `minDx`/`maxDx`/`spreadPx`, `identical`) + `kDualPairRows=16`,
+    `kDualPairSearchPx=48`, `kDualPairMinContrast=6`, `kDualPairIdenticalErr`.
+  - `stereo_renderer.{h,cpp}`: NEW `SampleDualPair()` reads the same 16 rows of **both**
+    eye FBOs, converts to luminance and aligns them; called on the **same 60-swap tick**
+    as the gate/engine samples. The `DualRender:` line adds
+    `pair=[cap=%d dx=%d rows=%d spread=%d id=%d]` and
+    `offL=%.4f,%.4f,%.4f offR=%.4f,%.4f,%.4f`.
+  - `tests/stereo_dual_tests.cpp` new section 15; NEW
+    `docs/adr/0514-gh92-eye-pair-disparity-probe.md`; `docs/adr/README.md` (head -> 0514,
+    curated range -> 0457-0514), `docs/vr-scenarios.md`, `src/hook/README.md`;
+    `verify_reported_fixes.py` new #92/ADR-0514 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 531968 B
+  `559f9fbc08c9` + x64 host); CTest **32/32 (x86)** and **30/30 (x64)**;
+  `verify_reported_fixes.py`, `scenario_tests.py --check`, `xrsim --selftest`,
+  `verify_hook_init.py`, `validate_addresses.py`, `verify_test_artifacts.py` PASS; all 12
+  `tools/test_*.py` exit 0.
+- **EVIDENCE live** (RIDDICKVR_SIM=1, read-only per-run shadow `riddickvr-shadow-6748`,
+  `--shadow-install "F:\The Chronicles of Riddick - Assault on Dark Athena"
+  --reach-gameplay --duration 80 --advance-menu --advance-min-taps 8 --require-fresh-hook
+  --require-parallax --dump-branch any --downscale 4 --ini StereoDualRender=1`;
+  `deployed_hook_matches_build` PASS, hook `559f9fbc08c9` = repo build; 80.3 s, 37 frames,
+  `gameplay_captures_present` PASS (30 gameplay / 7 cinema), `gameplay_full_bleed_reached`
+  fill 1.00): across **41** `pair=` samples **40 read `id=1`** and **41 read
+  `spread=0`/`dx=0`**; the offsets **differ** and are the expected symmetric pair.
+  The in-level span reads
+  `draws=549 eligible=549 skipped=29 active=1 coverL=0.279 coverR=0.279 luma=[L=10.4 R=10.4]
+  use=1 cw=[on=549 off=159] gen=648 gbacked=642 gsig=[enabled=1 buf=368]
+  sstate=[cap=1 cmask=0x0 dmask=1 drawbuf=0x8CE0 vp=0,0,1280x605 dt=1]
+  mv=[cap=1 id=1 pre=0.000,0.000,0.000 post=0.032,0.000,0.000]
+  pair=[cap=1 dx=0 rows=16 spread=0 id=1] offL=-0.0325,0.0000,0.0000
+  offR=0.0325,0.0000,0.0000`; a later bright span reads `coverL=0.669 coverR=0.669
+  luma=[L=18.2 R=18.2] use=1 pair=[cap=1 dx=0 rows=16 spread=0 id=1]` with the same
+  offsets. `stereo_parallax_present` still **FAILs** (`stereo_kind=shift-only`, spread 0).
+- **VERDICT (honest):** GH #92's Required 1+2 are met and the fault is **named**: the
+  per-eye `translate(-off)` at the draw site has **no effect** on the rendered image (the
+  two eye FBOs are byte-identical, `id=1`, on dark and bright spans alike, while `offL` !=
+  `offR` so the eyes are *not* translated identically). It is **not** the presentation
+  (which does blit the dual pair, `use=1`) and **not** the offsets; the BMP pair differs
+  only by the per-eye VR-hand overlay over an identical background, and its large apparent
+  background shift is consistent with the known **GH #79** capture tear (this run:
+  `29/37 attempt(s) straddled a hook frame`). **ADR-0504's fixed-function "eye-space
+  geometry + `GL_MODELVIEW` translate" premise is CLOSED** for the shipped world pass:
+  applying exactly that translate leaves the eye image unchanged. The leading concrete
+  next lead is the **ARB vertex program** the engine resolves *and calls*
+  (`glProgramStringARB` / `glProgramEnvParameter4fvARB` / `glBindProgramARB`, measured at
+  wake 105): a program's transform rides its **env parameters**, which `glTranslatef`
+  cannot touch. **NO REGRESSION** (evidence only; `StereoDualRender=0` default; fill 1.00;
+  `eye_views_scene_faithful` PASS; `both_eyes_non_black`/`same_eye_resolution`/
+  `no_vertical_disparity` PASS).
+- **LIMITS:** the pair probe is a 16-row luminance correlation (says "the pair varies with
+  depth", not a full disparity map); 10 of 16 rows in the dark span were too flat to align
+  (only the textured rows are measured); it samples only every 60 swaps; the ARB
+  vertex-program mechanism is the leading *hypothesis* (the API resolution is measured,
+  the *bound* program at the world draw is not yet logged) - the next unit tests it; the
+  BMP-level `dx=-24`/`-14` cannot be attributed to background vs overlay because of the
+  GH #79 tear; the 2004 build is untouched; no headset.
+- **Next:** (1) **log the bound program (id + string hash) and the matrix sources at the
+  world draw**, then apply the per-eye offset where the engine's real transform lives
+  (program env parameter / a per-eye program) - the concrete lead GH #92's measurement
+  now points at; (2) only then re-run `--require-parallax` and require a non-zero per-tile
+  spread; (3) gate on the **queried** `GL_COLOR_WRITEMASK` at the draw (ADR-0511 Next 2);
+  (4) keep `StereoDualRender=0`/`StereoParallaxDibr=0`/`StereoReplayProbe=0` defaults;
+  (5) the player-visible queue GH #63/#64/#61 then the P1 bugs #45/#49/#50/#51/#65;
+  (6) `DEFAULT_GAME_DIR` 2004-vs-2009; (7) GH #83/#88/#89/#74.
+- **OPS:** install untouched (READ-ONLY per-run shadow, no deploy/install write), no
+  leftover game/host processes, live lock released, `tests/xrsim/report.json` reverted to
+  the committed baseline; GH #92 commented with the measurement.
+
 ## Wake 111 - 2026-10-18 17:44 (scheduled loop)
 - **Unit:** GH **#91 / GH #76 NATIVE STEREO PRESENTATION (epic #57 DoD item 1) - the display
   branch was held CINEMA by a GLOBAL DESKTOP CURSOR; scoping the menu-cursor sighting to the

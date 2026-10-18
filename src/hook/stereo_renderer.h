@@ -87,6 +87,10 @@ private:
     void RefreshDualEyeOffsets();
     void BlitDualEye(bool isLeftEye);
     float SampleDualCoverage(bool isLeftEye, float* meanLumaOut = nullptr);
+    // GH #92/#76 (ADR-0514): align the same rows of *both* eye frames, so the run can
+    // say whether the per-eye pair itself is a uniform shift (spread 0) or carries
+    // depth-dependent disparity. Read-only; evidence only.
+    void SampleDualPair();
     // GH #76/#90 (ADR-0509): read the engine's output GL state once per span, at the
     // first eligible draw, so the run can say whether the span can produce colour.
     void CaptureDualDrawState();
@@ -206,6 +210,9 @@ private:
     float m_dualMvPost[3] = {0.0f, 0.0f, 0.0f};
     bool m_dualOffValid = false;
     float m_dualOff[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    // GH #92/#76 (ADR-0514): the two eye frames' own disparity structure, sampled on
+    // the same 60-swap tick as the coverage/engine samples.
+    DualPairAlignment m_dualPair;
     unsigned m_dualDraws = 0;
     unsigned m_dualEligible = 0;
     unsigned m_dualFrames = 0;

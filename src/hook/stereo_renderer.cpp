@@ -1527,6 +1527,40 @@ float StereoRenderer::SampleDualCoverage(bool isLeftEye, float* meanLumaOut) {
     return DualNonBlackFraction(rows, pixels);
 }
 
+// GH #92/#76 (ADR-0514): read the *two eye frames' own* difference, on the same
+// 60-swap tick as the gate so every reading describes one swap. The presented BMPs
+// cannot separate "the per-eye pair is a uniform shift" from "the pair that was
+// presented is not this pair", so this aligns the same rows of both eye framebuffers
+// directly. Read-only: binds the default read framebuffer/GL_BACK afterwards, as the
+// other samplers do.
+void StereoRenderer::SampleDualPair() {
+    m_dualPair = DualPairAlignment{};
+    const DualGlFns& gl = DualGl();
+    if (!gl.readPixels || m_dualW < 8 || m_dualH < 8 || m_dualW > 4096) return;
+    const int width = m_dualW;
+    const int rows = kDualPairRows;
+    static unsigned char rgba[4096 * 4];
+    static unsigned char lum[2][4096 * kDualPairRows];
+    if (gl.pixelStorei) gl.pixelStorei(kDualPackAlignment, 1);
+    for (int eye = 0; eye < 2; ++eye) {
+        OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, m_dualFbo[eye]);
+        if (OpenGLProxy::glReadBuffer) OpenGLProxy::glReadBuffer(kDualColorAttachment0);
+        for (int i = 1; i <= rows; ++i) {
+            const int y = (m_dualH * i) / (rows + 1);
+            gl.readPixels(0, y, width, 1, kDualRgba, kDualUnsignedByte, rgba);
+            unsigned char* dst = lum[eye] + static_cast<size_t>(i - 1) * width;
+            for (int x = 0; x < width; ++x) {
+                const unsigned char* p = rgba + static_cast<size_t>(x) * 4;
+                const float l = 0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2];
+                dst[x] = static_cast<unsigned char>(l < 0.0f ? 0.0f : (l > 255.0f ? 255.0f : l));
+            }
+        }
+    }
+    OpenGLProxy::real_glBindFramebuffer(kDualReadFramebuffer, 0);
+    if (OpenGLProxy::glReadBuffer) OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
+    m_dualPair = DualAlignPair(lum[0], lum[1], width, rows);
+}
+
 // GH #76/#90 (ADR-0511): the *engine's own* presented frame, sampled with the same
 // rows and width as the eye frames and (deliberately) called from the same coverage
 // tick, so the two readings describe the same swap. The eye-frame number alone cannot
@@ -1921,6 +1955,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                         m_dualEngineCover = SampleEngineFrame(&m_dualEngineLuma);
                         m_dualCoverL = SampleDualCoverage(true, &m_dualMeanL);
                         m_dualCoverR = SampleDualCoverage(false, &m_dualMeanR);
+                        // GH #92/#76 (ADR-0514): the eye pair's own disparity structure
+                        // (same swap as the coverage/engine samples above).
+                        SampleDualPair();
                         // GH #76/#90 (ADR-0512): grade each eye against the engine's own
                         // frame (ADR-0511's control), not the old fixed `0.5` floor -- the
                         // in-level engine frame is measured as dark as the eye frames
@@ -1958,7 +1995,9 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     "engine=[cover=%.3f luma=%.1f] dark=%s "
                                     "gate=[floor=%.3f L=%d R=%d ok=%d] "
                                     "eyeFbo=[cap=%d drawbuf=0x%X vp=%d,%d,%dx%d dt=%d cmask=0x%X] "
-                                    "mv=[cap=%d id=%d pre=%.3f,%.3f,%.3f post=%.3f,%.3f,%.3f]",
+                                    "mv=[cap=%d id=%d pre=%.3f,%.3f,%.3f post=%.3f,%.3f,%.3f] "
+                                    "pair=[cap=%d dx=%d rows=%d spread=%d id=%d] "
+                                    "offL=%.4f,%.4f,%.4f offR=%.4f,%.4f,%.4f",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
                                     m_dualEligible, m_dualCensus.skipped, m_dualMirrorClears,
                                     (int)m_dualFrameActive, m_dualCoverL, m_dualCoverR,
@@ -2004,7 +2043,14 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     (int)m_dualMvCaptured, (int)m_dualMvIdentity,
                                     (double)m_dualMvPre[0], (double)m_dualMvPre[1], (double)m_dualMvPre[2],
                                     (double)m_dualMvPost[0], (double)m_dualMvPost[1],
-                                    (double)m_dualMvPost[2]);
+                                    (double)m_dualMvPost[2],
+                                    (int)m_dualPair.measured, m_dualPair.bestDx,
+                                    m_dualPair.rows, m_dualPair.spreadPx,
+                                    (int)m_dualPair.identical,
+                                    (double)m_dualOff[0][0], (double)m_dualOff[0][1],
+                                    (double)m_dualOff[0][2],
+                                    (double)m_dualOff[1][0], (double)m_dualOff[1][1],
+                                    (double)m_dualOff[1][2]);
                     } else {
                         --s_dualLogCountdown;
                     }

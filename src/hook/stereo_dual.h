@@ -334,6 +334,123 @@ inline void DualModelviewTranslation(const float m[16], float out[3]) {
     out[2] = m ? m[14] : 0.0f;
 }
 
+// --- GH #92/#76 (ADR-0514): does the two-eye pair carry *structured* disparity? --
+//
+// GH #92 measured the *presented* pair as one uniform horizontal shift
+// (`stereo_kind=shift-only`, per-tile spread 0). The presented BMPs alone cannot say
+// which of two very different faults that is: the per-eye frames themselves may be a
+// uniform shift (the eye-space camera translation degenerating to a screen shift, or
+// two eyes translated identically), or the pair that was presented may not be the
+// dual pair at all (the shipped shifted capture blitted instead). So the pass measures
+// its **own** output: at the same 60-swap tick it already samples for the gate, it
+// reads the same rows from *both* eye framebuffers and aligns each row of the left
+// frame onto the right. A physically correct per-eye pair whose depth varies -- a
+// floor near the bottom of the frame, a wall/sky far from it -- yields per-row shifts
+// that **differ**; a single global shift (or two identical frames) does not. Evidence
+// only: nothing here changes a draw.
+constexpr int kDualPairRows = 16;         // rows sampled from each eye frame
+constexpr int kDualPairSearchPx = 48;     // +/- horizontal search, engine px
+constexpr int kDualPairMinContrast = 6;   // skip a row with no texture to align on
+constexpr int kDualPairMaxRows = 64;      // fixed cap on the per-row shift buffer
+constexpr float kDualPairIdenticalErr = 0.5f;  // mean abs diff at dx=0 for "identical"
+
+struct DualPairAlignment {
+    bool measured = false;   // at least one row produced a usable shift
+    int rows = 0;            // rows that contributed
+    int bestDx = 0;          // median per-row shift (a flat pair's single dx)
+    int minDx = 0, maxDx = 0;
+    int spreadPx = 0;        // maxDx - minDx: >0 means the disparity varies with depth
+    bool identical = false;  // every measured row matched at dx=0 with ~zero residual
+};
+
+// Best horizontal shift aligning one row of `a` onto the same row of `b` (mean
+// absolute difference over the interior, so every candidate compares the same pixel
+// count). Returns false when the row is too flat to align on, or no candidate window
+// fits. `dx` is in engine (full-resolution) pixels and has the harness's sign
+// convention (`b[x + dx] == a[x]`).
+inline bool DualRowBestShift(const unsigned char* a, const unsigned char* b, int width,
+                             int maxShift, int minContrast,
+                             int* dxOut, float* errOut) {
+    if (dxOut) *dxOut = 0;
+    if (errOut) *errOut = 0.0f;
+    if (!a || !b || !dxOut || width <= 2 * maxShift + 8) return false;
+    double mean = 0.0;
+    for (int x = 0; x < width; ++x) mean += a[x];
+    mean /= static_cast<double>(width);
+    double var = 0.0;
+    for (int x = 0; x < width; ++x) { const double d = a[x] - mean; var += d * d; }
+    if (std::sqrt(var / static_cast<double>(width)) < static_cast<double>(minContrast)) {
+        return false;
+    }
+    int best = 0;
+    double bestErr = 0.0;
+    bool have = false;
+    for (int dx = -maxShift; dx <= maxShift; ++dx) {
+        const int x0 = dx < 0 ? -dx : 0;
+        const int x1 = dx > 0 ? width - dx : width;
+        if (x1 - x0 < 16) continue;
+        double sum = 0.0;
+        for (int x = x0; x < x1; ++x) {
+            const double d = static_cast<double>(a[x]) - static_cast<double>(b[x + dx]);
+            sum += d < 0 ? -d : d;
+        }
+        const double err = sum / static_cast<double>(x1 - x0);
+        if (!have || err < bestErr) { have = true; bestErr = err; best = dx; }
+    }
+    if (!have) return false;
+    *dxOut = best;
+    if (errOut) *errOut = static_cast<float>(bestErr);
+    return true;
+}
+
+// Align every sampled row of the two eye frames. `lumLeft`/`lumRight` are `rows`
+// contiguous rows of one luminance byte per pixel, each `width` wide, at the *same*
+// frame rows. The verdict: a flat pair (a single global shift, or identical frames)
+// has `spreadPx == 0`; a pair with depth-dependent disparity does not.
+inline DualPairAlignment DualAlignPair(const unsigned char* lumLeft,
+                                       const unsigned char* lumRight,
+                                       int width, int rows,
+                                       int maxShift = kDualPairSearchPx,
+                                       int minContrast = kDualPairMinContrast) {
+    DualPairAlignment out;
+    if (!lumLeft || !lumRight || width <= 0 || rows <= 0) return out;
+    if (rows > kDualPairMaxRows) rows = kDualPairMaxRows;
+    int shifts[kDualPairMaxRows];
+    int n = 0;
+    int zeroRows = 0;
+    float worstZeroErr = 0.0f;
+    for (int r = 0; r < rows; ++r) {
+        int dx = 0;
+        float err = 0.0f;
+        if (!DualRowBestShift(lumLeft + static_cast<size_t>(r) * width,
+                              lumRight + static_cast<size_t>(r) * width,
+                              width, maxShift, minContrast, &dx, &err)) {
+            continue;
+        }
+        shifts[n++] = dx;
+        if (dx == 0) {
+            ++zeroRows;
+            if (err > worstZeroErr) worstZeroErr = err;
+        }
+    }
+    if (n == 0) return out;
+    // Insertion sort: `n` <= 64.
+    for (int i = 1; i < n; ++i) {
+        const int v = shifts[i];
+        int j = i - 1;
+        while (j >= 0 && shifts[j] > v) { shifts[j + 1] = shifts[j]; --j; }
+        shifts[j + 1] = v;
+    }
+    out.measured = true;
+    out.rows = n;
+    out.minDx = shifts[0];
+    out.maxDx = shifts[n - 1];
+    out.bestDx = shifts[(n - 1) / 2];       // median of the per-row shifts
+    out.spreadPx = out.maxDx - out.minDx;
+    out.identical = (zeroRows == n) && (worstZeroErr <= kDualPairIdenticalErr);
+    return out;
+}
+
 // --- GH #76/#90 (ADR-0506): name what the world span actually contains ---------
 //
 // ADR-0505's live census measured that only ~8% of the draws inside the world span

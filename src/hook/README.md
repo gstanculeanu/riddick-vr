@@ -597,5 +597,17 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   `--require-parallax` grades — the pair is presented but still `stereo_kind=shift-only`
   (`spread=0`), so the remaining stereo blocker is the **per-eye image** (GH #76/#90).
 
+- **The per-eye pair is measured directly (ADR-0514, wake 112; GH #92 / GH #76).** The
+  presented BMPs cannot separate "the per-eye pair is a uniform shift" from "the pair
+  presented is not the dual pair", so the `DualRender:` line adds both eyes' applied
+  offsets (`offL=.. offR=..`) and, on the same 60-swap tick the gate samples on,
+  `SampleDualPair` reads the same `kDualPairRows = 16` rows of **both** eye FBOs and
+  aligns them (`pair=[cap=.. dx=.. rows=.. spread=.. id=..]`, pure
+  `stereo_dual.h::DualAlignPair` / `DualRowBestShift`, flat rows refused). Read with the
+  presented `stereo_kind`: a spread on the eye pair with a `shift-only` presentation is a
+  *presentation* fault; no spread with a non-zero `dx` is the eye-space translation
+  degenerating to a screen shift; `id=1` is both eyes translated identically. Evidence
+  only, no draw changes, `StereoDualRender=0` stays the default.
+
 
 

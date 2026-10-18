@@ -452,6 +452,19 @@ branch now moves `FULL-BLEED gameplay … fill=1.00 fullBleed=1`,
 `--require-parallax` **grades** — the pair is presented but still `stereo_kind=shift-only`
 (`per-tile spread=0`), so the remaining stereo blocker is the **per-eye image** (GH #76/#90).
 
+**ADR-0514 (wake 112; GH #92 / GH #76) measures the per-eye pair directly.** The
+presented BMPs cannot separate "the per-eye pair is a uniform shift" from "the pair
+presented is not the dual pair at all", so the `DualRender:` line now logs **both**
+eyes' applied offsets (`offL=.. offR=..`) and, on the same 60-swap tick the use gate
+samples on, `SampleDualPair` reads the same 16 rows of **both** eye FBOs and aligns
+them (`pair=[cap=.. dx=.. rows=.. spread=.. id=..]`; pure `stereo_dual.h::DualAlignPair`
+/ `DualRowBestShift`, flat rows refused). A per-row shift that **varies**
+(`spread ≥ 6`) is depth-dependent disparity; a single shift (or `id=1`) is not. Read
+with the presented `stereo_kind` this names GH #92's cause: a spread on the eye pair
+with a `shift-only` presentation is a *presentation* fault, while no spread with a
+non-zero `dx` is the eye-space translation degenerating to a screen shift.
+Evidence-only (`StereoDualRender=0` stays the default).
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

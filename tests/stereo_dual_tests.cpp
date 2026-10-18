@@ -11,6 +11,7 @@
 
 #include <cstdio>
 
+using RiddickVR::DualAlignPair;
 using RiddickVR::DualColourMaskNibble;
 using RiddickVR::DualColourMaskWritesColour;
 using RiddickVR::DualDarkSide;
@@ -30,6 +31,9 @@ using RiddickVR::DualMeanLuminance;
 using RiddickVR::DualModelviewIsIdentity;
 using RiddickVR::DualModelviewTranslation;
 using RiddickVR::DualNonBlackFraction;
+using RiddickVR::DualPairAlignment;
+using RiddickVR::DualRowBestShift;
+using RiddickVR::kDualPairMaxRows;
 using RiddickVR::ClassifyDualDarkSide;
 using RiddickVR::kDualDarkLumaCeiling;
 using RiddickVR::kDualDrawBufferNone;
@@ -489,6 +493,64 @@ int main() {
               "0.5 coverage under a fully covered engine frame is exactly the fraction");
         Check(!DualEyeFrameTracksEngine(0.0f, 1.0f),
               "a black eye under a fully covered engine frame is refused");
+    }
+
+    // 15. GH #92/#76 (ADR-0514): the eye pair's *own* disparity structure. GH #92
+    //     measured the *presented* pair as one uniform shift (per-tile spread 0); the
+    //     presented BMPs cannot say whether the per-eye frames themselves are a
+    //     uniform shift or whether a different (legacy) pair was presented, so the pass
+    //     aligns the same rows of both eye frames directly. A per-row shift that
+    //     *varies* is depth-dependent disparity; a single shift (or identical frames)
+    //     is not.
+    {
+        const int width = 256;
+        const int rows = 4;
+        static unsigned char L[kDualPairMaxRows * 256];
+        static unsigned char R[kDualPairMaxRows * 256];
+        for (int r = 0; r < rows; ++r) {
+            for (int x = 0; x < width; ++x) {
+                L[r * width + x] = static_cast<unsigned char>((x * 7 + r * 13) & 0x3F);
+            }
+        }
+
+        // Uniform shift: every row of R is L shifted by +4 -> no spread.
+        for (int r = 0; r < rows; ++r) {
+            for (int x = 0; x < width; ++x) {
+                R[r * width + x] = (x >= 4) ? L[r * width + (x - 4)] : 0;
+            }
+        }
+        DualPairAlignment flat = DualAlignPair(L, R, width, rows, 16, 6);
+        Check(flat.measured && flat.rows == rows, "a textured uniform-shift pair is measured");
+        Check(flat.spreadPx == 0, "a uniform shift has zero per-row spread (GH #92)");
+        Check(flat.bestDx == 4, "the uniform shift is recovered");
+        Check(!flat.identical, "a shifted pair is not identical");
+
+        // Identical frames: dx=0 everywhere with a zero residual.
+        DualPairAlignment same = DualAlignPair(L, L, width, rows, 16, 6);
+        Check(same.measured && same.identical && same.bestDx == 0 && same.spreadPx == 0,
+              "byte-identical eye frames read as identical");
+
+        // Depth-dependent disparity: the per-row shift differs -> non-zero spread.
+        for (int r = 0; r < rows; ++r) {
+            const int s = 2 + 3 * r;  // 2, 5, 8, 11
+            for (int x = 0; x < width; ++x) {
+                R[r * width + x] = (x >= s) ? L[r * width + (x - s)] : 0;
+            }
+        }
+        DualPairAlignment vary = DualAlignPair(L, R, width, rows, 16, 6);
+        Check(vary.measured && vary.rows == rows, "a varying pair is measured");
+        Check(vary.spreadPx >= 6, "per-row shifts that differ give a non-zero spread");
+        Check(vary.minDx == 2 && vary.maxDx == 11, "the per-row shifts are recovered");
+
+        // A flat (no-texture) row cannot be aligned and is excluded, not faked.
+        static unsigned char flatRow[256];
+        for (int x = 0; x < width; ++x) flatRow[x] = 40;
+        int dx = -1;
+        float err = -1.0f;
+        Check(!DualRowBestShift(flatRow, flatRow, width, 16, 6, &dx, &err),
+              "a flat row is refused rather than aligned to noise");
+        DualPairAlignment empty = DualAlignPair(flatRow, flatRow, width, 1, 16, 6);
+        Check(!empty.measured, "a pair with no textured row is not measured");
     }
 
     if (g_failures == 0) {

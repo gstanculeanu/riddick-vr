@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0513` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0514` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -90,7 +90,21 @@ every ADR names the epic #57 subsystem it advances.
   `gameplay_captures_present` PASSes, and `--require-parallax` grades — the pair is
   presented but still `shift-only` (`spread=0`), so the remaining stereo blocker is the
   **per-eye image** (GH #76/#90).
-  **Head = `0513`; the next new ADR is `0514`.**
+  ADR-0514 implements GH #92's Required 1+2: the `DualRender:` line now logs **both**
+  eyes' applied offsets (`offL`/`offR`) and, on the same 60-swap tick as the gate, a
+  new `SampleDualPair` reads the same rows of **both** eye FBOs and aligns them
+  (`pair=[cap=.. dx=.. rows=.. spread=.. id=..]`, pure policy `DualAlignPair` in
+  `stereo_dual.h`). Live (wake 112), the offsets **differ** (`offL x=-0.0325`,
+  `offR x=+0.0325`) yet the two eye FBOs are **byte-identical** (`id=1`, `spread=0` on
+  40/41 samples, dark and bright spans alike): the per-eye `translate(-off)` at the
+  draw site has **no effect** on the rendered image, so GH #92's cause is the
+  re-issue's transform (not the presentation, not the offsets). This explicitly
+  **closes** ADR-0504's fixed-function "eye-space + modelview translate" route as the
+  per-eye camera for the shipped world pass; the leading next lead is the **ARB vertex
+  program** the engine resolves and calls (a program's transform rides its env
+  parameters, which `glTranslatef` cannot touch). Evidence-only, no draw changes,
+  `StereoDualRender=0` stays the default.
+  **Head = `0514`; the next new ADR is `0515`.**
 
 ## Known defect: duplicate numbers (GH #74)
 
