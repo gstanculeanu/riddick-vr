@@ -325,11 +325,23 @@ def main():
             "vertex_submission_observe" in cmake_text and
             "vertex_submission_observe_tests.cpp" in cmake_text and
             (ROOT / "docs/adr/0482-gh67-submitted-vertex-transform-capture.md").exists() and
-            (ROOT / "docs/adr/0483-gh67-in-window-mesh-sample.md").exists(),
+            (ROOT / "docs/adr/0483-gh67-in-window-mesh-sample.md").exists() and
+            "viewmodel_candidate_geometry" in xrsim_tool and
+            "VIEWMODEL_CANDIDATE_MIN_THICKNESS_RATIO" in xrsim_tool and
+            '"viewmodel_candidate_is_volumetric"' in xrsim_tool and
+            "viewmodel_candidate_geometry_planar_vs_volume" in xrsim_tool and
+            "test_viewmodel_candidate_geometry_distinguishes_plane_from_mesh" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "test_viewmodel_candidate_check_fails_on_a_planar_sample" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0484-gh67-planar-candidate-is-not-the-viewmodel.md").exists(),
             "GH #67: the submitted-vertex capture (client array sampled at "
             "glDrawElements, array vs display-list split by the FP window, the "
             "window's largest decodable draw as the arms candidate) must be "
-            "inert by default, parsed by XRSIM and unit-tested (ADR-0482/0483)")
+            "inert by default, parsed by XRSIM and unit-tested (ADR-0482/0483), "
+            "and the sampled candidate's *shape* must be graded -- a planar "
+            "in-window draw is a screen-space element, not the viewmodel "
+            "(ADR-0484)")
 
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,

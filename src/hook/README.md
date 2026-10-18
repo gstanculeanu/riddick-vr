@@ -180,6 +180,17 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   Inert unless `ViewmodelObserve=1`; XRSIM parses it into
   `viewmodel_probe.submission`. Unit-tested by `vertex_submission_observe`
   (`tests/vertex_submission_observe_tests.cpp`). See ADR-0482/0483.
+- **ADR-0484 — the largest in-window draw is a *plane*, so it is not the arms.**
+  The bounds of that same `fp` sample are `min=(-0.450,-0.450,-0.050)
+  max=(0.450,0.450,0.000)`: 0.90 × 0.90 × 0.05, symmetric about the origin, i.e.
+  `dz/dx = 0.056`. An arm mesh is volumetric; a flat, origin-centred mesh on a
+  39.5°-varying head pose is a **screen-space element**, and the run's dumped
+  "gameplay" frames are the game's **start screen** (GH #71) — the harness's
+  `gameplay` branch is "full-bleed + a recent perspective projection", which the
+  full-bleed 3-D start page satisfies. So `count = 2520` identifies a real draw
+  but *not* the viewmodel. XRSIM derives the sample's axis extents and grades
+  `viewmodel_candidate_is_volumetric` (FAIL for a planar sample); the hook, its
+  log line and its default are unchanged.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

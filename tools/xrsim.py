@@ -1098,6 +1098,48 @@ def gameplay_capture_stats(artifacts, labels, min_mean=1.0, sig_cache=None):
             "blank_gameplay": blank, "distinct_gameplay": len(sigs)}
 
 
+# GH #67 step 1 (fourth correction, ADR-0484): the geometric fingerprint of the
+# window's largest decodable draw. The engine's first-person viewmodel is a 3-D
+# mesh, so its submitted geometry cannot be *planar*; a screen-space overlay
+# (a splash/post-process/HUD element) is a plane whose smallest axis extent is a
+# small fraction of its largest. Measured on the 2009 target (wake 83): the
+# "arms candidate" is `min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000)`,
+# i.e. dz/dx = 0.05/0.90 = 0.056 -- a plane, not arms. The ratio is the graded
+# discriminator; 0.15 is ~2.7x the measured plane and far below any arm shape.
+VIEWMODEL_CANDIDATE_MIN_THICKNESS_RATIO = 0.15
+
+
+def viewmodel_candidate_geometry(sample):
+    """GH #67 (ADR-0484): is the sampled in-window draw a 3-D mesh or a plane?
+
+    Pure. ``sample`` is one parsed ``ViewmodelProbe submission fp`` record (or
+    ``None``). Returns ``None`` when there is nothing to measure, else
+    ``{"extent": [dx, dy, dz], "thickness_ratio": min/max, "volumetric": bool}``
+    where ``volumetric`` is True only for a *valid* sample whose smallest axis
+    extent is at least :data:`VIEWMODEL_CANDIDATE_MIN_THICKNESS_RATIO` of its
+    largest. ``volumetric=False`` means the sampled draw is a screen-space
+    element, so it cannot be the engine's first-person viewmodel.
+    """
+    if not sample:
+        return None
+    lo = sample.get("min")
+    hi = sample.get("max")
+    if not lo or not hi or len(lo) < 3 or len(hi) < 3:
+        return None
+    extent = [hi[i] - lo[i] for i in range(3)]
+    largest = max(extent)
+    smallest = min(extent)
+    ratio = (smallest / largest) if largest > 0.0 else 0.0
+    return {
+        "extent": [round(e, 4) for e in extent],
+        "largest_extent": round(largest, 4),
+        "smallest_extent": round(smallest, 4),
+        "thickness_ratio": round(ratio, 4),
+        "volumetric": bool(sample.get("valid")) and largest > 0.0 and
+                      ratio >= VIEWMODEL_CANDIDATE_MIN_THICKNESS_RATIO,
+    }
+
+
 def viewmodel_probe_stats(log_text):
     """GH #67 step 2: summarise the observation-only first-person viewmodel probe.
 
@@ -1175,7 +1217,7 @@ def viewmodel_probe_stats(log_text):
         })
     submission_samples = {}
     for m in VIEWMODEL_SUBMISSION_SAMPLE_RE.finditer(text):
-        submission_samples[m.group(1)] = {
+        sample = {
             "first": [float(m.group(2)), float(m.group(3)), float(m.group(4))],
             "min": [float(m.group(5)), float(m.group(6)), float(m.group(7))],
             "max": [float(m.group(8)), float(m.group(9)), float(m.group(10))],
@@ -1184,6 +1226,10 @@ def viewmodel_probe_stats(log_text):
             "index_type": int(m.group(13)),
             "vertex_type": int(m.group(14)), "valid": m.group(15) == "1",
         }
+        # GH #67 (ADR-0484): the sample's geometry -- planar (a screen-space
+        # element) or volumetric (a mesh, the required shape of an arms mesh).
+        sample["geometry"] = viewmodel_candidate_geometry(sample)
+        submission_samples[m.group(1)] = sample
     return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates,
             "program_lines": program,
             "program": {
@@ -2505,6 +2551,35 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
         checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
                        "ok": True, "skip": True,
                        "detail": "no ViewmodelProbe lines (ViewmodelObserve=0 or pre-#67 host)"})
+    # GH #67 step 1 (ADR-0484): identifying the *window* is not identifying the
+    # *viewmodel*. The window's largest decodable draw must be a 3-D mesh; a
+    # planar sample is a screen-space element (on the 2009 target the measured
+    # sample is min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000): dz/dx=0.056,
+    # a flat plane -- the startup splash's overlay, not the engine's arms). Only
+    # graded when the probe actually captured a first-person sample, so a run
+    # without ViewmodelObserve=1 is unaffected.
+    fp_sample = (probe.get("submission") or {}).get("fp")
+    if fp_sample is not None:
+        geo = fp_sample.get("geometry") or viewmodel_candidate_geometry(fp_sample)
+        volumetric = bool(geo and geo["volumetric"])
+        if geo:
+            detail = (f"candidate extent={geo['extent']} "
+                      f"thickness_ratio={geo['thickness_ratio']:.3f} "
+                      f"(min {VIEWMODEL_CANDIDATE_MIN_THICKNESS_RATIO})@count="
+                      f"{fp_sample.get('count')}")
+        else:
+            detail = "first-person sample carries no bounds"
+        if not volumetric:
+            detail += (" -- the in-window draw is planar/screen-space, so the "
+                       "engine's first-person viewmodel pass was NOT identified")
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_candidate_is_volumetric",
+                       "ok": volumetric, "detail": detail})
+    else:
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_candidate_is_volumetric",
+                       "ok": True, "skip": True,
+                       "detail": "no first-person submission sample (ViewmodelObserve=0)"})
     # 4. comfort
     # GH #68 requirement 5 (comfort rules): the locomotion comfort vignette must
     # actually apply while the scripted run is moving/turning. The mock host
@@ -2654,6 +2729,24 @@ def cmd_selftest(require_image_deps=False):
         sub is not None and sub["array_inside"] == 3 and sub["list_outside"] == 12 and
         sub["fp"]["first"] == [0.25, -0.1, 0.4] and sub["world"]["max"][0] == 140.0 and
         sub["fp"]["valid"] is True and sub["fp"]["count"] == 384 and sub["world"]["count"] == 6)
+
+    # GH #67 step 1 (ADR-0484): identifying the *window* is not identifying the
+    # *viewmodel*. The sample above is a real 3-D mesh (extent 0.4 x 0.3 x 0.2,
+    # ratio 0.5) -> volumetric. The measured 2009-target sample is a plane
+    # (min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000): dz/dx=0.056) -> not.
+    plane = {"min": [-0.450, -0.450, -0.050], "max": [0.450, 0.450, 0.000],
+             "valid": True}
+    box = {"min": [-0.100, -0.200, 0.300], "max": [0.300, 0.100, 0.500],
+           "valid": True}
+    invalid = {"min": [-0.1, -0.1, -0.1], "max": [0.1, 0.1, 0.1], "valid": False}
+    results["viewmodel_candidate_geometry_planar_vs_volume"] = (
+        viewmodel_candidate_geometry(None) is None and
+        viewmodel_candidate_geometry({"min": [0, 0, 0]}) is None and
+        viewmodel_candidate_geometry(plane)["volumetric"] is False and
+        abs(viewmodel_candidate_geometry(box)["thickness_ratio"] - 0.5) < 1e-9 and
+        viewmodel_candidate_geometry(box)["volumetric"] is True and
+        viewmodel_candidate_geometry(invalid)["volumetric"] is False and
+        viewmodel_candidate_geometry(plane)["extent"] == [0.9, 0.9, 0.05])
 
     skipped = []
     if not have_image_deps():

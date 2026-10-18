@@ -1075,6 +1075,79 @@ def test_viewmodel_probe_check_requires_an_in_window_draw(td):
     assert rec["ok"] is True, rec
 
 
+# --------- viewmodel candidate geometry (GH #67 step 1, ADR-0484)
+# The measured 2009-target sample (wake 82/83): the window's largest decodable
+# draw is a PLANE (dz/dx = 0.05/0.90), i.e. a screen-space element, not arms.
+_VM_SUBMISSION_PLANAR = (
+    "[INFO] ViewmodelProbe submission [#300]: arrayIn=19 arrayOut=89 listIn=0 "
+    "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1\n"
+    "[INFO] ViewmodelProbe submission fp: first=(0.400,-0.400,0.000) "
+    "min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520 "
+    "indexType=5123 vertexType=5126 valid=1\n")
+_VM_SUBMISSION_MESH = (
+    "[INFO] ViewmodelProbe submission [#300]: arrayIn=19 arrayOut=89 listIn=0 "
+    "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=1\n"
+    "[INFO] ViewmodelProbe submission fp: first=(0.250,-0.100,0.400) "
+    "min=(-0.100,-0.200,0.300) max=(0.300,0.100,0.500) n=24 count=384 "
+    "indexType=5121 vertexType=5126 valid=1\n")
+
+
+def test_viewmodel_candidate_geometry_distinguishes_plane_from_mesh(td):
+    """GH #67 (ADR-0484): the sample's *shape* is the discriminator between a
+    screen-space overlay and a mesh, so it must be derived purely and carry the
+    axis extents + thickness ratio."""
+    plane = xrsim.viewmodel_candidate_geometry(
+        {"min": [-0.45, -0.45, -0.05], "max": [0.45, 0.45, 0.0], "valid": True})
+    assert plane["extent"] == [0.9, 0.9, 0.05], plane
+    assert plane["volumetric"] is False and plane["thickness_ratio"] < 0.06, plane
+    box = xrsim.viewmodel_candidate_geometry(
+        {"min": [-0.1, -0.2, 0.3], "max": [0.3, 0.1, 0.5], "valid": True})
+    assert box["volumetric"] is True and abs(box["thickness_ratio"] - 0.5) < 1e-9, box
+    assert xrsim.viewmodel_candidate_geometry(None) is None
+    assert xrsim.viewmodel_candidate_geometry({}) is None
+    # An undecodable sample is never a candidate, however it is shaped.
+    assert xrsim.viewmodel_candidate_geometry(
+        {"min": [-1, -1, -1], "max": [1, 1, 1], "valid": False})["volumetric"] is False
+
+
+def test_viewmodel_candidate_check_fails_on_a_planar_sample(td):
+    """The window being *identified* is not the viewmodel being *identified*: a
+    planar in-window draw must fail the graded check (the target's splash
+    overlay), while a mesh-shaped one passes."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    passed, checks = xrsim.evaluate(_args(), art, "", _VM_SUBMISSION_PLANAR)
+    rec = [c for c in checks if c["check"] == "viewmodel_candidate_is_volumetric"][0]
+    assert rec["ok"] is False, rec
+    assert "planar" in rec["detail"] and "count=2520" in rec["detail"], rec
+    assert passed is False, [c for c in checks if not c.get("skip") and not c["ok"]]
+    passed, checks = xrsim.evaluate(_args(), art, "", _VM_SUBMISSION_MESH)
+    rec = [c for c in checks if c["check"] == "viewmodel_candidate_is_volumetric"][0]
+    assert rec["ok"] is True and "thickness_ratio=0.500" in rec["detail"], rec
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
+
+
+def test_viewmodel_candidate_check_skipped_without_a_sample(td):
+    """A run without ViewmodelObserve=1 (or a pre-#67 host) must skip the
+    geometric check, never fail it."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    passed, checks = xrsim.evaluate(_args(), art, "", "")
+    rec = [c for c in checks if c["check"] == "viewmodel_candidate_is_volumetric"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+    # Probe enabled with a window but no decodable sample -> still skipped.
+    _, checks = xrsim.evaluate(
+        _args(), art, "",
+        "[INFO] ViewmodelProbe [#300]: inside=19 outside=89 sample=0 pushes=0 translates=0\n")
+    rec = [c for c in checks if c["check"] == "viewmodel_candidate_is_volumetric"][0]
+    assert rec["ok"] is True and rec.get("skip") is True, rec
+    assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
+
+
 # ----------------------- per-frame camera transform (GH #68 requirement 1)
 def _rot3(q):
     """Row-major rotation of quaternion q (x, y, z, w) -- mirrors the host."""
@@ -2012,6 +2085,9 @@ def main() -> int:
              test_ini_overrides_reach_the_shadow_and_the_report,
              test_viewmodel_probe_program_lines_are_parsed,
              test_viewmodel_probe_submission_lines_are_parsed,
+             test_viewmodel_candidate_geometry_distinguishes_plane_from_mesh,
+             test_viewmodel_candidate_check_fails_on_a_planar_sample,
+             test_viewmodel_candidate_check_skipped_without_a_sample,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

@@ -312,6 +312,17 @@ head yaw varied 39.5°) against a 6-vertex world screen quad (`count=6`). Add
 `--ini ViewmodelTrace=1` to also get the one-line pass signature
 (`… d19 P? D d7 P? …`).
 
+**The same sample is a plane, not the viewmodel (GH #67 step 1, ADR-0484).** The
+`fp` record now also derives the sample's axis extents and grades
+`viewmodel_candidate_is_volumetric`: the engine's first-person viewmodel is a
+3-D mesh, so a planar in-window draw is a screen-space element and cannot be it.
+The measured target sample is `min=(-0.450,-0.450,-0.050)
+max=(0.450,0.450,0.000)` → `dz/dx = 0.056`, i.e. a flat plane on a 39.5°-varying
+head pose — and the run's dumped "gameplay" frames are the game's
+**start screen** (see GH #71), not gameplay. So the check FAILS until a real
+in-game run supplies a volumetric sample; `viewmodel_pass_identified` (the window
+has in-window draws) is unchanged and still PASSes.
+
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
 renderer init), the host logging `Game Connected: WAITING` for the whole (short)
