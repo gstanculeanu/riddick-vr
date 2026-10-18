@@ -252,14 +252,13 @@ def main():
             "glTranslatef/glPopMatrix mirrored by gl_matrix_tracker.h), not just "
             "the last loaded glLoadMatrixf")
 
-    # GH #67 step 1 (corrected, ADR-0481): the live engine puts its object/view
-    # transforms in ARB vertex-program *environment parameters*, not in the
-    # fixed-function GL_MODELVIEW (measured: one identity modelview load per run,
-    # zero pushes/translates; the 2009 RndrGL.dll imports the ARB program entry
-    # points and no glMultMatrixf/glLoadMatrixd/glRotatef). So the capture must
-    # intercept the ARB path the engine resolves through wglGetProcAddress, keep
-    # the observation off unless ViewmodelObserve=1, and be unit-tested; the
-    # vocabulary scan that established it must stay reproducible.
+    # GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program path is the first
+    # *candidate* for the live engine's object/view transforms (the fixed-function
+    # GL_MODELVIEW is measured to hold one identity load per run, with zero
+    # pushes/translates). The capture must intercept the ARB path the engine
+    # resolves through wglGetProcAddress, keep the observation off unless
+    # ViewmodelObserve=1, and be unit-tested; the vocabulary scan that established
+    # it (and then measured it silent) must stay reproducible.
     vp_observer = ROOT / "src/hook/vertex_program_observe.h"
     vp_scan = ROOT / "tools/gl_vocabulary_scan.py"
     require(vp_observer.exists() and
@@ -285,9 +284,45 @@ def main():
             vp_scan.exists() and
             "def scan_names" in vp_scan.read_text(encoding="utf-8") and
             (ROOT / "tools/test_gl_vocabulary_scan.py").exists(),
-            "GH #67: the live transform source is the ARB vertex-program path "
-            "(glProgramStringARB/glBindProgramARB/glProgramEnvParameter4fvARB via "
-            "wglGetProcAddress), the GL_MODELVIEW mirror is not it (ADR-0481)")
+            "GH #67: the ARB vertex-program path (glProgramStringARB/"
+            "glBindProgramARB/glProgramEnvParameter4fvARB via wglGetProcAddress) "
+            "must stay instrumented; ADR-0481 measured it silent, so it is a "
+            "candidate eliminated by measurement, not the transform source")
+
+    # GH #67 step 1 (second correction, ADR-0482): the transform is applied
+    # engine-side to the *submitted vertices*, so the capture must sample the
+    # client vertex array at draw time and split array vs display-list draws by
+    # the first-person window side. The observer must be off unless
+    # ViewmodelObserve=1, the harness must parse the sample, and both must be
+    # unit-tested; the import scan that established "no matrix call, no
+    # glDrawArrays, client arrays only" must stay reproducible.
+    vs_observer = ROOT / "src/hook/vertex_submission_observe.h"
+    require(vs_observer.exists() and
+            "class VertexSubmissionObserver" in vs_observer.read_text(encoding="utf-8") and
+            "SampleClientVertices" in vs_observer.read_text(encoding="utf-8") and
+            "NoteVertexPointer" in vs_observer.read_text(encoding="utf-8") and
+            "NoteArrayDraw" in vs_observer.read_text(encoding="utf-8") and
+            "NoteListDraw" in vs_observer.read_text(encoding="utf-8") and
+            "NoteDrawElementsSubmission" in proxy and
+            "NoteDrawListSubmission" in proxy and
+            "NoteVertexPointer" in proxy and
+            "s_vertexSubmissionObserver.Configure(g_vrConfig.viewmodelObserve != 0)" in proxy and
+            "ViewmodelProbe submission" in proxy and
+            "Hook_glVertexPointer" in dllmain and
+            '"glVertexPointer"' in dllmain and
+            "NoteDrawElementsSubmission(mode, count, type, indices)" in dllmain and
+            "VIEWMODEL_SUBMISSION_RE" in xrsim_tool and
+            "VIEWMODEL_SUBMISSION_SAMPLE_RE" in xrsim_tool and
+            "test_viewmodel_probe_submission_lines_are_parsed" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "viewmodel_submission_parsed" in xrsim_tool and
+            "vertex_submission_observe.h" in cmake_text and
+            "vertex_submission_observe" in cmake_text and
+            "vertex_submission_observe_tests.cpp" in cmake_text and
+            (ROOT / "docs/adr/0482-gh67-submitted-vertex-transform-capture.md").exists(),
+            "GH #67: the submitted-vertex capture (client array sampled at "
+            "glDrawElements, array vs display-list split by the FP window) must be "
+            "inert by default, parsed by XRSIM and unit-tested (ADR-0482)")
 
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,

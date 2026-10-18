@@ -106,12 +106,13 @@ reproduces the same vocabulary -- **and a live run shows the stack is not used**
   `glVertexAttrib4fARB`; **no** `glTexCoordPointer`), and does **not** reference
   `glMultMatrixf`/`glMultMatrixd`/`glLoadMatrixd`/`glRotatef`/`glScalef`.
 
-So the object/view transforms reach the GPU as **program environment
-parameters**, and `GetLastViewMatrix()` can never be the viewmodel transform,
-whichever fixed-function entry point is hooked. The matrix-stack mirror is kept
-(correct semantics, unit-tested, cheap) but is provably inert on this title; the
-ARB program path is intercepted instead (`src/hook/vertex_program_observe.h`) and
-reported as `ViewmodelProbe program [#N]: …`. Reproduce the vocabulary with
+So the ARB program path was the natural *candidate* for the object/view
+transforms (and `GetLastViewMatrix()` can never be the viewmodel transform,
+whichever fixed-function entry point is hooked) -- but that candidate was then
+measured and it is **silent live** (below). Note the ARB names are **not** in the
+static import table: they can only be resolved through `wglGetProcAddress`, which
+is where the hook intercepts them. The matrix-stack mirror is kept (correct
+semantics, unit-tested, cheap) but is provably inert on this title. Reproduce the vocabulary with
 `python tools/gl_vocabulary_scan.py --game-dir "<install>"` (read-only); add
 `--imports` for the authoritative static import table (the 2009 `RndrGL.dll`
 binds exactly 96 OpenGL 1.1 entry points from `OPENGL32.dll`, no ARB ones, and
@@ -128,6 +129,17 @@ with the identity modelview and the (per-view, not per-object) projection loads,
 the object/view transform is **not in GL state**: it is applied on the engine
 side to the submitted vertex data. Any GH #67 drive path must hook that, not a
 GL matrix.
+
+**Measured live (ADR-0482):** that inference is now an observation. The hook
+samples the client vertex array at the first array draw on each side of the
+first-person window (`glVertexPointer` is imported by RndrGL; `glDrawArrays` and
+any `glBindBuffer*` are not, so the pointer is always a plain client pointer) and
+counts `glDrawElements` vs `glCallList` by side -- logged as
+`ViewmodelProbe submission [#N]: arrayIn=… listIn=…` plus a
+`ViewmodelProbe submission fp:` / `… world:` geometry line. `listIn > 0` with
+`arrayIn == 0` would mean the first-person pass is display-list geometry (its
+vertices replay inside the driver and no draw-time sample can see it). See
+ADR-0482 and `src/hook/vertex_submission_observe.h`.
 
 
 ## 4. Consequence for the suppressor (GH #66)

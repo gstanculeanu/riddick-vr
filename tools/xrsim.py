@@ -384,6 +384,23 @@ VIEWMODEL_PROGRAM_RE = re.compile(
     r"ViewmodelProbe program \[#(\d+)\]: strings=(\d+) binds=(\d+) env=(\d+) "
     r"lastProg=(\d+) strLen=(\d+) strHash=([0-9a-fA-F]+) matrix=([01]) base=(\d+)")
 VIEWMODEL_PROGRAM_MATRIX_RE = re.compile(r"ViewmodelProbe program matrix:")
+# GH #67 step 1 (second correction, ADR-0482): the submitted-vertex sample -- the
+# surface the transform is actually applied on. `arrayIn`/`arrayOut` split the
+# engine's `glDrawElements` calls by whether they fell inside the first-person
+# window, `listIn`/`listOut` do the same for `glCallList` (a display list's
+# vertices replay inside the driver and are NOT observable at the draw entry
+# point), and `ptr*` is the client `glVertexPointer` state at the sample.
+VIEWMODEL_SUBMISSION_RE = re.compile(
+    r"ViewmodelProbe submission \[#(\d+)\]: arrayIn=(\d+) arrayOut=(\d+) "
+    r"listIn=(\d+) listOut=(\d+) ptrSize=(\d+) ptrType=(\d+) ptrStride=(-?\d+) "
+    r"inSample=([01]) outSample=([01])")
+# `fp` = the first array draw inside the first-person window (the viewmodel
+# candidate); `world` = the first outside it (the control). `valid=0` means the
+# array was not a decodable float array (the type/stride is logged, not guessed).
+VIEWMODEL_SUBMISSION_SAMPLE_RE = re.compile(
+    r"ViewmodelProbe submission (fp|world): first=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
+    r"min=\(([-\d.]+),([-\d.]+),([-\d.]+)\) max=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
+    r"n=(\d+) indexType=(\d+) vertexType=(\d+) valid=([01])")
 _MATRIX_ROW_RE = re.compile(r"\[([-\d.eE ]+)\]")
 
 # GH #71 requirement 1 / GH #80 follow-up: the sim input bridge's observation
@@ -1140,6 +1157,28 @@ def viewmodel_probe_stats(log_text):
                     vals = []
                 if len(vals) == 16:
                     program_matrix = vals
+    # GH #67 step 1 (second correction, ADR-0482): the submitted-vertex sample.
+    # `submission_lines` empty means the observation was not enabled / a pre-#0482
+    # hook, so this too is additive (a legacy log yields zeros + null samples).
+    submission = []
+    for m in VIEWMODEL_SUBMISSION_RE.finditer(text):
+        submission.append({
+            "index": int(m.group(1)),
+            "array_inside": int(m.group(2)), "array_outside": int(m.group(3)),
+            "list_inside": int(m.group(4)), "list_outside": int(m.group(5)),
+            "pointer_size": int(m.group(6)), "pointer_type": int(m.group(7)),
+            "pointer_stride": int(m.group(8)),
+            "inside_sampled": m.group(9) == "1", "outside_sampled": m.group(10) == "1",
+        })
+    submission_samples = {}
+    for m in VIEWMODEL_SUBMISSION_SAMPLE_RE.finditer(text):
+        submission_samples[m.group(1)] = {
+            "first": [float(m.group(2)), float(m.group(3)), float(m.group(4))],
+            "min": [float(m.group(5)), float(m.group(6)), float(m.group(7))],
+            "max": [float(m.group(8)), float(m.group(9)), float(m.group(10))],
+            "read": int(m.group(11)), "index_type": int(m.group(12)),
+            "vertex_type": int(m.group(13)), "valid": m.group(14) == "1",
+        }
     return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates,
             "program_lines": program,
             "program": {
@@ -1147,7 +1186,16 @@ def viewmodel_probe_stats(log_text):
                 "binds": sum(p["binds"] for p in program),
                 "env_params": sum(p["env"] for p in program),
                 "matrix": program_matrix,
-            } if program else None}
+            } if program else None,
+            "submission_lines": submission,
+            "submission": {
+                "array_inside": sum(s["array_inside"] for s in submission),
+                "array_outside": sum(s["array_outside"] for s in submission),
+                "list_inside": sum(s["list_inside"] for s in submission),
+                "list_outside": sum(s["list_outside"] for s in submission),
+                "fp": submission_samples.get("fp"),
+                "world": submission_samples.get("world"),
+            } if submission else None}
 
 
 def content_gate_stats(host_log):
@@ -2584,6 +2632,22 @@ def cmd_selftest(require_image_deps=False):
         merged.count("ViewmodelObserve=9") == 1 and      # other section untouched
         "A=2" in merged and                              # missing key inserted
         _shadow.merge_ini(merged, {"ViewmodelObserve": "1", "A": "2"}) == merged)
+
+    # GH #67 step 1 (second correction, ADR-0482): the submitted-vertex parser must
+    # split array vs display-list draws by window side and decode the sampled
+    # geometry -- the datum that decides where the transform actually is.
+    probe_text = (
+        "ViewmodelProbe submission [#300]: arrayIn=3 arrayOut=40 listIn=1 listOut=12 "
+        "ptrSize=3 ptrType=3590 ptrStride=0 inSample=1 outSample=1\n"
+        "ViewmodelProbe submission fp: first=(0.250,-0.100,0.400) min=(-0.100,-0.200,0.300) "
+        "max=(0.300,0.100,0.500) n=24 indexType=5121 vertexType=5126 valid=1\n"
+        "ViewmodelProbe submission world: first=(100.000,2.000,-40.000) min=(90.000,0.000,-60.000) "
+        "max=(140.000,8.000,-10.000) n=24 indexType=5121 vertexType=5126 valid=1\n")
+    sub = viewmodel_probe_stats(probe_text)["submission"]
+    results["viewmodel_submission_parsed"] = (
+        sub is not None and sub["array_inside"] == 3 and sub["list_outside"] == 12 and
+        sub["fp"]["first"] == [0.25, -0.1, 0.4] and sub["world"]["max"][0] == 140.0 and
+        sub["fp"]["valid"] is True)
 
     skipped = []
     if not have_image_deps():

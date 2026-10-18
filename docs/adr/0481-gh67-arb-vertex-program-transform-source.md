@@ -1,5 +1,9 @@
 # ADR-0481 — GH #67: the engine's transforms are ARB vertex-program parameters, not a GL_MODELVIEW
 
+> **Correction (ADR-0482).** The title overstates the finding: the ARB path was
+> the *last candidate*, and the live run then measured it **silent** (0 calls).
+> The body and conclusion below are correct; read "are" as "were the candidate for".
+
 - Status: accepted
 - Date: 2026-10-18
 - Refs: GH #67 (this — step 1, corrected), GH #63/#66 (the same pass

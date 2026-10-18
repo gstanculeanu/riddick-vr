@@ -1364,6 +1364,38 @@ def test_viewmodel_probe_program_lines_are_parsed(td):
     assert xrsim.viewmodel_probe_stats("")["program"] is None
 
 
+def test_viewmodel_probe_submission_lines_are_parsed(td):
+    """GH #67 step 1 (second correction, ADR-0482): the submitted-vertex sample
+    must be parsed out of the hook log -- it is the datum that decides whether the
+    engine's object/view transform is applied to the geometry (and whether the
+    first-person pass is array draws or display lists). The parse must be
+    additive: a log without the lines yields ``submission is None``."""
+    log = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=3 arrayOut=40 listIn=1 "
+        "listOut=12 ptrSize=3 ptrType=3590 ptrStride=0 inSample=1 outSample=1\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.250,-0.100,0.400) "
+        "min=(-0.100,-0.200,0.300) max=(0.300,0.100,0.500) n=24 indexType=5121 "
+        "vertexType=5126 valid=1\n"
+        "[INFO] ViewmodelProbe submission world: first=(100.000,2.000,-40.000) "
+        "min=(90.000,0.000,-60.000) max=(140.000,8.000,-10.000) n=24 indexType=5121 "
+        "vertexType=5126 valid=1\n"
+    )
+    stats = xrsim.viewmodel_probe_stats(log)
+    assert len(stats["submission_lines"]) == 1, stats["submission_lines"]
+    sub = stats["submission"]
+    assert sub["array_inside"] == 3 and sub["array_outside"] == 40, sub
+    assert sub["list_inside"] == 1 and sub["list_outside"] == 12, sub
+    assert stats["submission_lines"][0]["pointer_type"] == 3590, stats["submission_lines"]
+    assert sub["fp"]["first"] == [0.25, -0.1, 0.4], sub["fp"]
+    assert sub["fp"]["valid"] is True and sub["fp"]["read"] == 24, sub["fp"]
+    assert sub["world"]["max"][0] == 140.0, sub["world"]
+    # Additive: a log with no submission lines reports absence, not zeros.
+    legacy = xrsim.viewmodel_probe_stats(
+        "[INFO] ViewmodelProbe [#300]: inside=5 outside=6 sample=0 pushes=0 translates=0\n")
+    assert legacy["submission"] is None and legacy["submission_lines"] == [], legacy
+    assert xrsim.viewmodel_probe_stats("")["submission"] is None
+
+
 def test_confirm_key_messages_are_wellformed(td):
     """GH #71 req 1: the posted confirm tap must be a well-formed Win32
     keydown/WM_CHAR/keyup triple with a correct lParam (repeat bit + key-up
@@ -1967,6 +1999,7 @@ def main() -> int:
              test_ini_flag_parses_and_refuses_without_a_shadow,
              test_ini_overrides_reach_the_shadow_and_the_report,
              test_viewmodel_probe_program_lines_are_parsed,
+             test_viewmodel_probe_submission_lines_are_parsed,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

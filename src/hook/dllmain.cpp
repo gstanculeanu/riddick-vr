@@ -78,6 +78,11 @@ static BOOL WINAPI Hook_GdiSwapBuffers(HDC hdc) {
 // window is closed and the feature is off (the default).
 typedef void (WINAPI *PFN_glDrawElements)(GLenum mode, GLsizei count, GLenum type, const void* indices);
 typedef void (WINAPI *PFN_glCallList)(GLuint list);
+// GH #67 step 1 (second correction, ADR-0482): the client vertex array, so the
+// submitted geometry the engine transforms on the CPU can be sampled at draw time
+// (RndrGL imports glVertexPointer/glNormalPointer/glColorPointer; it never uses
+// glDrawArrays or a buffer object, so the pointer is always a client pointer).
+typedef void (WINAPI *PFN_glVertexPointer)(GLint size, GLenum type, GLsizei stride, const void* pointer);
 // GH #67 step 1: RndrGL composes object transforms from glLoadMatrixf +
 // glPushMatrix/glTranslatef/glPopMatrix (it does not import glMultMatrixf /
 // glRotatef -- docs/rea/reference/RndrGL_GL_Path.txt section 3). Intercept those
@@ -90,6 +95,7 @@ typedef void (WINAPI *PFN_glTranslatef)(GLfloat, GLfloat, GLfloat);
 
 static PFN_glDrawElements real_glDrawElements = nullptr;
 static PFN_glCallList real_glCallList = nullptr;
+static PFN_glVertexPointer real_glVertexPointer = nullptr;
 static PFN_glLoadIdentity real_glLoadIdentity = nullptr;
 static PFN_glPushMatrix real_glPushMatrix = nullptr;
 static PFN_glPopMatrix real_glPopMatrix = nullptr;
@@ -97,12 +103,27 @@ static PFN_glTranslatef real_glTranslatef = nullptr;
 
 static void WINAPI Hook_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
+    // GH #67 step 1 (second correction, ADR-0482): sample the submitted vertices
+    // (inert unless ViewmodelObserve=1). Must run after ShouldSuppressDrawCall so
+    // the window state used to classify the draw is current.
+    RiddickVR::OpenGLProxy::NoteDrawElementsSubmission(mode, count, type, indices);
     if (real_glDrawElements) real_glDrawElements(mode, count, type, indices);
 }
 
 static void WINAPI Hook_glCallList(GLuint list) {
     if (RiddickVR::OpenGLProxy::ShouldSuppressDrawCall()) return;
+    // GH #67 step 1: count display-list draws by window side -- a display list's
+    // vertices replay inside the driver and are not observable here.
+    RiddickVR::OpenGLProxy::NoteDrawListSubmission();
     if (real_glCallList) real_glCallList(list);
+}
+
+// GH #67 step 1 (second correction, ADR-0482): remember the client vertex array
+// so the draw hook can sample the geometry the engine transformed. Forwarded
+// verbatim; never suppresses.
+static void WINAPI Hook_glVertexPointer(GLint size, GLenum type, GLsizei stride, const void* pointer) {
+    RiddickVR::OpenGLProxy::NoteVertexPointer(size, type, stride, pointer);
+    if (real_glVertexPointer) real_glVertexPointer(size, type, stride, pointer);
 }
 
 // GH #67 step 1: maintain the software GL_MODELVIEW stack, then forward verbatim.
@@ -154,10 +175,22 @@ static void InstallRndrGLHooks() {
         reinterpret_cast<void*>(Hook_glCallList),
         reinterpret_cast<void**>(&real_glCallList)
     );
-    // GH #67 step 1: intercept the fixed-function matrix composition the engine
-    // uses for object/viewmodel transforms, so the effective GL_MODELVIEW is
-    // observable (the step-2 probe and any controller-driven re-expression need
-    // it). Forwarded verbatim; never suppresses.
+    // GH #67 step 1 (second correction, ADR-0482): the client vertex array is what
+    // the submitted-geometry sample reads (the transform is engine-side on the
+    // vertices, not in any GL matrix the hook can see).
+    RiddickVR::IATHook::Hook(
+        hRndrGL,
+        "OPENGL32.dll",
+        "glVertexPointer",
+        reinterpret_cast<void*>(Hook_glVertexPointer),
+        reinterpret_cast<void**>(&real_glVertexPointer)
+    );
+    // GH #67 step 1: intercept the fixed-function matrix composition RndrGL
+    // imports, so the effective GL_MODELVIEW is observable (the step-2 probe and
+    // any controller-driven re-expression need it). MEASURED (ADR-0481): the live
+    // title never composes it -- one identity load per run -- so this is a
+    // complete observation of a path the engine does not use, not the transform
+    // source. Forwarded verbatim; never suppresses.
     RiddickVR::IATHook::Hook(
         hRndrGL,
         "OPENGL32.dll",

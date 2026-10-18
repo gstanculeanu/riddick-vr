@@ -160,6 +160,22 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   so a drive path has to hook the vertex submission (or REA the engine's own
   matrix code), not a GL matrix. Unit-tested by `vertex_program_observe`
   (`tests/vertex_program_tracker_tests.cpp`).
+- **ADR-0482 — the submitted-vertex capture.** Since the transform is applied
+  engine-side to the geometry, the observable surface is the draw itself:
+  `vertex_submission_observe.h` records the client `glVertexPointer` array
+  (`InstallRndrGLHooks` IAT-hooks `OPENGL32.dll!glVertexPointer`) and samples, for
+  the **first** `glDrawElements` on each side of the first-person window, up to 24
+  vertices (first + axis-aligned bounds), while counting `glDrawElements` vs
+  `glCallList` by side. Logged as `ViewmodelProbe submission [#N]: arrayIn=.. …
+  inSample=..` plus a `ViewmodelProbe submission fp:` (in-window, the viewmodel
+  candidate) and `ViewmodelProbe submission world:` (the control) geometry line
+  every 300 presented frames. `listIn > 0` with `arrayIn == 0` means the
+  first-person pass is display-list geometry and no draw-time sample can see it
+  (the capture would have to move into list compilation). Only client `GL_FLOAT`
+  arrays are decoded; anything else logs `valid=0` with its type/stride rather than
+  a guessed number. Inert unless `ViewmodelObserve=1`; XRSIM parses it into
+  `viewmodel_probe.submission`. Unit-tested by `vertex_submission_observe`
+  (`tests/vertex_submission_observe_tests.cpp`). See ADR-0482.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

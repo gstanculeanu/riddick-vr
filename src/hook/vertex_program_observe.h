@@ -18,20 +18,24 @@
 //      (identity), and `glPushMatrix`/`glTranslatef`/`glPopMatrix` are never
 //      called (the probe reads pushes=0 translates=0 on every sampled frame)
 //      while the projection is reloaded ~14x per frame.
-//   3. That same `RndrGL.dll` **does** import the ARB_vertex_program entry
-//      points -- `glProgramStringARB`, `glBindProgramARB`, `glGenProgramARB`,
-//      `glProgramEnvParameter4fvARB` -- plus the generic-attribute path
-//      (`glVertexAttribPointerARB`, and no `glTexCoordPointer`). The engine
-//      renders through vertex programs and feeds the object/view transforms in
-//      as *program environment parameters*, not through GL_MODELVIEW.
+//   3. That same `RndrGL.dll` references the ARB_vertex_program entry points in
+//      its *bytes* (`glProgramStringARB`, `glBindProgramARB`, `glGenProgramARB`,
+//      `glProgramEnvParameter4fvARB`, `glProgramEnvParameter4fARB`). **They are
+//      not in its static import table** (`tools/gl_vocabulary_scan.py --imports`
+//      lists 96 OPENGL32 entries and no ARB name), so they can only be resolved
+//      through `wglGetProcAddress` -- which is why this observer is wired there.
+//      The hypothesis this header was built for was that the object/view
+//      transforms ride the program's environment parameters; the live run then
+//      measured that path **silent** (0 calls), so it is falsified by
+//      measurement, not confirmed. See ADR-0482 for where the transform is.
 //
 // Consequence: the transform GH #67 wants to re-express in head/controller
-// space is a program parameter, so it must be captured on the ARB program path.
-// This observer is that capture: it counts the ARB program calls per frame,
-// remembers the last bound program, and reconstructs a 4x4 from four
-// *consecutive* `glProgramEnvParameter4fvARB` indices (matrixBase is the first
-// index). It does not claim a row/column convention: it records the four
-// vectors in index order, exactly as uploaded.
+// space is applied engine-side to the submitted vertices (ADR-0482). This
+// observer is kept as the completed, measured-eliminated ARB candidate: it counts
+// the ARB program calls per frame, remembers the last bound program, and
+// reconstructs a 4x4 from four *consecutive* `glProgramEnvParameter4fvARB`
+// indices (matrixBase is the first index). It does not claim a row/column
+// convention: it records the four vectors in index order, exactly as uploaded.
 //
 // Header-only and dependency-free (no GL/Windows headers) so it is unit-tested
 // headlessly, like gl_matrix_tracker.h / viewmodel_suppressor.h.

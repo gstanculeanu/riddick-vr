@@ -2,6 +2,82 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 81 — 2026-10-18 04:32 (scheduled loop)
+- **Unit:** GH **#67 step 1 (second correction)** — capture the transform where it
+  actually *is*: in the engine's **submitted vertex data**. New pure observer
+  `src/hook/vertex_submission_observe.h` (`VertexSubmissionObserver` +
+  `SampleClientVertices`: client `GL_FLOAT` arrays, ubyte/short/uint indices,
+  stride-aware, 24-vertex spread → first + axis-aligned bounds), fed by a new
+  RndrGL IAT hook for `glVertexPointer` and by the existing `glDrawElements` /
+  `glCallList` hooks; logs `ViewmodelProbe submission [#N]: arrayIn/arrayOut/
+  listIn/listOut/ptr*` plus `submission fp:` (first in-window array draw) and
+  `submission world:` (the control); XRSIM parses it into
+  `viewmodel_probe.submission`. CTest `vertex_submission_observe`, +1
+  `tools/test_xrsim.py`, +1 `xrsim --selftest`, ADR-0482, README/REA-reference
+  updates, and the `verify_reported_fixes` #67 invariant extended. Also corrected
+  two false premises in place: `vertex_program_observe.h` ("RndrGL imports the ARB
+  entry points" — it does not; the import scan lists **no** ARB name) and
+  ADR-0481's title (the ARB path is a candidate measured *silent*, not the source).
+- **Why this unit:** it is the explicit "Next" of wake 80 and the top player-visible
+  item (#67). Wake 80 *inferred* "the transform is applied engine-side to the
+  submitted vertices"; this makes it an **observation** and settles the question
+  that decides whether a capture is possible at all (array draws vs display lists).
+- **DECISIVE live result (RIDDICKVR_SIM=1, per-run read-only shadow,
+  `--ini ViewmodelObserve=1`, `--require-fresh-hook`, no deploy, hook
+  `sha256 e6c0a03a710c` = repo build, XRSIM **PASS** 30 gameplay captures,
+  `gameplay_full_bleed_reached` fill 1.00):**
+  1. **Display lists are falsified** — every one of the 23 sampled lines is
+     `listIn=0 listOut=0` and `ptrSize=3 ptrType=5126 (GL_FLOAT) ptrStride=0`:
+     RndrGL never calls `glCallList` through the hooked IAT, so all geometry is
+     `glDrawElements` client arrays and the draw-time sample is **complete**.
+  2. **The depth-only-clear opener is contaminated (new negative)** — the first
+     in-window array draw is the **unit quad** `first=(0.5,0.5,0.0)
+     min=(-0.5,-0.5,0.0) max=(0.5,0.5,0.0)` (a screen-space/2D draw, **not** the
+     arms), while the `world` sample is the frame's first array draw at large 2D
+     magnitudes with a constant `z=2032.000` (x ∈ ±3518, y ∈ ±1663).
+     `arrayIn≈4500` vs `arrayOut≈24700` per 300 gameplay frames (~15 % in-window),
+     matching wake 79's "the window opens on the world pass too".
+  3. The window only opens in gameplay (`inSample=0` for the first 8 sampled
+     frames = splash/menu, `inSample=1` from #2400 on).
+- **Change:** `vertex_submission_observe.h` (pure, inert until `Configure(true)`);
+  `opengl_proxy.{h,cpp}` (`NoteVertexPointer`/`NoteDrawElementsSubmission`/
+  `NoteDrawListSubmission`, the three-line report on the same `% 300` cadence, the
+  `LogVertexSubmissionSample` helper); `dllmain.cpp` (`Hook_glVertexPointer` +
+  the IAT hook, and the draw hooks now feed the observer after
+  `ShouldSuppressDrawCall`); `tools/xrsim.py` (`VIEWMODEL_SUBMISSION_RE` /
+  `VIEWMODEL_SUBMISSION_SAMPLE_RE`, `submission_lines`/`submission`, the selftest
+  case); `tools/test_xrsim.py`; `tests/vertex_submission_observe_tests.cpp` +
+  CMakeLists; `docs/adr/0482-gh67-submitted-vertex-transform-capture.md`;
+  `src/hook/vertex_program_observe.h` / `README.md` /
+  `docs/rea/reference/RndrGL_GL_Path.txt` §3 corrected; ADR-0481 correction note;
+  `verify_reported_fixes` #67 invariant.
+- **Evidence (offline):** `tools/build-all.ps1 -Config Release`, **no `-Deploy`**
+  OK (`dist\opengl32.dll` 495104 B, sha256 `e6c0a03a710c`); **CTest 24/24 x64,
+  26/26 x86** (incl. the new `vertex_submission_observe`); all **12
+  `tools/test_*.py` PASS** (incl. the new
+  `test_viewmodel_probe_submission_lines_are_parsed`); `xrsim --selftest` PASS
+  (+1 `viewmodel_submission_parsed`); `verify_reported_fixes` (extended #67
+  invariant), `verify_hook_init`, `validate_addresses` (PASS),
+  `verify_test_artifacts`, `scenario_tests.py --check` all PASS.
+- **Blocker / honest limit:** the observable *surface* is settled (array draws) but
+  the FP-pass *signature* is not: the current opener's first in-window draw is a 2D
+  unit quad, so the window is contaminated and cannot yet be used to drive the arms.
+  Nothing player-visible changed (no draw/state altered; inert unless
+  `ViewmodelObserve=1`). `glDrawArrays` is not hooked (RndrGL does not import it) and
+  immediate-mode geometry outside a list (`glBegin`/`glVertex3f`) is not sampled.
+  Only `GL_FLOAT` client arrays are decoded. Install untouched: deployed
+  `opengl32.dll` `479232 B 17-Oct 12:47`, install `riddick_vr.ini` `7363 B`,
+  install `riddick_vr.log` `7635 B 18-Oct 00:25` — all unchanged; no leftover
+  processes; live lock released.
+- **Next:** (1) fix the FP-pass **signature** — the depth-only-clear window's first
+  in-window draw is a 2D quad, so try the `NearPlaneDrop` opener (or classify a draw
+  as the viewmodel by its submitted geometry being camera-relative/near-field) and
+  re-run the SAME `--ini ViewmodelObserve=1` command to read a non-unit-quad `fp`
+  sample; (2) then the deploy-gated ladder (#68 req 5, #79 hook half, #76 step 1);
+  (3) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (4) GH #83's manual-session blind
+  spot.
+
+
 ## Wake 80 — 2026-10-18 03:52 (scheduled loop)
 - **Unit:** GH **#67 step 1 (corrected)** — the engine's object/view transform is
   **not in GL state at all**. Measured, read-only: (a) the live 2009 `RndrGL.dll`
