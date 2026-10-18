@@ -1208,6 +1208,29 @@ def main():
             "a decodable fixed-function client array -- ADR-0507 measured that array "
             "to be null by design on the world draws")
 
+    # GH #76 / GH #90 / ADR-0509: ADR-0508 fixed the classification (the span capture
+    # rose from ~60 to 706/735 draws) but the eye frames were still unusable, so the
+    # remaining "why" must be *measured*: the pass has to read the span's **output**
+    # GL state -- the colour-write mask, depth mask, viewport, scissor and enable bits
+    # are global state a re-issued draw inherits -- once per span at the first
+    # eligible draw, plus the eye frames' mean luminance (so "black" and "dark" are
+    # distinguishable).  That separates "the span writes no colour" (a depth/colour-
+    # masked stage -> a span-boundary fix) from "the re-issue is wrong" (a pass fix).
+    require("struct DualDrawState" in stereo_dual_h and
+            "DualColourMaskNibble" in stereo_dual_h and
+            "DualDrawStateWritesNoColour" in stereo_dual_h and
+            "DualMeanLuminance" in stereo_dual_h and
+            "kDualDrawBufferNone" in stereo_dual_h and
+            "CaptureDualDrawState" in stereo_renderer_cpp and
+            "colourWrite" in stereo_renderer_cpp and
+            "sstate=[cap=%d cmask=0x%X" in stereo_renderer_cpp and
+            "luma=[L=%.1f R=%.1f]" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0509-gh76-per-eye-output-state-probe.md").exists(),
+            "GH #76 / GH #90 / ADR-0509: the per-eye pass must read the span's output "
+            "GL state (colour-write mask, depth mask, viewport, scissor, enable bits) "
+            "and the eye frames' mean luminance -- ADR-0508 measured the whole span "
+            "re-issued with still-unusable eye frames and no way to attribute it")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

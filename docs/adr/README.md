@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0508` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0509` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -46,7 +46,13 @@ every ADR names the epic #57 subsystem it advances.
   `GL_ARRAY_BUFFER`), so an undecodable draw on the generic path is re-issued per
   eye (no decoded vertices needed) instead of being skipped, while every decodable
   near-field (HUD/viewmodel) draw stays excluded.
-  **Head = `0508`; the next new ADR is `0509`.**
+  ADR-0509 measures that re-issue further: the span capture rose to 706/735 draws
+  but the eye frames were still dark, so it reads the span's **output GL state**
+  (`glColorMask`/depth mask/viewport/scissor/enables — global state a re-issued draw
+  inherits) once per span and the eye frames' **mean luminance**, so "the span writes
+  no colour" (a depth/colour-masked stage → a span-boundary fix) is distinguishable
+  from "the re-issue is wrong" (a pass fix).
+  **Head = `0509`; the next new ADR is `0510`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

@@ -368,6 +368,17 @@ adds `attrLive=(..)` while `DualRender:` adds `gen=/gbacked=/gsig=`. Every
 *decodable* near-field draw (HUD/viewmodel) is still excluded, so screen-space
 geometry is never eye-translated. Opt-in (`StereoDualRender=0` stays the default).
 
+**ADR-0509 (wake 107; GH #76 / GH #90) reads the span's output state.** ADR-0508
+moved the blocker: the span capture rose to 706/735 draws but the per-eye frames are
+still refused, so the pass reads the engine's **output GL state** once per span at the
+first eligible draw — `glColorMask`, depth mask, viewport, scissor box +
+`GL_SCISSOR_TEST`, `GL_DEPTH_TEST`, `GL_BLEND`, i.e. the global state a re-issued draw
+inherits — plus the eye frames' **mean luminance**. The `DualRender:` line gains
+`luma=[L=… R=…]` and `sstate=[cap=… cmask=0x… dmask=… drawbuf=0x… vp=… sc=… scissor=…
+dt=… blend=…]`. A fully-masked `cmask=0x0` (a depth/occlusion stage) means the pass
+must move its span boundary; a live mask with sane viewport/scissor means the re-issue
+itself is at fault. Evidence only; `StereoDualRender=0` stays the default.
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

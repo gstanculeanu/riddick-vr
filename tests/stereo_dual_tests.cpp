@@ -11,8 +11,13 @@
 
 #include <cstdio>
 
+using RiddickVR::DualColourMaskNibble;
+using RiddickVR::DualDrawState;
+using RiddickVR::DualDrawStateWritesNoColour;
 using RiddickVR::DualFrameUsable;
+using RiddickVR::DualMeanLuminance;
 using RiddickVR::DualNonBlackFraction;
+using RiddickVR::kDualDrawBufferNone;
 using RiddickVR::DualRejectReasonName;
 using RiddickVR::DualRenderDrawEligible;
 using RiddickVR::DualSampleExtent;
@@ -261,6 +266,45 @@ int main() {
               "a tightly packed float array decodes");
         Check(ok.min[0] == -1.0f && ok.max[0] == 1.0f && ok.pointerSet,
               "the decoded bounds are over the sampled vertices");
+    }
+
+    // 11. GH #76/#90 (ADR-0509): the span's output state decides whether a re-issued
+    //     draw can colour the eye frame at all. The pure policy is: the colour mask
+    //     as a nibble, and "this span writes no colour" for a fully-off mask or a
+    //     GL_NONE draw buffer. The mean luminance separates "black" from "dark".
+    {
+        DualDrawState state;
+        Check(!state.captured && !DualDrawStateWritesNoColour(state),
+              "an unread state is not blamed for a dark frame");
+        Check(DualColourMaskNibble(state) == 0xFu,
+              "the GL default colour mask is red|green|blue|alpha");
+        Check(!DualDrawStateWritesNoColour(state),
+              "the default state writes colour");
+
+        state.captured = true;
+        state.colourWrite[0] = state.colourWrite[1] = state.colourWrite[2] = state.colourWrite[3] = false;
+        Check(DualColourMaskNibble(state) == 0u, "a fully-off colour mask is nibble 0");
+        Check(DualDrawStateWritesNoColour(state),
+              "a colour-masked span cannot colour the eye frame");
+        Check(!state.ColourWriteEnabled(), "the mask query agrees with the nibble");
+
+        state.colourWrite[2] = true;
+        Check(DualColourMaskNibble(state) == 0x4u && !DualDrawStateWritesNoColour(state),
+              "one live channel is enough to write colour");
+
+        DualDrawState none = state;
+        none.colourWrite[2] = false;
+        none.drawBuffer = kDualDrawBufferNone;
+        Check(DualDrawStateWritesNoColour(none),
+              "a GL_NONE draw buffer is the second no-colour form");
+
+        const unsigned char black[8] = {0, 0, 0, 255, 0, 0, 0, 255};
+        Check(DualMeanLuminance(black, 2u) == 0.0f, "black samples average to zero luma");
+        const unsigned char white[8] = {255, 255, 255, 255, 255, 255, 255, 255};
+        Check(DualMeanLuminance(white, 2u) > 254.0f, "white samples average near 255 luma");
+        const unsigned char mixed[8] = {0, 0, 0, 0, 255, 255, 255, 255};
+        Check(DualMeanLuminance(mixed, 2u) > 127.0f && DualMeanLuminance(mixed, 2u) < 128.0f,
+              "the mean is over the sample, so a half-lit row is ~127");
     }
 
     if (g_failures == 0) {

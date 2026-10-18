@@ -500,5 +500,17 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   (HUD/viewmodel) draw is still excluded, so screen-space geometry is never
   eye-translated; the pass stays opt-in (`StereoDualRender=0`).
 
+- **The span's output state is read, and dark is told from black (ADR-0509, wake 107;
+  GH #76 / GH #90).** ADR-0508 re-issued 706/735 span draws and the eye frames were
+  *still* refused, so the pass now reads the engine's **output GL state** once per
+  span at the first eligible draw — `glColorMask`, depth mask, viewport, scissor box +
+  `GL_SCISSOR_TEST`, `GL_DEPTH_TEST`, `GL_BLEND` (all global state a re-issued draw
+  inherits) — and the eye frames' **mean luminance** (`DualMeanLuminance`). The
+  `DualRender:` line gains `luma=[L=… R=…]` and
+  `sstate=[cap=… cmask=0x… dmask=… drawbuf=0x… vp=… sc=… scissor=… dt=… blend=…]`, so
+  "the span writes no colour" (`cmask=0x0`, a depth/colour-masked stage → fix the span
+  boundary) is separable from "the re-issue is wrong" (→ fix the pass). Evidence only:
+  no draw decision changes, `StereoDualRender=0` stays the default.
+
 
 

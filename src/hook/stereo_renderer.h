@@ -86,7 +86,10 @@ private:
     void DestroyDualBuffers();
     void RefreshDualEyeOffsets();
     void BlitDualEye(bool isLeftEye);
-    float SampleDualCoverage(bool isLeftEye);
+    float SampleDualCoverage(bool isLeftEye, float* meanLumaOut = nullptr);
+    // GH #76/#90 (ADR-0509): read the engine's output GL state once per span, at the
+    // first eligible draw, so the run can say whether the span can produce colour.
+    void CaptureDualDrawState();
 
     bool InitD3D11Interop(uint32_t width, uint32_t height);
     void ReleaseD3D11Interop();
@@ -167,6 +170,14 @@ private:
     // draw was refused, so a run names the rejected signature rather than only
     // counting it (ADR-0505's ~92% undecodable span draws).
     SpanDrawCensus m_dualCensus;
+    // GH #76/#90 (ADR-0509): the span's output GL state (glColorMask/glDepthMask/
+    // viewport/scissor/enables), read once at the first eligible draw, plus the eye
+    // frames' mean luminance at the periodic coverage sample -- together they say
+    // whether the dark eye frames are "the span writes no colour" (a depth/colour-
+    // masked stage) or "the re-issue is wrong".
+    DualDrawState m_dualState;
+    float m_dualMeanL = 0.0f;
+    float m_dualMeanR = 0.0f;
     bool m_dualOffValid = false;
     float m_dualOff[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
     unsigned m_dualDraws = 0;

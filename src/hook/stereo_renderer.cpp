@@ -1133,6 +1133,15 @@ constexpr unsigned kDualPackAlignment    = 0x0CF5u;
 constexpr unsigned kDualRgba             = 0x1908u;
 constexpr unsigned kDualUnsignedByte     = 0x1401u;
 constexpr unsigned kDualFramebufferComplete = 0x8CD5u;
+// GH #76/#90 (ADR-0509): the engine state the output path depends on.
+constexpr unsigned kDualColourWritemask = 0x0C22u;
+constexpr unsigned kDualDepthWritemask  = 0x0B72u;
+constexpr unsigned kDualDrawBuffer      = 0x0C01u;
+constexpr unsigned kDualViewportQuery   = 0x0BA2u;
+constexpr unsigned kDualScissorBoxQuery = 0x0C10u;
+constexpr unsigned kDualScissorTest     = 0x0C11u;
+constexpr unsigned kDualDepthTest       = 0x0B71u;
+constexpr unsigned kDualBlend           = 0x0BE2u;
 
 // A pathologically large frame must not turn the pass into a time sink; the cap
 // only ever *reduces* the work (the gate then falls back if too little was done).
@@ -1152,6 +1161,9 @@ typedef void (WINAPI *DualTranslatef_t)(GLfloat, GLfloat, GLfloat);
 typedef void (WINAPI *DualDrawElements_t)(GLenum, GLsizei, GLenum, const void*);
 typedef void (WINAPI *DualReadPixels_t)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
 typedef void (WINAPI *DualPixelStore_t)(GLenum, GLint);
+typedef void (WINAPI *DualGetIntegerv_t)(GLenum, GLint*);
+typedef void (WINAPI *DualGetBooleanv_t)(GLenum, GLboolean*);
+typedef GLboolean (WINAPI *DualIsEnabled_t)(GLenum);
 
 struct DualGlFns {
     DualMatrixMode_t matrixMode = nullptr;
@@ -1161,6 +1173,9 @@ struct DualGlFns {
     DualDrawElements_t drawElements = nullptr;
     DualReadPixels_t readPixels = nullptr;
     DualPixelStore_t pixelStorei = nullptr;
+    DualGetIntegerv_t getIntegerv = nullptr;
+    DualGetBooleanv_t getBooleanv = nullptr;
+    DualIsEnabled_t isEnabled = nullptr;
 };
 
 // Resolved from the SYSTEM opengl32 so a re-issued draw bypasses the hook layer
@@ -1181,6 +1196,11 @@ const DualGlFns& DualGl() {
         if (!fns.drawElements) fns.drawElements = (DualDrawElements_t)GetProcAddress(real, "glDrawElements");
         if (!fns.readPixels)   fns.readPixels   = (DualReadPixels_t)GetProcAddress(real, "glReadPixels");
         if (!fns.pixelStorei)  fns.pixelStorei  = (DualPixelStore_t)GetProcAddress(real, "glPixelStorei");
+        // GH #76/#90 (ADR-0509): the output-state queries. `glIsEnabled` has a
+        // different return type, so it is cast deliberately (it forwards verbatim).
+        if (!fns.getIntegerv)  fns.getIntegerv  = (DualGetIntegerv_t)GetProcAddress(real, "glGetIntegerv");
+        if (!fns.getBooleanv)  fns.getBooleanv  = (DualGetBooleanv_t)GetProcAddress(real, "glGetBooleanv");
+        if (!fns.isEnabled)    fns.isEnabled    = (DualIsEnabled_t)GetProcAddress(real, "glIsEnabled");
     }
     return fns;
 }
@@ -1279,6 +1299,35 @@ void StereoRenderer::RefreshDualEyeOffsets() {
     m_dualOffValid = true;
 }
 
+// GH #76/#90 (ADR-0509): read the engine's output GL state once per span, at the
+// first eligible draw. Called *before* the pass rebinds the eye framebuffer, so the
+// draw buffer is the engine's own; every other field is global state and so is the
+// state a re-issued draw will see. Evidence only -- nothing here changes a draw.
+void StereoRenderer::CaptureDualDrawState() {
+    m_dualState = DualDrawState{};
+    const DualGlFns& gl = DualGl();
+    if (!gl.getIntegerv || !gl.getBooleanv || !gl.isEnabled) return;
+    GLboolean colour[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    gl.getBooleanv(kDualColourWritemask, colour);
+    for (int i = 0; i < 4; ++i) m_dualState.colourWrite[i] = colour[i] != 0;
+    GLboolean depthWrite = GL_TRUE;
+    gl.getBooleanv(kDualDepthWritemask, &depthWrite);
+    m_dualState.depthWrite = depthWrite != 0;
+    GLint drawBuffer = 0;
+    gl.getIntegerv(kDualDrawBuffer, &drawBuffer);
+    m_dualState.drawBuffer = static_cast<unsigned>(drawBuffer);
+    GLint viewport[4] = {0, 0, 0, 0};
+    gl.getIntegerv(kDualViewportQuery, viewport);
+    for (int i = 0; i < 4; ++i) m_dualState.viewport[i] = viewport[i];
+    GLint scissor[4] = {0, 0, 0, 0};
+    gl.getIntegerv(kDualScissorBoxQuery, scissor);
+    for (int i = 0; i < 4; ++i) m_dualState.scissorBox[i] = scissor[i];
+    m_dualState.scissorEnabled = gl.isEnabled(kDualScissorTest) != 0;
+    m_dualState.depthTestEnabled = gl.isEnabled(kDualDepthTest) != 0;
+    m_dualState.blendEnabled = gl.isEnabled(kDualBlend) != 0;
+    m_dualState.captured = true;
+}
+
 // Mirrors one engine clear into both per-eye frames, and tracks the frame's
 // world span. The measured frame topology (ADR-0439/0483) is: the 3-D world pass,
 // then a mid-frame **depth-only** clear that opens the first-person window, then
@@ -1339,6 +1388,9 @@ void StereoRenderer::OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const 
     if (!DualRenderDrawEligible(sampled)) {
         return;
     }
+    // GH #76/#90 (ADR-0509): the first eligible draw of the span is the instant the
+    // engine's output state is current and unmodified by the pass, so read it here.
+    if (!m_dualState.captured) CaptureDualDrawState();
     if (!m_dualOffValid) RefreshDualEyeOffsets();
     if (!m_dualOffValid) return;
 
@@ -1378,9 +1430,12 @@ void StereoRenderer::BlitDualEye(bool isLeftEye) {
     }
 }
 
-// Non-black fraction of one eye frame (evidence + the fail-safe gate).
-float StereoRenderer::SampleDualCoverage(bool isLeftEye) {
+// Non-black fraction of one eye frame (evidence + the fail-safe gate), plus the
+// sample's mean luminance when `meanLumaOut` is given (GH #76/#90/ADR-0509: the
+// fraction alone cannot separate "black" from "dark").
+float StereoRenderer::SampleDualCoverage(bool isLeftEye, float* meanLumaOut) {
     const DualGlFns& gl = DualGl();
+    if (meanLumaOut) *meanLumaOut = 0.0f;
     if (!gl.readPixels || m_dualW < 8 || m_dualH < 8 || m_dualW > 4096) return 0.0f;
     const int eye = isLeftEye ? 0 : 1;
     static unsigned char rows[4096 * kDualCoverageRows * 4];
@@ -1399,7 +1454,9 @@ float StereoRenderer::SampleDualCoverage(bool isLeftEye) {
     if (OpenGLProxy::glReadBuffer) {
         OpenGLProxy::glReadBuffer(0x0405 /* GL_BACK */);
     }
-    return DualNonBlackFraction(rows, static_cast<unsigned>(width) * kDualCoverageRows);
+    const unsigned pixels = static_cast<unsigned>(width) * kDualCoverageRows;
+    if (meanLumaOut) *meanLumaOut = DualMeanLuminance(rows, pixels);
+    return DualNonBlackFraction(rows, pixels);
 }
 
 
@@ -1715,8 +1772,8 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             if (m_dualEnabled) {
                 if (m_dualCoverCountdown <= 0) {
                     m_dualCoverCountdown = kDualCoverageEverySwaps;
-                    m_dualCoverL = SampleDualCoverage(true);
-                    m_dualCoverR = SampleDualCoverage(false);
+                    m_dualCoverL = SampleDualCoverage(true, &m_dualMeanL);
+                    m_dualCoverR = SampleDualCoverage(false, &m_dualMeanR);
                     m_dualCoverOk = DualFrameUsable(m_dualCoverL, m_dualCoverR);
                 } else {
                     --m_dualCoverCountdown;
@@ -1732,14 +1789,18 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                         s_dualLogCountdown = g_vrConfig.stereoDualRenderLogEvery;
                         VR_LOG_INFO("DualRender: swap=%u frames=%u used=%u draws=%u eligible=%u "
                                     "skipped=%u mirrors=%u active=%d coverL=%.3f coverR=%.3f "
+                                    "luma=[L=%.1f R=%.1f] "
                                     "size=%dx%d use=%d scale=[unknown=%u near=%u mid=%u world=%u] "
                                     "reject=%u rc=[nonfloat=%u noarray=%u zerocount=%u badsize=%u "
                                     "badindex=%u] sig=[%s vtype=0x%X vsize=%u stride=%d ptr=%d "
                                     "itype=0x%X count=%u buf=%d bid=%u] "
-                                    "gen=%u gbacked=%u gsig=[enabled=%u buf=%u]",
+                                    "gen=%u gbacked=%u gsig=[enabled=%u buf=%u] "
+                                    "sstate=[cap=%d cmask=0x%X dmask=%d drawbuf=0x%X "
+                                    "vp=%d,%d,%dx%d sc=%d scissor=%d,%d,%dx%d dt=%d blend=%d]",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
                                     m_dualEligible, m_dualCensus.skipped, m_dualMirrorClears,
                                     (int)m_dualFrameActive, m_dualCoverL, m_dualCoverR,
+                                    m_dualMeanL, m_dualMeanR,
                                     (int)m_dualW, (int)m_dualH, (int)dualUsedThisFrame,
                                     m_dualCensus.unknown, m_dualCensus.nearField, m_dualCensus.mid,
                                     m_dualCensus.world, m_dualCensus.decodeRejected,
@@ -1753,7 +1814,16 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     (int)m_dualCensus.rejectArrayBufferBound,
                                     m_dualCensus.rejectArrayBufferId,
                                     m_dualCensus.genericEligible, m_dualCensus.genericBufferBacked,
-                                    m_dualCensus.genericEnabled, m_dualCensus.genericBufferId);
+                                    m_dualCensus.genericEnabled, m_dualCensus.genericBufferId,
+                                    (int)m_dualState.captured, DualColourMaskNibble(m_dualState),
+                                    (int)m_dualState.depthWrite, m_dualState.drawBuffer,
+                                    m_dualState.viewport[0], m_dualState.viewport[1],
+                                    m_dualState.viewport[2], m_dualState.viewport[3],
+                                    (int)m_dualState.scissorEnabled,
+                                    m_dualState.scissorBox[0], m_dualState.scissorBox[1],
+                                    m_dualState.scissorBox[2], m_dualState.scissorBox[3],
+                                    (int)m_dualState.depthTestEnabled,
+                                    (int)m_dualState.blendEnabled);
                     } else {
                         --s_dualLogCountdown;
                     }
@@ -1993,6 +2063,8 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
         m_dualDraws = 0;
         m_dualEligible = 0;
         m_dualCensus.Reset();
+        // GH #76/#90 (ADR-0509): the next span re-reads the engine's output state.
+        m_dualState = DualDrawState{};
     }
 }
 

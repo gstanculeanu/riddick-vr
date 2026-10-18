@@ -97,6 +97,69 @@ inline bool DualFrameUsable(float coverageLeft, float coverageRight,
     return true;
 }
 
+// Mean luminance (0..255) of an RGBA8 sample. The non-black *fraction* alone cannot
+// tell "black" from "dark", and the live runs measured the eye frames dark rather
+// than empty (mean ~3/255 at wake 103, ~8/255 at wake 106), so the evidence needs
+// both numbers to say whether a re-issued span writes anything usable.
+inline float DualMeanLuminance(const unsigned char* rgba, unsigned pixels) {
+    if (!rgba || pixels == 0u) return 0.0f;
+    double sum = 0.0;
+    for (unsigned i = 0; i < pixels; ++i) {
+        const unsigned char* p = rgba + static_cast<size_t>(i) * 4u;
+        sum += 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+    }
+    return static_cast<float>(sum / static_cast<double>(pixels));
+}
+
+// --- GH #76/#90 (ADR-0509): can a re-issued draw write colour at all? -----------
+//
+// ADR-0508 re-issued ~96% of the world span's draws per eye (706/735) and the eye
+// frames were still unusable (coverage below the gate, mean ~8/255). The pass now
+// captured the *geometry* but never the *output state*, and one class of state
+// decides whether real geometry renders any colour: `glColorMask`. A span that is a
+// depth/shadow stage -- the scene's occlusion prepass -- re-issues correctly but
+// writes no colour, which is exactly what a high re-issue count with dark eye frames
+// looks like. This is the engine state read **once per span, at the first eligible
+// draw, before the pass rebinds anything** (the pass only changes the modelview and
+// the draw framebuffer, so everything else here is the engine's).
+//
+// Colour mask, depth mask, viewport, scissor and the enable bits are *global* state,
+// so they carry over unchanged into the per-eye frames; only `glDrawBuffer` is
+// per-framebuffer, so the recorded value is the engine's own buffer (the eye frames
+// use their default GL_COLOR_ATTACHMENT0) and is logged for context, not blamed.
+struct DualDrawState {
+    bool captured = false;
+    bool colourWrite[4] = {true, true, true, true};  // glColorMask (GL default: all on)
+    bool depthWrite = true;                          // glDepthMask
+    unsigned drawBuffer = 0;                         // glDrawBuffer of the engine's buffer
+    int viewport[4] = {0, 0, 0, 0};                  // x, y, w, h
+    bool scissorEnabled = false;                     // GL_SCISSOR_TEST
+    int scissorBox[4] = {0, 0, 0, 0};                // x, y, w, h (only when enabled)
+    bool depthTestEnabled = false;                   // GL_DEPTH_TEST
+    bool blendEnabled = false;                       // GL_BLEND
+
+    bool ColourWriteEnabled() const {
+        return colourWrite[0] || colourWrite[1] || colourWrite[2] || colourWrite[3];
+    }
+};
+
+// The colour-write mask as a 4-bit nibble (bit0=red, bit1=green, bit2=blue,
+// bit3=alpha), so one log token states all four flags; the GL default is 0xF.
+inline unsigned DualColourMaskNibble(const DualDrawState& s) {
+    return (s.colourWrite[0] ? 1u : 0u) | (s.colourWrite[1] ? 2u : 0u) |
+           (s.colourWrite[2] ? 4u : 0u) | (s.colourWrite[3] ? 8u : 0u);
+}
+
+constexpr unsigned kDualDrawBufferNone = 0x0404u;  // GL_NONE
+
+// True when the captured state means a re-issued draw cannot colour the eye frame:
+// the colour mask is fully off, or the span's own draw buffer is GL_NONE. This is
+// the measured form of "the span is a depth/colour-masked stage", as opposed to "the
+// re-issue is broken" -- the two answers point at different fixes.
+inline bool DualDrawStateWritesNoColour(const DualDrawState& s) {
+    return s.captured && (!s.ColourWriteEnabled() || s.drawBuffer == kDualDrawBufferNone);
+}
+
 // --- GH #76/#90 (ADR-0506): name what the world span actually contains ---------
 //
 // ADR-0505's live census measured that only ~8% of the draws inside the world span
