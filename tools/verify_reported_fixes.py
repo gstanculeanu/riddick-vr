@@ -593,6 +593,22 @@ def main():
             "second property loader FUN_10252d70, NOT the model-instance creation "
             "(ADR-0496)")
 
+    # GH #71/#80 (ADR-0497): a scripted run reached live gameplay only once the
+    # harness activated the game's own top-level window before posting the
+    # confirm taps -- the engine's message pump is focus-gated, so "posted
+    # messages are dead" was an artefact of an inactive window. Pin the mechanism,
+    # the report key and the ADR so the reach fix cannot silently regress.
+    _xrsim = (ROOT / "tools/xrsim.py").read_text(encoding="utf-8")
+    require("def activate_game_window(" in _xrsim and
+            "WINDOW_ACTIVATION_TIMEOUT_S" in _xrsim and
+            "activate_game_window(game.pid)" in _xrsim and
+            '"window_activation": window_stats' in _xrsim and
+            (ROOT / "docs/adr/0497-xrsim-activates-the-game-window-to-reach-gameplay.md").exists() and
+            "ADR-0497" in (ROOT / "docs/vr-scenarios.md").read_text(encoding="utf-8"),
+            "GH #71/#80: XRSIM must activate the game window before the "
+            "posted-confirm taps (the engine's pump is focus-gated) and report "
+            "window_activation (ADR-0497)")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

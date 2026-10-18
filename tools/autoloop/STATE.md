@@ -2,6 +2,77 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 96 — 2026-10-18 10:57 (scheduled loop)
+- **Unit:** GH **#71 requirement 1 (reach live gameplay) + #80** — the iteration
+  vehicle now **actually reaches live 3D gameplay** on the current build: the
+  missing precondition was that the game window must be **active** before the
+  harness's already-correct posted-confirm taps are delivered. Added
+  `activate_game_window()` (window management only — `SetForegroundWindow` under an
+  `AttachThreadInput` handshake; **no** synthesized input) plus a
+  `window_activation` report key. **Python only; no C++, no deploy, no install
+  write.** (ADR-0497.)
+- **Why this unit:** wake 95 closed the last static route of #67 step 1 and named
+  the **state question** (does the engine draw FP arms at all on the passive level
+  start) as the only route left, which itself needs a run that reaches a level
+  (GH #80). While measuring that, I found the harness had **never** captured live
+  gameplay: every "gameplay" capture in the committed artifacts is the `PRESS
+  ENTER` splash mislabelled by the display branch (`live_gameplay.gameplay=83`),
+  and the sim input bridge reported `polls=0`.
+- **Measured (live `RIDDICKVR_SIM=1`, read-only per-run shadow, hook
+  `sha256 a8897b5d5d9b…` = current build, `--require-fresh-hook`,
+  `deployed_hook_matches_build` PASS; `--dump-branch any`):**
+  - **Control** `--sim-confirm both` (bridge only): stayed on the **`PRESS ENTER`
+    splash** the whole run; bridge summary
+    `polls=0 taps=0 keyboardPolls=0 createDevicePatched=0` with
+    `procs[XInputGetState:owned,DirectInputCreateA:owned]` — the engine resolved
+    **both** procs through the hook (`inputProcRequests=2`, `getProcCalls=90`) and
+    never called either. Window was **foreground** (activation succeeded after 3
+    attempts) yet the splash did not advance → activation alone is not sufficient.
+  - **Treatment** `--advance-menu --advance-min-taps 8 --sim-confirm both`:
+    **reached live 3D gameplay** — `62 gameplay / 8 cinema / 0 unknown`,
+    **62 distinct** frames; last frame is an **in-level corridor** (verified by eye
+    on the dumped BMP), not the splash. `menu_advance` 8 taps / 1 window reached.
+    The bridge is unchanged (`polls=0`) **during gameplay too**, so the confirm that
+    worked is the **posted message path**, not the bridge.
+  - `window_activation`: `hwnd=5112260 title="The Chronicles of Riddick: Assault on
+    Dark Athena" 426x201 found=true foreground=true attempts=3`.
+- **Consequence / correction:** ADR-0466's "posted window messages are dead" is
+  **conditionally corrected** — the message pump is **focus-gated**, so the route
+  is dead only while the window is inactive (wake-84 already fixed the scan code;
+  this fixes focus). The bridge's premise is **not supported** (engine resolves
+  `DirectInputCreateA`/`XInputGetState` and never polls them, level or splash); it
+  stays opt-in/inert. **Reach command:**
+  `python tools/xrsim.py --shadow-install <F:> --reach-gameplay --duration 75
+  --advance-menu --advance-min-taps 8 --require-fresh-hook` (no `--sim-confirm`).
+- **Change:** NEW `docs/adr/0497-xrsim-activates-the-game-window-to-reach-gameplay.md`;
+  `tools/xrsim.py` (`pick_game_window` pure + `enumerate_game_windows` +
+  `activate_game_window`, `WINDOW_ACTIVATION_TIMEOUT_S=15 s` / 0.5 s cadence, report
+  key `window_activation`, docstring + help); `tools/test_xrsim.py` (+1 case);
+  `tools/verify_reported_fixes.py` new #71/#80 invariant (mechanism + report key +
+  ADR-0497); `docs/vr-scenarios.md` wake-96 update.
+- **EVIDENCE offline:** `verify_reported_fixes` PASS, `scenario_tests.py --check`
+  PASS, `verify_hook_init` PASS, `validate_addresses` PASS, `verify_test_artifacts`
+  PASS, `xrsim --selftest` PASS, all **12 `tools/test_*.py` exit 0**. **No C++ →
+  no `build-all`/CTest** (documented). Artifacts: `%TEMP%\oc_wake96{,b,c,d}\`
+  (control / activation-only / treatment run reports + BMPs).
+- **Blocker:** none for reach. The **state question** is still open: the reached
+  level is not verified **armed**, so #67 step 3 is not unblocked yet.
+- **Limits (honest):** one paired A/B (the A control repeats ADR-0466's prior
+  posted-route negative **without** activation); the reached scene is whichever
+  level the engine loads after the splash, not verified armed; `426x201` is the
+  read client rect, not the render resolution; a pad connected at launch could
+  change the XInput poll count; nothing about the 2004 build; no headset.
+- **Next:** (1) sample `--ini ViewmodelObserve=1` **during** a reached level
+  (the existing probe, now that a run can get there) — the #67 state question;
+  (2) extend the same posted-message route to drive movement / the console
+  (`loadgame Checkpoint`, real savegames exist) toward an **armed** state;
+  (3) `ViewmodelObserve=0` stays the default; (4) the display-branch mislabel of
+  the static splash (GH #72) is now unreachable in a normal run but still worth the
+  content discriminator; (5) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (6) GH #83/#88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY per-run shadow); no leftover game/host processes; live lock released;
+  `STATE.log` **appended** (never replaced — GH #88).
+
 ## Wake 95 — 2026-10-18 10:56 (scheduled loop)
 - **Unit:** GH **#67 step 1 (fourteenth correction, ADR-0496)** — ADR-0494's
   remaining "Next **1a**" ("the object's property-setter target (destination

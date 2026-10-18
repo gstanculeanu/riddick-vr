@@ -2356,6 +2356,26 @@ def test_ini_overrides_reach_the_shadow_and_the_report(td):
     assert manifest["ini_overrides"] == {"ViewmodelObserve": "1"}
 
 
+def test_game_window_target_is_largest_visible_of_the_pid(td):
+    """GH #80 wake 96: the harness activates the engine's render window before
+    it can poll the bridged input. The target is the largest *visible* top-level
+    window owned by the game pid -- never an invisible helper, a zero-area window
+    or another process's window -- and the choice is deterministic."""
+    import xrsim
+    wins = [(10, 4242, True, 1280, 605, "Riddick"),
+            (11, 4242, False, 4000, 4000, "hidden helper"),
+            (12, 9999, True, 5000, 5000, "other process"),
+            (13, 4242, True, 320, 240, "small tooltip"),
+            (14, 4242, True, 1280, 605, "Riddick (second)")]
+    assert xrsim.pick_game_window(wins, 4242) == (14, 4242, True, 1280, 605,
+                                                  "Riddick (second)")
+    assert xrsim.pick_game_window(wins, 9999) == (12, 9999, True, 5000, 5000,
+                                                 "other process")
+    assert xrsim.pick_game_window([(10, 1, False, 800, 600, "hidden")], 1) is None
+    assert xrsim.pick_game_window([], 1) is None
+    assert xrsim.pick_game_window([(10, 1, True, 0, 600, "zero")], 1) is None
+
+
 def main() -> int:
     tests = (test_shifted_pair_registers, test_identical_pair_is_mono_duplicate,
              test_all_black_pair_names_the_interop_cause,
@@ -2465,6 +2485,7 @@ def main() -> int:
              test_launch_reliability_flags_parse,
              test_ini_flag_parses_and_refuses_without_a_shadow,
              test_ini_overrides_reach_the_shadow_and_the_report,
+             test_game_window_target_is_largest_visible_of_the_pid,
              test_viewmodel_probe_program_lines_are_parsed,
              test_viewmodel_probe_submission_lines_are_parsed,
              test_viewmodel_candidate_geometry_distinguishes_plane_from_mesh,

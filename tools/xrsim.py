@@ -92,6 +92,23 @@ Wake 84 measured the card being left at the **5th-6th** tap, so the default
 floor is 8. Tune with ``--advance-interval``/``--advance-max-taps``/
 ``--advance-min-taps`` (0 restores the branch-only stop).
 
+**COMPLETED (wake 96, ADR-0497):** the posted-confirm route was still dead in
+every prior wake for one more reason -- the game window was **not active**, and
+the engine's pump only carries the key to the game when its own window is
+foreground. The harness now activates the game's top-level window
+(`SetForegroundWindow` under an ``AttachThreadInput`` handshake; window
+management only, *no* synthesized input) before the taps, and records the
+observed result as `window_activation` in the report. Measured live A/B on the
+current build (``--shadow-install``, ``--require-fresh-hook``,
+``--dump-branch any``): activation + ``--advance-menu --advance-min-taps 8``
+reached **62 distinct live gameplay frames** (last frame an in-level corridor),
+while activation + ``--sim-confirm both`` alone stayed on the ``PRESS ENTER``
+splash with the bridge at ``polls=0`` (the engine resolves
+``DirectInputCreateA``/``XInputGetState`` through the hook but never calls
+either, on the splash *or* in a level). So the reach command is
+``--reach-gameplay --duration 75 --advance-menu --advance-min-taps 8`` plus
+``--shadow-install``; ``--sim-confirm`` is not the reach mechanism.
+
 **Raw Input is mouse-only here (so it cannot carry a keyboard confirm):**
 ``RndrGL.dll`` calls ``RegisterRawInputDevices`` once with exactly **one**
 ``RAWINPUTDEVICE`` -- ``usUsagePage = 1`` / ``usUsage = 2`` (**mouse**),
@@ -2229,6 +2246,165 @@ def post_confirm_to_game_windows(pid, vk=VK_RETURN):
     return reached
 
 
+# ------------------------------------------------- game-window activation (GH #80)
+# Wake 96 measured the missing precondition for the simulator-only input bridge:
+# the engine resolved BOTH ``DirectInputCreateA`` and ``XInputGetState`` through
+# the hook's swapped ``GetProcAddress`` (``inputProcRequests=2``,
+# ``procs[XInputGetState:owned,DirectInputCreateA:owned]``) yet never called
+# either one (``polls=0 keyboardPolls=0 createDevicePatched=0``) -- so the
+# fabricated confirm could never be read and the run stayed on ``PRESS ENTER``.
+# A game that resolves its input procs and then never polls them is the
+# signature of an *inactive* window: many engines skip device reads while they
+# are not foreground. The harness launches the game from a background process,
+# so activating the game's own top-level window (window management, NOT input)
+# is the missing step. It is recorded in the report so a still-zero poll count
+# can never be misread as "the bridge was not installed".
+WINDOW_ACTIVATION_TIMEOUT_S = 15.0
+WINDOW_ACTIVATION_RETRY_S = 0.5
+
+
+def pick_game_window(windows, pid=None):
+    """Pick the game's interactive top-level window from observed candidates.
+
+    ``windows`` is an iterable of ``(hwnd, pid, visible, width, height, title)``.
+    When ``pid`` is given, only that process's windows are eligible. The largest
+    *visible* client area wins (the engine's render window), with the higher hwnd
+    as a deterministic tie-break. Returns the winning tuple or None.
+    Pure, so the choice is unit-tested without Win32.
+    """
+    best = None
+    best_key = None
+    for w in windows:
+        _hwnd, wpid, visible, width, height, _title = w
+        if pid is not None and int(wpid) != int(pid):
+            continue
+        if not visible or int(width) <= 0 or int(height) <= 0:
+            continue
+        key = (int(width) * int(height), int(_hwnd))
+        if best_key is None or key > best_key:
+            best, best_key = w, key
+    return best
+
+
+def enumerate_game_windows(pid):
+    """Enumerate ``(hwnd, pid, visible, width, height, title)`` for a process.
+
+    Dependency-free ctypes; a non-Windows/headless runner degrades to an empty
+    list instead of raising.
+    """
+    if os.name != "nt" or not pid:
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetClientRect.argtypes = [wintypes.HWND,
+                                         ctypes.POINTER(wintypes.RECT)]
+        user32.GetClientRect.restype = wintypes.BOOL
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR,
+                                          ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+    except Exception:
+        return []
+
+    found = []
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(hwnd, _lparam):
+        wpid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value != int(pid):
+            return True
+        rect = wintypes.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+        n = max(0, user32.GetWindowTextLengthW(hwnd))
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        found.append((int(hwnd), int(wpid.value),
+                      bool(user32.IsWindowVisible(hwnd)),
+                      int(rect.right - rect.left), int(rect.bottom - rect.top),
+                      buf.value))
+        return True
+
+    try:
+        user32.EnumWindows(enum_proc(_cb), 0)
+    except Exception:
+        return []
+    return found
+
+
+def activate_game_window(pid):
+    """Bring the game's own window to the foreground; return the observed state.
+
+    Window management only -- no keyboard/mouse/OS input is injected. The
+    ``AttachThreadInput`` handshake is what lets a background process transfer
+    foreground ownership on Windows; every call is best-effort, and the returned
+    ``foreground`` flag is re-read from the OS rather than assumed.
+    """
+    state = {"attempted": False, "pid": int(pid) if pid else None, "hwnd": None,
+             "title": None, "width": 0, "height": 0, "was_foreground": None,
+             "foreground": False, "set_foreground_ok": None, "attached": False,
+             "found": False}
+    if os.name != "nt" or not pid:
+        return state
+    window = pick_game_window(enumerate_game_windows(pid), pid)
+    if window is None:
+        return state
+    hwnd, _wpid, _visible, width, height, title = window
+    state.update({"attempted": True, "found": True, "hwnd": hwnd, "title": title,
+                  "width": width, "height": height})
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD,
+                                             wintypes.BOOL]
+        user32.AttachThreadInput.restype = wintypes.BOOL
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+        fg = user32.GetForegroundWindow()
+        state["was_foreground"] = bool(fg) and int(fg) == hwnd
+        if state["was_foreground"]:
+            state["foreground"] = True
+            return state
+
+        target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+        own_tid = kernel32.GetCurrentThreadId()
+        if target_tid and own_tid and target_tid != own_tid:
+            state["attached"] = bool(user32.AttachThreadInput(own_tid, target_tid,
+                                                             True))
+        try:
+            user32.ShowWindow(hwnd, 5)  # SW_SHOW
+            user32.BringWindowToTop(hwnd)
+            state["set_foreground_ok"] = bool(user32.SetForegroundWindow(hwnd))
+        finally:
+            if state["attached"]:
+                user32.AttachThreadInput(own_tid, target_tid, False)
+        fg = user32.GetForegroundWindow()
+        state["foreground"] = bool(fg) and int(fg) == hwnd
+    except Exception:
+        pass
+    return state
+
+
 class GameMenuAdvancer:
     """Post a periodic confirm tap to the game window so a scripted run can
     advance the startup splash/menu (GH #71 requirement 1).
@@ -2555,12 +2731,37 @@ def _run_attempt(args, artifacts: Path, attempt: int):
               f"to pid {game.pid} (GH #71; stop after >= "
               f"{menu_stats['min_taps']} tap(s))")
 
+    # GH #80 wake-96: the engine resolves its input procs but does not poll them
+    # until its own window is active. Activate it (window management only) and
+    # let the OS say whether that succeeded; the result is measured, not assumed.
+    window_stats = {"attempted": False, "pid": game.pid, "hwnd": None,
+                    "title": None, "width": 0, "height": 0,
+                    "was_foreground": None, "foreground": False,
+                    "set_foreground_ok": None, "attached": False, "found": False,
+                    "attempts": 0}
+    win_deadline = time.time() + WINDOW_ACTIVATION_TIMEOUT_S
+    win_next = time.time()
+
     duration = getattr(args, "duration", None)
     host_log = []
     start = time.time()
     while True:
         if host.poll() is not None or game.poll() is not None:
             break
+        if not window_stats["foreground"] and time.time() >= win_next:
+            win_next = time.time() + WINDOW_ACTIVATION_RETRY_S
+            if time.time() <= win_deadline:
+                observed = activate_game_window(game.pid)
+                window_stats.update(observed)
+                window_stats["attempts"] += 1
+                if observed["found"] and window_stats["attempts"] == 1:
+                    print("[xrsim] game window: hwnd={hwnd} title={title!r} "
+                          "{width}x{height} foreground_before={was_foreground} "
+                          "(GH #80; window activation only, no input)".format(**observed))
+                if observed["foreground"]:
+                    print(f"[xrsim] game window activated after "
+                          f"{window_stats['attempts']} attempt(s): hwnd={observed['hwnd']} "
+                          f"title={observed['title']!r}")
         elapsed = time.time() - start
         if elapsed > args.timeout:
             print("[xrsim] timeout")
@@ -2605,6 +2806,12 @@ def _run_attempt(args, artifacts: Path, attempt: int):
         print(f"[xrsim] menu advance summary: taps={advancer.taps} "
               f"windows_reached={advancer.windows} gameplay {reach}")
 
+    if not window_stats["foreground"]:
+        print("[xrsim] game window NOT foreground: hwnd={hwnd} found={found} "
+              "attempts={attempts} set_foreground_ok={set_foreground_ok} "
+              "(GH #80: the engine may skip device polls while inactive)".format(
+                  **window_stats))
+
     frames = len(list(artifacts.glob("test_frame_*.bmp")))
     hook_fresh = bool(log_file.exists()) and (
         not hook_existed or log_file.stat().st_mtime_ns != hook_mtime)
@@ -2613,7 +2820,7 @@ def _run_attempt(args, artifacts: Path, attempt: int):
             "game_exited": game_exited, "game_exit_code": game_exit_code,
             "frames": frames, "hook_fresh": hook_fresh,
             "host_exited": host.poll() is not None}
-    return "\n".join(host_log), log_mark, menu_stats, info
+    return "\n".join(host_log), log_mark, menu_stats, info, window_stats
 
 
 def run_sim(args, artifacts: Path):
@@ -2633,11 +2840,13 @@ def run_sim(args, artifacts: Path):
     menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False,
                   "vk": VK_RETURN, "scan": vk_to_scancode(VK_RETURN),
                   "min_taps": 0}
+    window_stats = {"foreground": False}
     state, detail = "started", "game still live at run end"
     for i in range(1, max_attempts + 1):
         if i > 1:
             print(f"[xrsim] retrying launch (attempt {i}/{max_attempts}; GH #87)")
-        host_log, log_mark, menu_stats, info = _run_attempt(args, artifacts, i)
+        host_log, log_mark, menu_stats, info, window_stats = _run_attempt(
+            args, artifacts, i)
         state, detail = game_start_decision(
             info["game_exited"], info["live_seconds"], info["frames"],
             info["hook_fresh"], min_live)
@@ -2652,7 +2861,7 @@ def run_sim(args, artifacts: Path):
               "detail": detail, "summary": format_launch_summary(
                   {"game_started": state == "started", "attempts": attempts,
                    "max_attempts": max_attempts, "min_live_seconds": min_live})}
-    return host_log, log_mark, menu_stats, launch
+    return host_log, log_mark, menu_stats, launch, window_stats
 
 
 def host_log_path(artifacts: Path) -> Path:
@@ -3260,6 +3469,24 @@ def cmd_selftest(require_image_deps=False):
         advance_stop_decision([], 99) is False and
         ADVANCE_STOP_MIN_TAPS >= 6)
 
+    # GH #80 wake 96: the game-window activation target. The engine's render
+    # window is the largest *visible* top-level window owned by its pid; an
+    # invisible splash/helper window or another process's window must never be
+    # selected, and the choice must be deterministic (largest area, then hwnd).
+    wins = [(10, 4242, True, 1280, 605, "Riddick"),
+            (11, 4242, False, 4000, 4000, "hidden helper"),
+            (12, 9999, True, 5000, 5000, "other process"),
+            (13, 4242, True, 320, 240, "small tooltip"),
+            (14, 4242, True, 1280, 605, "Riddick (second)")]
+    chosen = pick_game_window(wins, 4242)
+    results["game_window_activation_target"] = (
+        chosen == (14, 4242, True, 1280, 605, "Riddick (second)") and
+        pick_game_window(wins, 9999) == (12, 9999, True, 5000, 5000,
+                                         "other process") and
+        pick_game_window([(10, 1, False, 800, 600, "hidden")], 1) is None and
+        pick_game_window([], 1) is None and
+        pick_game_window([(10, 1, True, 0, 600, "zero")], 1) is None)
+
     # GH #67 live tuning: `--ini` sets a hook flag in the *shadow's* riddick_vr.ini
     # (the file the hook resolves beside its module) so a deploy-free run can flip
     # it. The parser is pure and the merge is section/case-aware + idempotent -- the
@@ -3563,6 +3790,7 @@ def cmd_evaluate_only(args):
                         "deployed_hook": deployed_hook_identity(
                             game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
                         "input_bridge": parse_input_bridge(fresh),
+                        "window_activation": None,
                         "launch": None,
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
@@ -3773,7 +4001,7 @@ def main(argv=None):
 
     artifacts = Path(args.artifacts) if args.artifacts else DEFAULT_ARTIFACTS
     report = Path(args.report_file) if args.report_file else DEFAULT_REPORT
-    host_log, log_mark, menu_stats, launch = run_sim(args, artifacts)
+    host_log, log_mark, menu_stats, launch, window_stats = run_sim(args, artifacts)
     persist_host_log(artifacts, host_log)  # GH #69: survive the run
 
     # GH #69 requirement 4: the hook truncates its log on launch, so recover the
@@ -3801,6 +4029,7 @@ def main(argv=None):
                         "stereo_kind": stereo_kind_stats(checks),
                         "comfort_vignette": parse_comfort(host_log),
                         "menu_advance": menu_stats,
+                        "window_activation": window_stats,
                         "game_args": list(getattr(args, "game_arg", None) or []),
                         "sim_confirm": sim_confirm_env(
                             getattr(args, "sim_confirm", None),

@@ -201,6 +201,31 @@ that this run's `route=keyboard` datum was `XInputGetState` is wrong:
 `SimBridgeOwnsProcName` is route-scoped, so a keyboard-route run can only own
 `DirectInputCreateA`.
 
+**Update (wake 96, GH #71 req 1 / ADR-0497):** the posted-confirm route is **not**
+dead — it was measured without an *active* window. A live A/B on the current build
+(`--shadow-install`, `--require-fresh-hook`, `--dump-branch any`):
+
+- control `--sim-confirm both` (bridge only, no activation route): stayed on the
+  `PRESS ENTER` splash for the whole run, bridge `polls=0 taps=0
+  createDevicePatched=0` with `procs[XInputGetState:owned,DirectInputCreateA:owned]`;
+- treatment `--advance-menu --advance-min-taps 8 --sim-confirm both`:
+  **reached live 3D gameplay** (62 gameplay / 8 cinema / **62 distinct** frames,
+  last frame an in-level corridor) after **8** posted taps to **1** window.
+
+The harness now **activates the game's own top-level window** first
+(`SetForegroundWindow` under an `AttachThreadInput` handshake; window management
+only, no synthesized input; `WINDOW_ACTIVATION_TIMEOUT_S=15 s`, 0.5 s cadence) and
+records the observed result as the `window_activation` report key
+(`attempted/found/foreground/hwnd/title/attempts`). In both runs activation
+succeeded after 3 attempts — and in the control the window was foreground yet the
+splash still did not advance, so activation alone is not sufficient; it is the
+*precondition* for the posted messages the `--advance-menu` route sends. The
+bridge's `polls=0` is unchanged and also true *during* gameplay, so the bridge is
+not the reach mechanism; it stays opt-in and inert. Consequence: the reach command
+is now `--reach-gameplay --duration 75 --advance-menu --advance-min-taps 8
+--shadow-install <install>` (no `--sim-confirm` needed), which unblocks GH #67's
+state question — sample `--ini ViewmodelObserve=1` *during* a reached level.
+
 **Caveat (GH #72 requirement 3, ADR-0454):** the very dark live gameplay frames
 (mean luma ≈13, reference-crop std ≈16) make the stereo diff's vertical
 registration **unmeasurable** — `best_dy` pins to the search edge and moves with
