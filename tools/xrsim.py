@@ -394,13 +394,16 @@ VIEWMODEL_SUBMISSION_RE = re.compile(
     r"ViewmodelProbe submission \[#(\d+)\]: arrayIn=(\d+) arrayOut=(\d+) "
     r"listIn=(\d+) listOut=(\d+) ptrSize=(\d+) ptrType=(\d+) ptrStride=(-?\d+) "
     r"inSample=([01]) outSample=([01])")
-# `fp` = the first array draw inside the first-person window (the viewmodel
-# candidate); `world` = the first outside it (the control). `valid=0` means the
-# array was not a decodable float array (the type/stride is logged, not guessed).
+# `fp` = the first-person window's largest decodable array draw (the arms
+# candidate, ADR-0483); `world` = the first draw outside it (the control).
+# `count` (ADR-0483) is the draw's index count (a 4-6 vertex quad vs a real mesh);
+# `n` is how many vertices were sampled. `valid=0` means the array was not a
+# decodable float array (the type/stride is logged, not guessed). `count` is
+# optional so a pre-0483 hook log still parses.
 VIEWMODEL_SUBMISSION_SAMPLE_RE = re.compile(
     r"ViewmodelProbe submission (fp|world): first=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
     r"min=\(([-\d.]+),([-\d.]+),([-\d.]+)\) max=\(([-\d.]+),([-\d.]+),([-\d.]+)\) "
-    r"n=(\d+) indexType=(\d+) vertexType=(\d+) valid=([01])")
+    r"n=(\d+)(?: count=(\d+))? indexType=(\d+) vertexType=(\d+) valid=([01])")
 _MATRIX_ROW_RE = re.compile(r"\[([-\d.eE ]+)\]")
 
 # GH #71 requirement 1 / GH #80 follow-up: the sim input bridge's observation
@@ -1176,8 +1179,10 @@ def viewmodel_probe_stats(log_text):
             "first": [float(m.group(2)), float(m.group(3)), float(m.group(4))],
             "min": [float(m.group(5)), float(m.group(6)), float(m.group(7))],
             "max": [float(m.group(8)), float(m.group(9)), float(m.group(10))],
-            "read": int(m.group(11)), "index_type": int(m.group(12)),
-            "vertex_type": int(m.group(13)), "valid": m.group(14) == "1",
+            "read": int(m.group(11)),
+            "count": int(m.group(12)) if m.group(12) else None,
+            "index_type": int(m.group(13)),
+            "vertex_type": int(m.group(14)), "valid": m.group(15) == "1",
         }
     return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates,
             "program_lines": program,
@@ -2633,21 +2638,22 @@ def cmd_selftest(require_image_deps=False):
         "A=2" in merged and                              # missing key inserted
         _shadow.merge_ini(merged, {"ViewmodelObserve": "1", "A": "2"}) == merged)
 
-    # GH #67 step 1 (second correction, ADR-0482): the submitted-vertex parser must
-    # split array vs display-list draws by window side and decode the sampled
-    # geometry -- the datum that decides where the transform actually is.
+    # GH #67 step 1 (second/third corrections, ADR-0482/0483): the submitted-vertex
+    # parser must split array vs display-list draws by window side and decode the
+    # sampled geometry -- the datum that decides where the transform actually is --
+    # including the draw's index count (a quad vs a real mesh, ADR-0483).
     probe_text = (
         "ViewmodelProbe submission [#300]: arrayIn=3 arrayOut=40 listIn=1 listOut=12 "
         "ptrSize=3 ptrType=3590 ptrStride=0 inSample=1 outSample=1\n"
         "ViewmodelProbe submission fp: first=(0.250,-0.100,0.400) min=(-0.100,-0.200,0.300) "
-        "max=(0.300,0.100,0.500) n=24 indexType=5121 vertexType=5126 valid=1\n"
+        "max=(0.300,0.100,0.500) n=24 count=384 indexType=5121 vertexType=5126 valid=1\n"
         "ViewmodelProbe submission world: first=(100.000,2.000,-40.000) min=(90.000,0.000,-60.000) "
-        "max=(140.000,8.000,-10.000) n=24 indexType=5121 vertexType=5126 valid=1\n")
+        "max=(140.000,8.000,-10.000) n=24 count=6 indexType=5121 vertexType=5126 valid=1\n")
     sub = viewmodel_probe_stats(probe_text)["submission"]
     results["viewmodel_submission_parsed"] = (
         sub is not None and sub["array_inside"] == 3 and sub["list_outside"] == 12 and
         sub["fp"]["first"] == [0.25, -0.1, 0.4] and sub["world"]["max"][0] == 140.0 and
-        sub["fp"]["valid"] is True)
+        sub["fp"]["valid"] is True and sub["fp"]["count"] == 384 and sub["world"]["count"] == 6)
 
     skipped = []
     if not have_image_deps():

@@ -164,18 +164,22 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   engine-side to the geometry, the observable surface is the draw itself:
   `vertex_submission_observe.h` records the client `glVertexPointer` array
   (`InstallRndrGLHooks` IAT-hooks `OPENGL32.dll!glVertexPointer`) and samples, for
-  the **first** `glDrawElements` on each side of the first-person window, up to 24
-  vertices (first + axis-aligned bounds), while counting `glDrawElements` vs
-  `glCallList` by side. Logged as `ViewmodelProbe submission [#N]: arrayIn=.. …
-  inSample=..` plus a `ViewmodelProbe submission fp:` (in-window, the viewmodel
-  candidate) and `ViewmodelProbe submission world:` (the control) geometry line
-  every 300 presented frames. `listIn > 0` with `arrayIn == 0` means the
-  first-person pass is display-list geometry and no draw-time sample can see it
-  (the capture would have to move into list compilation). Only client `GL_FLOAT`
-  arrays are decoded; anything else logs `valid=0` with its type/stride rather than
-  a guessed number. Inert unless `ViewmodelObserve=1`; XRSIM parses it into
+  the **largest** `glDrawElements` inside the first-person window (ADR-0483; the
+  first in-window draw was measured to be a flat ±0.5 screen quad, ADR-0482) and
+  the first outside it, up to 24 vertices (first + axis-aligned bounds) plus the
+  draw's index `count`, while counting `glDrawElements` vs `glCallList` by side.
+  Logged as `ViewmodelProbe submission [#N]: arrayIn=.. … inSample=..` plus a
+  `ViewmodelProbe submission fp:` (in-window, the viewmodel candidate) and
+  `ViewmodelProbe submission world:` (the control) geometry line every 300
+  presented frames; the live run reads a 2520-vertex, camera-relative `fp` mesh
+  (`count=2520`, bbox ±0.45, identical every frame) against a 6-vertex world
+  quad (`count=6`). `listIn > 0` with `arrayIn == 0` means the first-person pass
+  is display-list geometry and no draw-time sample can see it (the capture would
+  have to move into list compilation). Only client `GL_FLOAT` arrays are decoded;
+  anything else logs `valid=0` with its type/stride rather than a guessed number.
+  Inert unless `ViewmodelObserve=1`; XRSIM parses it into
   `viewmodel_probe.submission`. Unit-tested by `vertex_submission_observe`
-  (`tests/vertex_submission_observe_tests.cpp`). See ADR-0482.
+  (`tests/vertex_submission_observe_tests.cpp`). See ADR-0482/0483.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

@@ -37,6 +37,12 @@
 // is reported *as such* (the pointer's type/size/stride in the log, `valid=false`)
 // rather than guessed. No GL/Windows headers: plain types only, so it is
 // unit-tested headlessly like gl_matrix_tracker.h / vertex_program_observe.h.
+//
+// ADR-0483 (third correction): a live run showed the depth-only-clear window's
+// FIRST in-window array draw is a flat, screen-space 2-D mesh, not the arms, so
+// the in-window sample is now the window's **largest decodable array draw** (the
+// arms mesh is the pass's biggest mesh) and the draw's index `count` is logged so
+// a 4-vertex quad is distinguishable from a real mesh.
 
 #include <cstring>
 
@@ -55,6 +61,7 @@ constexpr unsigned kMaxVertexSamples = 24;
 struct VertexSample {
     bool valid = false;       // the array was decodable and at least one vertex was read
     unsigned read = 0;        // vertices actually read
+    unsigned count = 0;       // the draw's index count (total vertices, not just sampled)
     unsigned indexType = 0;   // as passed to glDrawElements
     unsigned vertexType = 0;  // as recorded by glVertexPointer
     float first[3] = {};      // the first sampled vertex
@@ -74,6 +81,7 @@ inline VertexSample SampleClientVertices(unsigned count, unsigned indexType, con
     VertexSample s;
     s.indexType = indexType;
     s.vertexType = vertexType;
+    s.count = count;                               // the draw's size, logged even when undecodable
     if (vertexType != kGlFloat) return s;          // only float arrays are decoded
     if (!vertices || count == 0u) return s;        // nothing to read
     if (vertexSize < 2u || vertexSize > 4u) return s;
@@ -129,7 +137,9 @@ inline VertexSample SampleClientVertices(unsigned count, unsigned indexType, con
 }
 
 // One sampled frame's submitted-geometry tallies (interval counts) plus the
-// first array-draw sample taken inside and outside the first-person window.
+// first array-draw sample taken outside the first-person window (the World
+// control) and the window's largest decodable array draw (the arms candidate,
+// ADR-0483).
 struct VertexSubmissionSnapshot {
     unsigned arrayInside = 0;     // glDrawElements calls with the window open
     unsigned arrayOutside = 0;    // glDrawElements calls with the window closed
@@ -139,9 +149,9 @@ struct VertexSubmissionSnapshot {
     unsigned pointerSize = 0;     // components per vertex (2/3/4)
     unsigned pointerType = 0;     // GL type enum of the array
     int pointerStride = 0;        // bytes between vertices (0 = tightly packed)
-    bool hasInsideSample = false; // the first in-window array draw was sampled
+    bool hasInsideSample = false; // an in-window array draw was sampled
     bool hasOutsideSample = false;
-    VertexSample insideSample;    // the first-person candidate geometry
+    VertexSample insideSample;    // the first-person candidate (largest in-window mesh)
     VertexSample outsideSample;   // world geometry (the control)
 };
 
@@ -167,15 +177,24 @@ public:
     }
 
     // One glDrawElements call, tagged by whether it fell inside the first-person
-    // window. The first array draw on each side is sampled (a whole pass shares
-    // its buffer, so later draws would only repeat it).
+    // window. The window's *largest* array draw is the first-person candidate
+    // (ADR-0483): the arms mesh is the biggest mesh the pass submits, while the
+    // FIRST in-window draw was measured to be a flat, screen-space 2-D mesh
+    // (`first=(0.5,0.5,0) min=(-0.5,-0.5,0) max=(0.5,0.5,0)`, ADR-0482), so
+    // "first" picked the wrong draw. Outside the window the first array draw is
+    // the World control and is kept.
     void NoteArrayDraw(bool insideWindow, unsigned count, unsigned indexType, const void* indices) {
         if (!observe_) return;
         if (insideWindow) {
             ++arrayInside_;
-            if (!hasInsideSample_) {
-                insideSample_ = SampleClientVertices(count, indexType, indices,
-                                                     pointerSize_, pointerType_, pointerStride_, pointer_);
+            const VertexSample s = SampleClientVertices(count, indexType, indices,
+                                                        pointerSize_, pointerType_, pointerStride_, pointer_);
+            // Keep the largest *decodable* in-window draw; an undecodable larger
+            // draw must not overwrite a valid smaller one (and the first draw is
+            // kept when nothing bigger decodes, so `valid=0` is still reported).
+            if (!hasInsideSample_ ||
+                (s.valid && (!insideSample_.valid || s.count > insideSample_.count))) {
+                insideSample_ = s;
                 hasInsideSample_ = true;
             }
         } else {

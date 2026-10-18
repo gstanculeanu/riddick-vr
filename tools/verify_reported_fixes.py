@@ -295,7 +295,9 @@ def main():
     # the first-person window side. The observer must be off unless
     # ViewmodelObserve=1, the harness must parse the sample, and both must be
     # unit-tested; the import scan that established "no matrix call, no
-    # glDrawArrays, client arrays only" must stay reproducible.
+    # glDrawArrays, client arrays only" must stay reproducible. ADR-0483 sharpens
+    # the in-window sample to the window's largest decodable draw (the arms mesh,
+    # not the window's first flat 2-D draw) and logs the draw's index count.
     vs_observer = ROOT / "src/hook/vertex_submission_observe.h"
     require(vs_observer.exists() and
             "class VertexSubmissionObserver" in vs_observer.read_text(encoding="utf-8") and
@@ -303,26 +305,31 @@ def main():
             "NoteVertexPointer" in vs_observer.read_text(encoding="utf-8") and
             "NoteArrayDraw" in vs_observer.read_text(encoding="utf-8") and
             "NoteListDraw" in vs_observer.read_text(encoding="utf-8") and
+            "s.count > insideSample_.count" in vs_observer.read_text(encoding="utf-8") and
             "NoteDrawElementsSubmission" in proxy and
             "NoteDrawListSubmission" in proxy and
             "NoteVertexPointer" in proxy and
             "s_vertexSubmissionObserver.Configure(g_vrConfig.viewmodelObserve != 0)" in proxy and
             "ViewmodelProbe submission" in proxy and
+            "n=%u count=%u indexType=%u" in proxy and
             "Hook_glVertexPointer" in dllmain and
             '"glVertexPointer"' in dllmain and
             "NoteDrawElementsSubmission(mode, count, type, indices)" in dllmain and
             "VIEWMODEL_SUBMISSION_RE" in xrsim_tool and
             "VIEWMODEL_SUBMISSION_SAMPLE_RE" in xrsim_tool and
+            "(?: count=(\\d+))?" in xrsim_tool and
             "test_viewmodel_probe_submission_lines_are_parsed" in
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
             "viewmodel_submission_parsed" in xrsim_tool and
             "vertex_submission_observe.h" in cmake_text and
             "vertex_submission_observe" in cmake_text and
             "vertex_submission_observe_tests.cpp" in cmake_text and
-            (ROOT / "docs/adr/0482-gh67-submitted-vertex-transform-capture.md").exists(),
+            (ROOT / "docs/adr/0482-gh67-submitted-vertex-transform-capture.md").exists() and
+            (ROOT / "docs/adr/0483-gh67-in-window-mesh-sample.md").exists(),
             "GH #67: the submitted-vertex capture (client array sampled at "
-            "glDrawElements, array vs display-list split by the FP window) must be "
-            "inert by default, parsed by XRSIM and unit-tested (ADR-0482)")
+            "glDrawElements, array vs display-list split by the FP window, the "
+            "window's largest decodable draw as the arms candidate) must be "
+            "inert by default, parsed by XRSIM and unit-tested (ADR-0482/0483)")
 
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,

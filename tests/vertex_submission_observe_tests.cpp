@@ -10,8 +10,10 @@
 //     three index widths,
 //   - anything not decodable (non-float vertices, unknown index type, null
 //     pointer, count 0) is reported invalid rather than guessed,
-//   - the first array draw on each side of the window is the sample (a pass shares
-//     its buffer), display-list draws are counted by side,
+//   - the in-window sample is the window's largest decodable array draw (ADR-0483:
+//     the arms mesh, not the window's first flat 2-D draw) and carries the draw's
+//     index count; the first array draw outside the window is the world control;
+//     display-list draws are counted by side,
 //   - ComputeSnapshot publishes + re-bases but keeps the client pointer state.
 #include "vertex_submission_observe.h"
 
@@ -137,7 +139,8 @@ int main() {
         Check(!empty.valid, "an empty draw must not be decoded");
     }
 
-    // The first array draw on each side is the sample; later ones only count.
+    // The first array draw outside the window is the world control; the in-window
+    // sample is the window's largest decodable draw (ADR-0483).
     {
         VertexSubmissionObserver o;
         o.Configure(true);
@@ -155,7 +158,46 @@ int main() {
         Check(s.hasOutsideSample && VecIs(s.outsideSample.first, 0.0f, 0.0f, 0.0f),
               "the first world array draw is the world sample");
         Check(s.hasInsideSample && VecIs(s.insideSample.first, 10.0f, -5.0f, 4.0f),
-              "the first in-window array draw is the first-person sample");
+              "a single in-window array draw is the first-person sample");
+        Check(s.insideSample.count == 1, "the sample must carry the draw's index count");
+    }
+
+    // The in-window sample prefers the LARGEST decodable draw: a flat screen-space
+    // quad first, then the arms mesh, must yield the mesh (ADR-0483).
+    {
+        // A screen-space quad (the window's first draw) and a 6-vertex mesh.
+        const float quad[12] = {0.5f, 0.5f, 0.0f, -0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f,
+                                -0.5f, 0.5f, 0.0f};
+        const float mesh[18] = {0.1f, 0.2f, 1.0f, -0.3f, 0.4f, 1.5f, 0.7f, -0.8f, 2.0f,
+                                0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 2.0f, 2.0f, 2.0f};
+        VertexSubmissionObserver o;
+        o.Configure(true);
+        // The quad first (count 4), then the mesh (count 6): the mesh must win.
+        o.NoteVertexPointer(3, kGlFloat, 0, quad);
+        o.NoteArrayDraw(true, 4, kGlUnsignedByte, nullptr);
+        o.NoteVertexPointer(3, kGlFloat, 0, mesh);
+        o.NoteArrayDraw(true, 6, kGlUnsignedByte, nullptr);
+        const VertexSubmissionSnapshot s = o.ComputeSnapshot();
+        Check(s.arrayInside == 2, "both in-window draws must be counted");
+        Check(s.hasInsideSample && s.insideSample.count == 6,
+              "the in-window sample must be the largest draw, not the first");
+        Check(VecIs(s.insideSample.first, 0.1f, 0.2f, 1.0f) &&
+              VecIs(s.insideSample.max, 2.0f, 2.0f, 2.0f),
+              "the largest in-window draw's geometry must be the sample");
+    }
+
+    // A larger but undecodable in-window draw must not clobber a valid smaller one.
+    {
+        const float mesh[9] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
+        VertexSubmissionObserver o;
+        o.Configure(true);
+        o.NoteVertexPointer(3, kGlFloat, 0, mesh);
+        o.NoteArrayDraw(true, 3, kGlUnsignedByte, nullptr);      // valid, count 3
+        o.NoteVertexPointer(3, 0x1402u /* GL_SHORT */, 0, mesh); // undecodable type
+        o.NoteArrayDraw(true, 900, kGlUnsignedByte, nullptr);    // larger, invalid
+        const VertexSubmissionSnapshot s = o.ComputeSnapshot();
+        Check(s.hasInsideSample && s.insideSample.valid && s.insideSample.count == 3,
+              "an undecodable larger draw must not replace a valid in-window sample");
     }
 
     // ComputeSnapshot re-bases the interval but keeps the client pointer state.

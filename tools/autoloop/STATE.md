@@ -2,6 +2,67 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 82 — 2026-10-18 04:47 (scheduled loop)
+- **Unit:** GH **#67 step 1 (third correction)** — the FP-pass signature, taken
+  from wake 81's explicit "Next": the depth-only-clear window's **first** in-window
+  draw is a flat ±0.5 screen quad, so ADR-0482's "first draw" rule picked the wrong
+  draw. Change the in-window sample to the window's **largest decodable array
+  draw** (the arms mesh is the pass's biggest mesh) and log the draw's index
+  `count` so a 4–6 vertex quad is distinguishable from a real mesh.
+  `VertexSample.count`; `NoteArrayDraw` keeps the largest `count` among decodable
+  draws (a larger undecodable draw never replaces a valid smaller one; the first
+  draw is kept when nothing decodes so `valid=0` is still reported); the `world`
+  side is unchanged (first draw = control). Log gains `count=` before
+  `indexType=`; `tools/xrsim.py` parses it (`count` optional → pre-0483 logs yield
+  `count = null`); XRSIM report carries `viewmodel_probe.submission.fp.count`.
+  ADR-0483; README + `docs/vr-scenarios.md`; the `verify_reported_fixes` #67
+  invariant extended (ADR-0483 + the selector + the `count=` field).
+- **Why this unit:** it is the explicit "Next" of wake 81 (its alternatives were
+  "try NearPlaneDrop, or classify the draw by submitted geometry"), keeps the top
+  player-visible item (#67) moving, and needs no deploy — the whole point of the
+  GH #68 iteration vehicle.
+- **DECISIVE live result (RIDDICKVR_SIM=1, per-run read-only shadow
+  `%TEMP%\riddickvr-shadow-2748`, `--ini ViewmodelObserve=1 --ini
+  ViewmodelTrace=1 --require-fresh-hook`, NO deploy, hook `sha256 e82a2dee526e`
+  495616 B = repo build, `deployed_hook_matches_build` PASS, XRSIM **PASS** 29
+  gameplay captures, fill 1.00, `comfort_vignette_applied` PASS):**
+  1. **The largest-draw rule reaches a real mesh, not the unit quad.** All 16
+     sampled `fp` lines are **identical**: `first=(0.400,-0.400,0.000)
+     min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000) n=24 count=2520
+     indexType=5123 vertexType=5126 valid=1`. `count=2520` is a real mesh; the
+     bbox is small (~±0.45), not ADR-0482's ±0.5 screen quad.
+  2. **It is camera-relative — the viewmodel signature #67 needs.** The sample is
+     byte-identical on every sampled frame while the run's HMD yaw varied by
+     39.5°: a world mesh's submitted vertices move with the camera, a
+     camera-relative (view-space) mesh does not. The window is bracketed by a
+     depth-only clear (`… d19 P? D d7 P? …` and `D d12 C …`); `arrayIn=5700`/300
+     frames ≈ 19 in-window draws/frame (12 + 7), `listIn=0` throughout.
+  3. The World control is still a 6-vertex screen quad with constant `z=2032`
+     (`count=6`) — the new `count` field is exactly what separates it from the
+     2520-vertex in-window mesh.
+- **Also measured (recorded so the next signature step does not retry blind):**
+  the pre-existing `NearPlaneDrop` opener is **dead** on this target — every
+  projection load logs `P?` (the near plane is never recovered from the engine's
+  `glLoadMatrixf` projection by the `m[14]/(m[10]-1)` rule), so `worldNear_` is
+  never set and the near-drop opener can never fire. (The trace does show two
+  depth-only-clear windows per gameplay frame: `D d12 C` and `D d7`.)
+- Evidence offline: `build-all.ps1` Release **NO DEPLOY** OK (dist\opengl32.dll
+  495616 B `sha256 e82a2dee526e`); CTest **24/24 x64 + 26/26 x86** (incl. the
+  extended `vertex_submission_observe`, +2 cases); all 12 `tools/test_*.py` PASS
+  (incl. `test_viewmodel_probe_submission_lines_are_parsed` with the new `count`
+  + the pre-0483 `count=null` case); `xrsim --selftest` PASS; `verify_reported_fixes`
+  + `scenario_tests --check` + `verify_hook_init` + `validate_addresses` +
+  `verify_test_artifacts` PASS. No C++ outside the observer/log + its test, and
+  no rendering path changed; the observer is inert unless `ViewmodelObserve=1`.
+- Blocker: none. Next: (1) confirm the 2520-vertex in-window mesh *is* the
+  engine's FP viewmodel (suppress/observe that pass and check the arms vanish, or
+  correlate it with the Riddick arm surfaces #55/#58), then re-express it in
+  head/controller space (#67 step 2/3); (2) the rest of the deploy-gated ladder
+  (#68 req5, #79 hook half, #76 step1) is still live-tunable the same way;
+  (3) DEFAULT_GAME_DIR 2004-vs-2009 retarget; (4) GH #83 manual-session blind spot.
+- Branch: committed on **main** (single-writer); install untouched (read-only
+  shadow only), no leftover processes, live lock released.
+
 ## Wake 81 — 2026-10-18 04:32 (scheduled loop)
 - **Unit:** GH **#67 step 1 (second correction)** — capture the transform where it
   actually *is*: in the engine's **submitted vertex data**. New pure observer

@@ -1365,19 +1365,21 @@ def test_viewmodel_probe_program_lines_are_parsed(td):
 
 
 def test_viewmodel_probe_submission_lines_are_parsed(td):
-    """GH #67 step 1 (second correction, ADR-0482): the submitted-vertex sample
-    must be parsed out of the hook log -- it is the datum that decides whether the
-    engine's object/view transform is applied to the geometry (and whether the
-    first-person pass is array draws or display lists). The parse must be
-    additive: a log without the lines yields ``submission is None``."""
+    """GH #67 step 1 (second/third corrections, ADR-0482/0483): the submitted-vertex
+    sample must be parsed out of the hook log -- it is the datum that decides whether
+    the engine's object/view transform is applied to the geometry (and whether the
+    first-person pass is array draws or display lists), plus the draw's index count
+    (a 4-6 vertex quad vs a real mesh). The parse must be additive: a log without the
+    lines yields ``submission is None``, and a pre-0483 line without ``count`` still
+    parses (count None)."""
     log = (
         "[INFO] ViewmodelProbe submission [#300]: arrayIn=3 arrayOut=40 listIn=1 "
         "listOut=12 ptrSize=3 ptrType=3590 ptrStride=0 inSample=1 outSample=1\n"
         "[INFO] ViewmodelProbe submission fp: first=(0.250,-0.100,0.400) "
-        "min=(-0.100,-0.200,0.300) max=(0.300,0.100,0.500) n=24 indexType=5121 "
+        "min=(-0.100,-0.200,0.300) max=(0.300,0.100,0.500) n=24 count=384 indexType=5121 "
         "vertexType=5126 valid=1\n"
         "[INFO] ViewmodelProbe submission world: first=(100.000,2.000,-40.000) "
-        "min=(90.000,0.000,-60.000) max=(140.000,8.000,-10.000) n=24 indexType=5121 "
+        "min=(90.000,0.000,-60.000) max=(140.000,8.000,-10.000) n=24 count=6 indexType=5121 "
         "vertexType=5126 valid=1\n"
     )
     stats = xrsim.viewmodel_probe_stats(log)
@@ -1388,7 +1390,17 @@ def test_viewmodel_probe_submission_lines_are_parsed(td):
     assert stats["submission_lines"][0]["pointer_type"] == 3590, stats["submission_lines"]
     assert sub["fp"]["first"] == [0.25, -0.1, 0.4], sub["fp"]
     assert sub["fp"]["valid"] is True and sub["fp"]["read"] == 24, sub["fp"]
+    assert sub["fp"]["count"] == 384 and sub["world"]["count"] == 6, sub
     assert sub["world"]["max"][0] == 140.0, sub["world"]
+    # Additive: a pre-0483 line without ``count`` still parses, with count None.
+    legacy_count = xrsim.viewmodel_probe_stats(
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=1 arrayOut=1 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=1 outSample=0\n"
+        "[INFO] ViewmodelProbe submission fp: first=(0.500,0.500,0.000) "
+        "min=(-0.500,-0.500,0.000) max=(0.500,0.500,0.000) n=24 indexType=5123 "
+        "vertexType=5126 valid=1\n")
+    assert legacy_count["submission"]["fp"]["count"] is None, legacy_count
+    assert legacy_count["submission"]["fp"]["read"] == 24, legacy_count
     # Additive: a log with no submission lines reports absence, not zeros.
     legacy = xrsim.viewmodel_probe_stats(
         "[INFO] ViewmodelProbe [#300]: inside=5 outside=6 sample=0 pushes=0 translates=0\n")

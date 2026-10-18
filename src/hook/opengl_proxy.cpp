@@ -108,6 +108,8 @@ static VertexProgramObserver s_vertexProgramObserver;
 // GH #67 step 1 (second correction, ADR-0482): where the transform actually is --
 // a sample of the engine's submitted client-array vertices, split by whether the
 // draw fell inside the first-person window (see vertex_submission_observe.h).
+// ADR-0483: the in-window sample is the window's largest decodable draw, so it is
+// the arms mesh rather than the window's first (flat, 2-D) draw.
 // Fed by the RndrGL glVertexPointer/glDrawElements/glCallList hooks in
 // dllmain.cpp; inert unless ViewmodelObserve=1.
 static VertexSubmissionObserver s_vertexSubmissionObserver;
@@ -359,15 +361,17 @@ BOOL WINAPI OpenGLProxy::Hook_wglMakeCurrent(HDC hdc, HGLRC hglrc) {
     return result;
 }
 
-// GH #67 step 1 (second correction, ADR-0482): one submitted-vertex sample line.
-// `label` is `fp` (inside the first-person window) or `world` (the control).
+// GH #67 step 1 (second/third corrections, ADR-0482/0483): one submitted-vertex
+// sample line. `label` is `fp` (the first-person window's largest decodable mesh,
+// the arms candidate) or `world` (the first outside draw, the control). `count` is
+// the draw's index count (a 4-6 vertex quad vs a real mesh), `n` the sampled count.
 static void LogVertexSubmissionSample(const char* label, const VertexSample& s) {
-    VR_LOG_INFO("ViewmodelProbe submission %s: first=(%.3f,%.3f,%.3f) min=(%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f) n=%u indexType=%u vertexType=%u valid=%u",
+    VR_LOG_INFO("ViewmodelProbe submission %s: first=(%.3f,%.3f,%.3f) min=(%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f) n=%u count=%u indexType=%u vertexType=%u valid=%u",
         label,
         s.first[0], s.first[1], s.first[2],
         s.min[0], s.min[1], s.min[2],
         s.max[0], s.max[1], s.max[2],
-        s.read, s.indexType, s.vertexType, s.valid ? 1u : 0u);
+        s.read, s.count, s.indexType, s.vertexType, s.valid ? 1u : 0u);
 }
 
 BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
@@ -423,11 +427,11 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
                 m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
         }
     }
-    // GH #67 step 1 (second correction, ADR-0482): the submitted-vertex sample --
-    // the surface the transform is actually applied on. One counts line plus, on
-    // the same sampled frames, the first array draw on each side of the window
-    // (the first-person candidate vs the world control). Inert unless
-    // ViewmodelObserve=1.
+    // GH #67 step 1 (second/third corrections, ADR-0482/0483): the submitted-vertex
+    // sample -- the surface the transform is actually applied on. One counts line
+    // plus, on the same sampled frames, the window's largest in-window array draw
+    // (the arms candidate) and the first outside draw (the world control). Inert
+    // unless ViewmodelObserve=1.
     if (s_vertexSubmissionObserver.Observing() && (s_swapFrameCount % 300) == 0) {
         const VertexSubmissionSnapshot vs = s_vertexSubmissionObserver.ComputeSnapshot();
         VR_LOG_INFO("ViewmodelProbe submission [#%llu]: arrayIn=%u arrayOut=%u listIn=%u listOut=%u ptrSize=%u ptrType=%u ptrStride=%d inSample=%u outSample=%u",

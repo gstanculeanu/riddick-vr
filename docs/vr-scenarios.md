@@ -302,6 +302,16 @@ in the **shadow's** ini — e.g. `--ini ViewmodelObserve=1` for the GH #67 probe
 written. That is what makes an off-by-default hook flag reachable by a live run
 without a deploy.
 
+**First-person mesh capture (GH #67 step 1, ADR-0482/0483):** with
+`--ini ViewmodelObserve=1` the hook samples the engine's submitted client-array
+vertices at `glDrawElements` and logs the window's **largest** in-window draw
+(the arms candidate) and the first outside draw (the World control), each with the
+draw's index `count`. A 2026-10-18 run reads a 2520-vertex, camera-relative `fp`
+mesh (`count=2520`, bbox ±0.45, byte-identical on all 16 sampled frames while the
+head yaw varied 39.5°) against a 6-vertex world screen quad (`count=6`). Add
+`--ini ViewmodelTrace=1` to also get the one-line pass signature
+(`… d19 P? D d7 P? …`).
+
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
 renderer init), the host logging `Game Connected: WAITING` for the whole (short)
