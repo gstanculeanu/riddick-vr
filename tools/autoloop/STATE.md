@@ -2,6 +2,71 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 76 — 2026-10-18 02:39 (scheduled loop)
+- **Unit:** GH **#86** — the 41 red `TRIANGLES` problems on the target install
+  are **not** a 2009 variant: `TRIANGLES`, like `NODES`, is **not exclusive to
+  the mesh**. Fix = select the mesh chunk (exclude the `BOXTREE` bounding-volume
+  leaf). `tools/mos_xmd.py` + `tools/xmd_export.py` + 4 tests +
+  `docs/adr/0477` + `docs/rea/mos-xmd-format.md` + a #86 `verify_reported_fixes`
+  invariant; **no C++ change, no build, no deploy, no game/input run**.
+- **Why this unit:** it is the explicit "Next" of wake 75 and the last locally
+  known red on the model tooling; `xmd_bake`/`decode_cluster` feed the native-hand
+  mesh path (GH #55/#46) *on the 2009 target install*, and the by-index pairing
+  was silently wrong, not merely red.
+- **Root cause (measured, read-only):** the 2009 models add a `BOXTREE`
+  bounding-volume node whose children are a **12-byte `NODES`** (the BV records —
+  GH #84) **and a `TRIANGLES`**. That `TRIANGLES` is a per-leaf triangle set in a
+  **different layout** — runs of `u16 tag; u16 count; u16[count]` (size
+  `Σ(4 + 2·count)`, counts 1-7), **not** `u32 count` + `u16` triplets. All 1411
+  leaf payloads fit that run shape exactly (0 remainders) and none decodes as a
+  mesh list.
+- **Mechanism (decisive):** the engine's mesh reader resolves the cluster's
+  indices as a **sibling** of the cluster node —
+  `bVar2 = CDataFile::GetNext(param_1, "TRIANGLES")`
+  (`docs/rea/reference/MXR_CTriangleMeshCore_Read.txt:380`, the same `GetNext`
+  used for `VERTEXFRAMES`/`TVERTEXFRAMES`/`BONEDEFORM`). A `BOXTREE` **child** can
+  therefore never be a cluster chunk.
+- **Evidence (corpus rule):** `TRIANGLES` parents — 2004 `C:` 4662 all
+  `CLUSTER`; 2009 `F:` `VERTEXBUFFER` 8645 / `CLUSTER` 160 / **`BOXTREE` 1411**.
+  Excluding only a `BOXTREE` parent that owns no `VERTEXFRAMES` gives exactly one
+  mesh `TRIANGLES` per `VERTEXFRAMES` on **every** model of both installs
+  (4662/4662, 8805/8805) and every selected node decodes with the existing shape.
+- **Evidence (the pairing was silently wrong):** in the old unfiltered
+  by-index pairing **1938** clusters across **289/1285** 2009 models were paired
+  with a *different* `TRIANGLES` node than the mesh selector picks (only 41 of
+  them hit a leaf and raised; the rest decoded the wrong list). Measured
+  read-only with `unfiltered[i].offset != triangle_nodes()[i].offset`.
+- **Change:** `Xmd.triangle_nodes()` (mesh chunks, traversal order; excluded only
+  when the parent is a `BOXTREE` with no `VERTEXFRAMES` child, so a flat
+  synthetic container is unaffected) + `Xmd.triangle_node()` (first mesh chunk,
+  `None` for a `BOXTREE`-only prop); `triangle_indices()`,
+  `cluster_meshes()` and `geometry_summary()` use it; `xmd_export.triangle_nodes`
+  + `decode_cluster` use it. Mirrors ADR-0474's `skeleton_node()`.
+- **Re-grade (read-only, installs untouched; before/after in one session by
+  `git stash`-ing only the two source files):** `xmd_pose --check` 2009 `F:` went
+  **41 problems / 4602 clusters → 0 problems / 4643 clusters** (the 41 fixed
+  clusters now decode and are counted); `xmd_fk --check` 2009 `F:`
+  **41 / 4602 / 2,763,282 verts → 0 / 4643 / 2,778,422** (worst bind-pose drift
+  2.8e-14). 2004 `C:` **unchanged** 0 problems / 268 models / 3454 clusters
+  (pose + fk). So the whole model tooling is now **green on both installs**.
+- **Evidence (offline suite):** `tools/test_*.py` **11/11 PASS** (incl. 4 new:
+  `test_triangle_nodes_skips_boxtree_leaf`, `test_boxtree_only_triangles_means_no_mesh`,
+  `test_decode_cluster_skips_boxtree_triangles`, `test_check_pairs_boxtree_triangles`);
+  `verify_reported_fixes` (new #86 invariant, summary now `…#83, #85, #86`),
+  `scenario_tests.py --check`, `xrsim --selftest`, `verify_test_artifacts`,
+  `verify_hook_init`, `validate_addresses` all PASS. **No C++ → no
+  `build-all`/CTest** (documented).
+- **Blocker / honest limit:** nothing player-visible changed and no live/sim run
+  was taken (the unit is pure model tooling, validated offline + against the
+  shipped assets read-only). The tools still default `DEFAULT_GAME_DIR` to the
+  2004 `C:` install while the target/README is the 2009 `F:` install — that
+  retarget decision stays open (it is now *safe* to retarget: `F:` is green).
+- **Next:** (1) the `DEFAULT_GAME_DIR` 2004-vs-2009 retarget decision (tools
+  default to `C:`; xrsim defaults to `F:`; `F:` is now 0 problems); (2) the
+  deploy-gated ladder is otherwise unchanged and live-capable via
+  `--shadow-install` (#72 req 1 latch A/B, #67 step 3, #68 req 5, #79 hook half,
+  #76 step 1); (3) GH #83 (single-instance scheduler guard) still open.
+
 ## Wake 75 — 2026-10-18 02:25 (scheduled loop)
 - **Unit:** GH **#85** — decode the 2009 `VERTEXFRAMES` version **0x205** so every
   *Assault on Dark Athena* cluster decodes. `tools/mos_xmd.py` (+`docs/rea/mos-xmd-format.md`
