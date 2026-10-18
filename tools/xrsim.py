@@ -36,6 +36,18 @@ The ``--evaluate-only`` path is what makes the harness usable *without a
 headset*: a previous run's ``test_frame_*.bmp`` / ``right_*.bmp`` pairs are
 re-checked and written to ``tests/xrsim/report.json`` for diffing.
 
+GH #87: a live run can end with the game exiting within ~2 s -- no hook log (or
+one that stops during renderer init), the mock host logging ``Game Connected:
+WAITING`` for the whole (short) run, and 0 captured frames -- *while the
+identical re-run passes*. That is a false red, not a broken fix. So an attempt
+whose game process ends before ``--min-live-seconds`` (default 5) with no fresh
+hook log and no captured frame is an **early exit**: it is retried once
+(``--max-launch-attempts``, default 2) and, if it repeats, reported as one
+distinct ``game_started`` failure (report key ``launch``, with every attempt's
+lived-seconds / frames / hook-log freshness) instead of grading the capture
+checks -- so "the game did not start" can never be read as "the feature is
+broken".
+
 ``--reach-gameplay`` (GH #71 requirement 1) runs with an unlimited frame count
 bounded by wall-clock ``--duration``, because the mock host follows the *game's*
 uncapped swap rate (~250-300 FPS on the trivial startup splash): a 180-frame
@@ -1849,6 +1861,86 @@ def gameplay_reached_from_sequence(branch_seq):
 
 
 # ------------------------------------------------------------------ orchestration
+# GH #87: a live run can end with DarkAthena.exe exiting within ~2 s -- no hook log
+# (or one that stops during renderer init), the mock host logging
+# `Game Connected: WAITING` for the whole (short) run, and 0 captured frames --
+# *while the identical re-run passes*. That is not a measurement of the change
+# under test, so an attempt that ends this way is retried once and, if it repeats,
+# is reported as one distinct `game_started` failure instead of broken captures.
+EARLY_EXIT_MIN_LIVE_SECONDS = 5.0
+LAUNCH_MAX_ATTEMPTS = 2
+# The checks that stay graded even when the game never started: the hook's
+# on-disk identity is a fact about what *would* have been exercised, independent
+# of whether this attempt reached a live scene.
+LAUNCH_INDEPENDENT_CHECKS = ("deployed_hook_matches_build",)
+
+
+def game_start_decision(game_exited, live_seconds, frames, hook_fresh,
+                        min_live_seconds=EARLY_EXIT_MIN_LIVE_SECONDS):
+    """Pure (GH #87): did the game actually start -- is this attempt a measurement?
+
+    Returns ``(state, detail)`` with ``state`` one of:
+
+    * ``"started"`` -- the game produced evidence (a captured frame or a *fresh*
+      hook log) or stayed live for at least ``min_live_seconds``; grade normally.
+    * ``"early_exit"`` -- the game process ended before ``min_live_seconds`` with
+      no captured frame and no fresh hook log. This is the measured GH #87
+      signature; the identical re-run passes, so the attempt is not evidence
+      against the change under test.
+    """
+    if not game_exited:
+        return "started", "game still live at run end"
+    if live_seconds >= min_live_seconds:
+        return ("started",
+                f"game exited after {live_seconds:.1f}s "
+                f"(>= min-live {min_live_seconds:.0f}s)")
+    if frames:
+        return ("started",
+                f"game exited after {live_seconds:.1f}s but captured {frames} "
+                f"frame(s)")
+    if hook_fresh:
+        return ("started",
+                f"game exited after {live_seconds:.1f}s but wrote a fresh hook log")
+    return ("early_exit",
+            f"game exited after {live_seconds:.1f}s with no hook log and no "
+            f"captured frame (min-live {min_live_seconds:.0f}s; GH #87)")
+
+
+def launch_retry_decision(state, attempt, max_attempts=LAUNCH_MAX_ATTEMPTS):
+    """Pure (GH #87): retry only a not-yet-final *early exit*; never a real result."""
+    return state == "early_exit" and attempt < max(int(max_attempts), 1)
+
+
+def format_launch_summary(launch):
+    """One line for the launch/attempt record (GH #87)."""
+    if not launch:
+        return "no launch recorded"
+    attempts = launch.get("attempts") or []
+    last = attempts[-1] if attempts else {}
+    state = "started" if launch.get("game_started") else "DID NOT START"
+    min_live = launch.get("min_live_seconds", EARLY_EXIT_MIN_LIVE_SECONDS)
+    return (f"launch attempts={len(attempts)}/{launch.get('max_attempts')} "
+            f"game {state}; last lived {last.get('live_seconds', 0):.1f}s, "
+            f"{last.get('frames', 0)} frame(s), hook log "
+            f"{'fresh' if last.get('hook_fresh') else 'absent'} "
+            f"(min-live {min_live:.0f}s; GH #87)")
+
+
+def demote_checks_for_no_game_start(checks, keep=LAUNCH_INDEPENDENT_CHECKS):
+    """GH #87: a game that never started is not a measurement of the change under
+    test, so its failing capture checks are *reported, not graded*. Returns the
+    names of the demoted checks (the check list is modified in place)."""
+    demoted = []
+    for c in checks:
+        if c.get("skip") or c.get("ok") or c.get("check") in keep:
+            continue
+        c["skip"] = True
+        c["detail"] = (str(c.get("detail", "")) +
+                       " (not graded: the game did not start -- GH #87)").strip()
+        demoted.append(c.get("check"))
+    return demoted
+
+
 def game_command(game_exe, extra_args=None):
     """The game's argv: the exe plus any harness-supplied arguments.
 
@@ -1920,7 +2012,13 @@ def build_host_cmd(args, artifacts: Path):
     return cmd
 
 
-def run_sim(args, artifacts: Path):
+def _run_attempt(args, artifacts: Path, attempt: int):
+    """One host+game launch; the building block of :func:`run_sim` (GH #87).
+
+    Returns ``(host_log, log_mark, menu_stats, info)`` where ``info`` records
+    whether *this* attempt's game process ended on its own and how long it lived,
+    so the caller can tell "the game did not start" from a real result.
+    """
     game_dir = Path(getattr(args, "game_dir", None) or GAME_DIR)
     game_exe = Path(getattr(args, "game_exe", None) or (game_dir / "DarkAthena.exe"))
     log_file = game_dir / "riddick_vr.log"
@@ -1934,6 +2032,11 @@ def run_sim(args, artifacts: Path):
         except OSError:
             pass
     log_mark = log_file.stat().st_size if log_file.exists() else 0
+    # GH #87: a *fresh* hook log is evidence the game started. The log lives in the
+    # game dir and outlives the attempt, so freshness is an mtime change, not
+    # mere existence (a first attempt's log must not make a dead second look live).
+    hook_existed = log_file.exists()
+    hook_mtime = log_file.stat().st_mtime_ns if hook_existed else None
 
     host_cmd = build_host_cmd(args, artifacts)
 
@@ -1950,6 +2053,7 @@ def run_sim(args, artifacts: Path):
     game_cmd = game_command(game_exe, getattr(args, "game_arg", None))
     print(f"[xrsim] game: {' '.join(game_cmd)}")
     game = subprocess.Popen(game_cmd, cwd=str(game_dir), env=env)
+    game_start = time.time()
 
     # GH #81: say which hook build this run will actually exercise. The game loads
     # the *deployed* `<game-dir>\opengl32.dll`, not this tree's build, so every
@@ -2001,6 +2105,13 @@ def run_sim(args, artifacts: Path):
         else:
             time.sleep(0.03)
 
+    # GH #87: the *game's* own exit (before the harness terminates it) is the
+    # signal. A host-bounded/duration/timeout break leaves the game alive, so
+    # `game_exited` is False and the attempt is never misread as an early exit.
+    game_exit_code = game.poll()
+    game_exited = game_exit_code is not None
+    live_seconds = time.time() - game_start
+
     for p, name in ((game, "DarkAthena.exe"), (host, "riddickvr-host.exe")):
         try:
             if p.poll() is None:
@@ -2015,7 +2126,52 @@ def run_sim(args, artifacts: Path):
         print(f"[xrsim] menu advance summary: taps={advancer.taps} "
               f"windows_reached={advancer.windows} gameplay {reach}")
 
-    return "\n".join(host_log), log_mark, menu_stats
+    frames = len(list(artifacts.glob("test_frame_*.bmp")))
+    hook_fresh = bool(log_file.exists()) and (
+        not hook_existed or log_file.stat().st_mtime_ns != hook_mtime)
+    info = {"attempt": attempt, "game_pid": game.pid,
+            "live_seconds": round(live_seconds, 2),
+            "game_exited": game_exited, "game_exit_code": game_exit_code,
+            "frames": frames, "hook_fresh": hook_fresh,
+            "host_exited": host.poll() is not None}
+    return "\n".join(host_log), log_mark, menu_stats, info
+
+
+def run_sim(args, artifacts: Path):
+    """Launch host+game, retrying one early game exit (GH #87).
+
+    Returns ``(host_log, log_mark, menu_stats, launch)``. ``launch`` records every
+    attempt and whether the game actually started, so a downstream report can tell
+    "the game never started" (not a measurement -> retried once) from "the game
+    started and the feature is broken" (a real result).
+    """
+    min_live = float(getattr(args, "min_live_seconds", None)
+                     or EARLY_EXIT_MIN_LIVE_SECONDS)
+    max_attempts = max(1, int(getattr(args, "max_launch_attempts", None)
+                              or LAUNCH_MAX_ATTEMPTS))
+    attempts = []
+    host_log, log_mark = "", 0
+    menu_stats = {"taps": 0, "windows": 0, "reached": False, "enabled": False}
+    state, detail = "started", "game still live at run end"
+    for i in range(1, max_attempts + 1):
+        if i > 1:
+            print(f"[xrsim] retrying launch (attempt {i}/{max_attempts}; GH #87)")
+        host_log, log_mark, menu_stats, info = _run_attempt(args, artifacts, i)
+        state, detail = game_start_decision(
+            info["game_exited"], info["live_seconds"], info["frames"],
+            info["hook_fresh"], min_live)
+        info["game_start_state"] = state
+        info["detail"] = detail
+        attempts.append(info)
+        print(f"[xrsim] launch attempt {i}/{max_attempts}: {state} -- {detail}")
+        if not launch_retry_decision(state, i, max_attempts):
+            break
+    launch = {"game_started": state == "started", "attempts": attempts,
+              "max_attempts": max_attempts, "min_live_seconds": min_live,
+              "detail": detail, "summary": format_launch_summary(
+                  {"game_started": state == "started", "attempts": attempts,
+                   "max_attempts": max_attempts, "min_live_seconds": min_live})}
+    return host_log, log_mark, menu_stats, launch
 
 
 def host_log_path(artifacts: Path) -> Path:
@@ -2034,12 +2190,15 @@ def persist_host_log(artifacts: Path, host_log: str) -> Path:
     return path
 
 
-def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
+def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
     """Evaluate one run's evidence.
 
     ``host_log`` is the mock host's stdout (may be empty for --evaluate-only);
     ``fresh_log`` is the text of the hook log to scan for interaction markers.
     A check with ``"skip": True`` is reported but does not affect the verdict.
+    ``launch`` (GH #87) is :func:`run_sim`'s attempt record; when it says the game
+    never started, the capture checks are demoted to reported-not-graded and one
+    distinct ``game_started`` failure stands in their place.
     """
     checks = []
     # 1. frame budget (requires a live host log; skipped when re-analysing)
@@ -2265,6 +2424,19 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str):
     checks.append({**deployed_hook_check(
         deployed_hook_identity(eval_game_dir, eval_built_hook),
         bool(getattr(args, "require_fresh_hook", False))), "group": "capture"})
+    # GH #87: is this attempt a measurement at all? A game that ended within a
+    # couple of seconds of launch with no hook log and no captured frame is not
+    # evidence against the change under test (the identical re-run passes), so it
+    # becomes one distinct `game_started` failure and the capture FAILs it would
+    # otherwise produce are demoted to reported-not-graded.
+    launch = launch if launch is not None else getattr(args, "launch_stats", None)
+    if launch is not None:
+        started = bool(launch.get("game_started", True))
+        rec = {"group": "launch", "check": "game_started", "ok": started,
+               "detail": format_launch_summary(launch)}
+        if not started:
+            rec["demoted_checks"] = demote_checks_for_no_game_start(checks)
+        checks.append(rec)
     passed = all(c["ok"] for c in checks if not c.get("skip")) if checks else False
     return passed, checks
 
@@ -2328,6 +2500,20 @@ def cmd_selftest(require_image_deps=False):
             ok_t and s_t == "stale" and
             release_live_lock(lk, 101) is False and
             release_live_lock(lk, 202) is True and not lk.exists())
+
+    # GH #87: an early game exit with no evidence is not a measurement -> retried
+    # once; a real result (frames, a fresh hook log, or a game that stayed live)
+    # must never be retried, and the retry is bounded.
+    results["game_start_decision_states"] = (
+        game_start_decision(False, 2.0, 0, False)[0] == "started" and
+        game_start_decision(True, 2.0, 0, False)[0] == "early_exit" and
+        game_start_decision(True, 2.0, 1, False)[0] == "started" and
+        game_start_decision(True, 2.0, 0, True)[0] == "started" and
+        game_start_decision(True, 30.0, 0, False)[0] == "started")
+    results["launch_retry_bounds_early_exit"] = (
+        launch_retry_decision("early_exit", 1, 2) is True and
+        launch_retry_decision("early_exit", 2, 2) is False and
+        launch_retry_decision("started", 1, 2) is False)
 
     skipped = []
     if not have_image_deps():
@@ -2413,6 +2599,7 @@ def cmd_evaluate_only(args):
                         "deployed_hook": deployed_hook_identity(
                             game_dir, getattr(args, "built_hook", None) or BUILT_HOOK),
                         "input_bridge": parse_input_bridge(fresh),
+                        "launch": None,
                         "host_log": str(hlp) if hlp.is_file() else None,
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)
@@ -2525,6 +2712,16 @@ def main(argv=None):
                          "bridge default 100 ms")
     ap.add_argument("--scenario-immediate", action="store_true",
                     help="start the scenario at host frame 0 instead of waiting for gameplay")
+    ap.add_argument("--min-live-seconds", type=float,
+                    default=EARLY_EXIT_MIN_LIVE_SECONDS,
+                    help="GH #87: if the game process ends on its own before this "
+                         "many seconds with no hook log and no captured frame, the "
+                         "attempt is an early exit (the game did not start); it is "
+                         "retried once and, if it repeats, reported as a distinct "
+                         f"game_started failure (default {EARLY_EXIT_MIN_LIVE_SECONDS:g})")
+    ap.add_argument("--max-launch-attempts", type=int, default=LAUNCH_MAX_ATTEMPTS,
+                    help="GH #87: host+game launches per run; an early game exit "
+                         f"is retried once (default {LAUNCH_MAX_ATTEMPTS})")
     ap.add_argument("--evaluate-only", action="store_true",
                     help="re-analyse existing captures; do not launch host/game")
     ap.add_argument("--selftest", action="store_true")
@@ -2585,7 +2782,7 @@ def main(argv=None):
 
     artifacts = Path(args.artifacts) if args.artifacts else DEFAULT_ARTIFACTS
     report = Path(args.report_file) if args.report_file else DEFAULT_REPORT
-    host_log, log_mark, menu_stats = run_sim(args, artifacts)
+    host_log, log_mark, menu_stats, launch = run_sim(args, artifacts)
     persist_host_log(artifacts, host_log)  # GH #69: survive the run
 
     # GH #69 requirement 4: the hook truncates its log on launch, so recover the
@@ -2595,7 +2792,7 @@ def main(argv=None):
     log_file = game_dir / "riddick_vr.log"
     fresh = read_fresh_hook_log(log_file, log_mark)
     print("[xrsim] " + input_bridge_stats(parse_input_bridge(fresh)))
-    passed, checks = evaluate(args, artifacts, host_log, fresh)
+    passed, checks = evaluate(args, artifacts, host_log, fresh, launch=launch)
     labels = read_display_branch_labels(artifacts)
     write_report(report, passed, checks,
                  extra={"mode": "run", "artifacts": str(artifacts),
@@ -2623,6 +2820,7 @@ def main(argv=None):
                         "input_bridge": parse_input_bridge(fresh),
                         "shadow": getattr(args, "shadow_manifest", None),
                         "live_lock": live_lock_note,
+                        "launch": launch,
                         "host_log": str(host_log_path(artifacts)),
                         "display_branch": {str(k): v for k, v in sorted(labels.items())}})
     print_summary(checks, report, passed)

@@ -2,6 +2,76 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 78 — 2026-10-18 03:16 (scheduled loop)
+- **Unit:** GH **#87** — an XRSIM live run whose game exits in ~2 s with no hook
+  log and no captured frame is no longer graded as "the fix is broken": the
+  attempt is detected as an **early exit**, **retried once**, and, if it repeats,
+  reported as one distinct `game_started` failure with the capture FAILs demoted
+  to reported-not-graded. Harness-only (`tools/xrsim.py` + tests + ADR-0479 +
+  `verify_reported_fixes` invariant); **no C++ change, no build, no deploy, no
+  install write**.
+- **Why this unit:** it is the explicit "Next" of wake 77 and a *false red* the
+  loop measured while doing the GH #72 latch A/B (2 of 3 fresh-shadow first
+  launches: game gone in ~2 s, host `Game Connected: WAITING`, 0 frames — and the
+  identical re-run PASSes). Every deploy-gated unit is now validated live through
+  a shadow, so a flake that reads as "the change did not work" costs a wake each
+  time; the cure the issue measured ("run it again") is now automatic and
+  bounded.
+- **Change (pure core):** `game_start_decision(game_exited, live_seconds, frames,
+  hook_fresh, min_live_seconds)` — `started` if the game produced evidence (a
+  captured frame or a **fresh** hook log, an mtime change, not mere existence) or
+  stayed live >= `--min-live-seconds` (default 5) or was terminated by the
+  harness (host-bounded/`--duration`/timeout break => `game_exited` False); else
+  `early_exit`. `launch_retry_decision` retries only a not-yet-final early exit.
+  `demote_checks_for_no_game_start` demotes failing capture checks (keep
+  `deployed_hook_matches_build` graded — it is independent of a live scene) and
+  `format_launch_summary` renders the attempt record.
+- **Change (runner):** `run_sim` is now `_run_attempt` (one launch, returns
+  `live_seconds`/`frames`/`hook_fresh`/`game_exited`/`game_exit_code`) + a bounded
+  attempt loop (up to `--max-launch-attempts`, default 2); `evaluate` appends the
+  `game_started` check and demotes the missing-capture FAILs when the game never
+  started; the run report gains a `launch` key (every attempt + a one-line
+  `summary`), `--evaluate-only` records `"launch": null` and grades exactly as
+  before.
+- **Evidence (offline):** `xrsim --selftest` **PASS** (+2 cases
+  `game_start_decision_states`, `launch_retry_bounds_early_exit`, now 13);
+  `tools/test_xrsim.py` **PASS** (+5 cases:
+  `test_game_start_decision_states`,
+  `test_launch_retry_is_bounded_to_one_early_exit`,
+  `test_no_game_start_fails_once_and_demotes_capture_checks`,
+  `test_no_launch_record_keeps_capture_grading`,
+  `test_launch_reliability_flags_parse`); all 11 `tools/test_*.py` PASS;
+  `verify_reported_fixes` (new #87 invariant, summary `#83, #85, #86, #87`),
+  `scenario_tests.py --check`, `verify_test_artifacts`, `verify_hook_init`,
+  `validate_addresses` (PASS) all PASS. **No C++ -> no `build-all`/CTest**
+  (documented).
+- **Evidence (live, `RIDDICKVR_SIM=1`, read-only shadow, no deploy):** one
+  `--shadow-install "F:\…\Assault on Dark Athena" --reach-gameplay --duration 30
+  --require-fresh-hook` run of the refactored harness: **XRSIM RESULT PASS**
+  (attempt 1/2), `deployed_hook_matches_build` PASS (shadow hook
+  `sha256=b372e2abe8a7` = the repo build, `fresh=true`), 70 gameplay captures
+  (`gameplay_full_bleed_reached` fill 1.00, `capture_gate_matches_saved` 70/70,
+  `comfort_vignette_applied` `max=1.000` 6269/6330 moving frames), and the new
+  **`[PASS] launch: game_started (launch attempts=1/2 game started; last lived
+  30.1s, 70 frame(s), hook log fresh (min-live 5s; GH #87))`** — i.e. the
+  refactored launch path works end-to-end on the first attempt. Install untouched:
+  `System\Win32_x86\riddick_vr.log` mtime stayed `2026-10-18T00:25` and the
+  deployed `opengl32.dll` stayed `479232 B / 12:47`; no game/host processes left.
+  Artifacts/report in `%TEMP%` (committed `tests/xrsim/report.json` untouched).
+- **Blocker / honest limit:** early exit is "game ended on its own before
+  `min_live_seconds` with no evidence"; a game that stays alive the whole window
+  but never attaches the hook is **not** an early exit (it grades as before —
+  a real, reproducible defect). It does **not** explain *why* `DarkAthena.exe`
+  occasionally exits in ~2 s — it makes that failure attributable and cheap. The
+  5 s threshold is a harness heuristic calibrated to the measured event (~2 s) vs
+  the documented ~15 s to gameplay. This session's live run did not hit the flake,
+  so the retry path itself is covered by unit tests, not by a live occurrence.
+- **Next:** (1) the rest of the deploy-gated ladder is now live-capable and
+  flake-tolerant via `--shadow-install` (#67 step 3 `ViewmodelObserve=1` — one
+  run yields the probe + matrix the #67 comments ask for, #68 req 5, #79 hook
+  half, #76 step 1); (2) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget decision
+  (unchanged from wake 76/77); (3) GH #83's manual-session blind spot.
+
 ## Wake 77 — 2026-10-18 03:06 (scheduled loop)
 - **Unit:** GH **#72 requirement 1** — the display-branch cold-start latch is now
   **ON by default**, decided by the live A/B that ADR-0459 said was missing. Hook

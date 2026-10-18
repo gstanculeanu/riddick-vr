@@ -285,12 +285,28 @@ program directory `System\Win32_x86` becomes **real copies**, and the repo-built
 `opengl32.dll` from the executable's directory, the game then runs the **current**
 hook while every asset still resolves through the junction to the untouched
 install. `--shadow-dir` overrides the scratch location (default
-`%TEMP%\riddickvr-shadow`) and the report carries a `shadow` key. This makes
+`%TEMP%\riddickvr-shadow-<pid>`, one per run — GH #83) and the report carries a
+`shadow` key. This makes
 `--require-fresh-hook` satisfiable without the forbidden deploy: measured
 2026-10-18, `--shadow-install … --require-fresh-hook` **PASSED**, and the
 previously deploy-gated `comfort_vignette_applied` went **PASS** (`max=1.000`)
 where the stale-hook baseline was `max=0.000`; the install hashed byte-identical
 before and after four runs.
+
+**Launch reliability (GH #87, ADR-0479):** a live run can end with
+`DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
+renderer init), the host logging `Game Connected: WAITING` for the whole (short)
+run, and 0 captured frames — **while the identical re-run passes** (measured 2 of
+3 fresh-shadow first launches during the GH #72 A/B). That is a false red, not a
+broken fix, so an attempt whose game process ends before `--min-live-seconds`
+(default 5) with no fresh hook log and no captured frame is retried once
+(`--max-launch-attempts`, default 2). If it repeats, the run reports **one**
+`game_started` failure (report key `launch`, carrying every attempt's
+lived-seconds / frames / hook-log freshness) and demotes the missing-capture FAILs
+to reported-not-graded, so "the game did not start" can never read as "the feature
+is broken". A launch with evidence — including a short host-bounded `--frames`
+run where the game is still alive — is never retried. `--evaluate-only` has no
+launch record and grades exactly as before.
 
 **Artifacts (GH #73, ADR-0460):** a live run writes its per-eye captures to
 `tests/xrsim/artifacts/` (~25 MB BMPs). Those are **evidence, not source** and
