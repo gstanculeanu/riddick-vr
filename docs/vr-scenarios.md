@@ -342,6 +342,18 @@ head pose — and the run's dumped "gameplay" frames are the game's
 in-game run supplies a volumetric sample; `viewmodel_pass_identified` (the window
 has in-window draws) is unchanged and still PASSes.
 
+**Correction (wake 86, ADR-0487):** "the frames are the start screen" was true of
+the pre-wake-85 runs; with the tap floor (ADR-0486) a run reaches a live level.
+Re-measured there, the depth-only-clear window opens (18 intervals, up to 4356
+in-window draws) but its largest draw is still a **12-vertex plane at constant
+`z = 6.25`** — so the window is real and still not the arms. The alternative
+`--ini ViewmodelWindowOpener=2` (near-plane drop) **never opens**: every
+projection load is `P?` (the hook's near extraction rejects this engine's
+`glLoadMatrixf` matrix), so `arrayIn=0` in 21/21 intervals. The harness now
+**fails** (never silently skips) when `ViewmodelObserve=1` ran but no draw fell
+inside the window, so an inoperative opener is visible as a failed
+identification.
+
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during
 renderer init), the host logging `Game Connected: WAITING` for the whole (short)

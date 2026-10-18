@@ -2,6 +2,81 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 86 — 2026-10-18 06:29 (scheduled loop)
+- **Unit:** GH **#67 step 1 (fifth correction)** — a live **A/B of the two window
+  openers on a reached level**: the depth-only-clear window opens but holds only
+  tiny planar draws, and the near-plane-drop opener **never opens at all**; the
+  harness now **fails** (instead of silently skipping) when `ViewmodelObserve=1`
+  ran but no draw fell inside the window. Harness/docs only (`tools/xrsim.py` +
+  `tools/test_xrsim.py` + a `--selftest` case + the #67 invariant in
+  `tools/verify_reported_fixes.py` + `src/hook/README.md` +
+  `docs/vr-scenarios.md` + ADR-0487); **no C++ code change, no build, no deploy,
+  no install write**.
+- **Why this unit:** it is the explicit "Next" #1 of wake 85 ("the opener must
+  isolate the FP pass … classify by submitted geometry or drop the depth-only-clear
+  opener") and the top player-visible item (#67). `ViewmodelWindowOpener` is
+  already INI-driven, so the A/B needed no rebuild.
+- **A/B (live, `RIDDICKVR_SIM=1`, read-only per-run shadow, `--reach-gameplay
+  --duration 45 --advance-menu --advance-min-taps 8`, `--require-fresh-hook`, hook
+  `sha256=e82a2dee526e` 495616 B = repo build, `deployed_hook_matches_build` PASS,
+  `--ini ViewmodelObserve=1 --ini ViewmodelTrace=1`; only the opener differs):**
+
+  | opener | menu | probe lines | in-window draws | `fp` sample | verdict |
+  |---|---|---|---|---|---|
+  | `1` depth-only clear (control) | 8 taps → level | 18 intervals | 4356 max/interval | 12-vertex planar, `extent [12.5,12.5,0.0]` (constant `z=6.25`) | `viewmodel_candidate_is_volumetric` **FAIL** |
+  | `2` near-plane drop | 8 taps → level | **0** | `arrayIn=0` in **21/21** intervals | none | (pre-fix both checks **SKIPPED**) |
+
+  Both runs reached the same live level (`gameplay_full_bleed_reached` PASS,
+  `gameplay_captures_present` 32/32), so this is not a "never reached gameplay"
+  artefact.
+- **Root cause of the null near-drop run (measured):** the pass trace is
+  `P? P? P? P? P? C d144 C d137 P? d7 P? d249 … D d12 P?` on every sampled frame
+  — **every projection load is `P?` (near unknown)**, and the depth-only clear `D`
+  is followed by exactly the 12 tiny in-window draws. The projection is loaded via
+  `glLoadMatrixf` (`glFrustum called` count = **0**); the hook derives near as
+  `m[14]/(m[10]-1)` and that rejects every load on this engine's matrix, so
+  `worldNear_` is never set and `NearPlaneDrop` can never fire. This is a
+  **hook-side measurement gap, not an engine property** (the engine may still use
+  a short near plane); the raw `m[10]`/`m[14]` are not logged yet.
+- **Change:** `viewmodel_window_ran(probe)` →
+  `{ran, intervals, in_window_draws}`. Non-empty `submission_lines` proves the
+  probe ran even when the window never opened. When the probe ran and
+  `in_window_draws == 0`: `viewmodel_pass_identified` **FAILS** ("the probe ran (N
+  interval(s)) but no draw fell inside the window (arrayIn=0): the configured
+  ViewmodelWindowOpener never opened it") and
+  `viewmodel_candidate_is_volumetric` **FAILS** ("no in-window candidate to
+  grade"). Probe-not-run and window-open-but-nothing-decodable still **skip**.
+- **EVIDENCE offline:** `tools/test_xrsim.py` **PASS** (+ new
+  `test_viewmodel_probe_check_fails_when_the_opener_never_fires`, 2 intervals /
+  `arrayIn=0` → both checks fail, not skip); `xrsim --selftest` **PASS** (+
+  `viewmodel_opener_never_fired_is_visible`); all **12 `tools/test_*.py` exit 0**;
+  `verify_reported_fixes` (extended #67 invariant: `viewmodel_window_ran` + the
+  test + `viewmodel_opener_never_fired_is_visible` + the README note + ADR-0487),
+  `scenario_tests.py --check`, `verify_test_artifacts`, `verify_hook_init`,
+  `validate_addresses` all PASS. **No C++ → no `build-all`/CTest** (documented).
+  Live artifacts: `%TEMP%\oc_wake86` (`run_open2.txt`, `run_depth.txt`,
+  `report_open2.json`, `report_depth.json`, `report_open2_reeval.json`); the
+  `NearPlaneDrop` report re-evaluated from its persisted hook log now reads
+  `[FAIL] viewmodel_pass_identified … 21 interval(s) … arrayIn=0`.
+- **Blocker / honest limit:** one A/B, one install, one hook build, 45 s per run
+  (wake 85 supplies a third default-opener observation with the same result).
+  The `P?` verdict is the hook's classification; the projection matrix values are
+  not logged, so *why* the near formula rejects is not yet measured. The level's
+  *state* is still not established (the mock controller never reaches the game's
+  own input), and the branch signal still cannot tell the card from a level
+  (GH #72 req 2).
+- **Next:** (1) GH #67 step 1 — either log `m[10]`/`m[14]` once and fix the near
+  extraction (making `NearPlaneDrop` testable), or (preferred) add a whole-frame
+  **geometry-classified** candidate (largest volumetric near-field array draw)
+  that does not depend on any window opener; (2) keep the depth-only-clear window
+  as the #63 suppression boundary only; (3) the deploy-gated ladder on a real
+  scene (#76 step 1, #79 hook half, #68 req 5); (4) a page-content discriminator
+  for `gameplay_full_bleed_reached` (GH #71 req 2); (5) `DEFAULT_GAME_DIR`
+  2004-vs-2009 retarget; (6) GH #83 manual-session blind spot.
+- **Branch:** committed on **main** (single-writer); install untouched (read-only
+  shadow only), no leftover processes, live lock released. `STATE.log`
+  **appended** (never replaced — GH #88).
+
 ## Wake 85 — 2026-10-18 06:00 (scheduled loop)
 - **Unit:** GH **#71 requirement 1 (train 2)** — the `--advance-menu` loop's stop
   signal was satisfied by the engine's **own startup transition**, so the confirm

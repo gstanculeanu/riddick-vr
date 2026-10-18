@@ -334,7 +334,15 @@ def main():
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
             "test_viewmodel_candidate_check_fails_on_a_planar_sample" in
             (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
-            (ROOT / "docs/adr/0484-gh67-planar-candidate-is-not-the-viewmodel.md").exists(),
+            (ROOT / "docs/adr/0484-gh67-planar-candidate-is-not-the-viewmodel.md").exists() and
+            # GH #67 step 1 (fifth correction, ADR-0487): an operational probe
+            # whose opener never fired must FAIL, not read as "probe disabled".
+            "viewmodel_window_ran" in xrsim_tool and
+            "test_viewmodel_probe_check_fails_when_the_opener_never_fires" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "viewmodel_opener_never_fired_is_visible" in xrsim_tool and
+            "ADR-0487" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0487-gh67-window-opener-does-not-isolate-the-viewmodel.md").exists(),
             "GH #67: the submitted-vertex capture (client array sampled at "
             "glDrawElements, array vs display-list split by the FP window, the "
             "window's largest decodable draw as the arms candidate) must be "

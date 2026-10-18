@@ -1148,6 +1148,34 @@ def test_viewmodel_candidate_check_skipped_without_a_sample(td):
     assert passed is True, [c for c in checks if not c.get("skip") and not c["ok"]]
 
 
+def test_viewmodel_probe_check_fails_when_the_opener_never_fires(td):
+    """GH #67 step 1 (ADR-0487): with the probe enabled but an opener that never
+    fires, the submission tallies prove the probe *ran* (``arrayIn=0`` every
+    interval). That must FAIL the identification checks -- never be skipped as
+    "ViewmodelObserve=0", which is exactly how an inoperative opener hid."""
+    art = Path(tempfile.mkdtemp(dir=td, prefix="art_"))
+    base = _content()
+    _save(art / "test_frame_0015.bmp", base)
+    _save(art / "right_0015.bmp", _shift_h(base, 3))
+    never = (
+        "[INFO] ViewmodelProbe submission [#300]: arrayIn=0 arrayOut=900 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=0 outSample=1\n"
+        "[INFO] ViewmodelProbe submission [#600]: arrayIn=0 arrayOut=900 listIn=0 "
+        "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=0 outSample=1\n")
+    passed, checks = xrsim.evaluate(_args(), art, "", never)
+    rec = [c for c in checks if c["check"] == "viewmodel_pass_identified"][0]
+    assert rec["ok"] is False and not rec.get("skip"), rec
+    assert "never opened" in rec["detail"] and "2 interval" in rec["detail"], rec
+    rec = [c for c in checks if c["check"] == "viewmodel_candidate_is_volumetric"][0]
+    assert rec["ok"] is False and not rec.get("skip"), rec
+    assert "no in-window candidate" in rec["detail"], rec
+    assert passed is False, [c for c in checks if not c.get("skip") and not c["ok"]]
+    # The pure helper separates "ran but the window never opened" from "no probe".
+    ran = xrsim.viewmodel_window_ran(xrsim.viewmodel_probe_stats(never))
+    assert ran == {"ran": True, "intervals": 2, "in_window_draws": 0}, ran
+    assert xrsim.viewmodel_window_ran(xrsim.viewmodel_probe_stats(""))["ran"] is False
+
+
 # ----------------------- per-frame camera transform (GH #68 requirement 1)
 def _rot3(q):
     """Row-major rotation of quaternion q (x, y, z, w) -- mirrors the host."""
@@ -2140,6 +2168,7 @@ def main() -> int:
              test_viewmodel_candidate_geometry_distinguishes_plane_from_mesh,
              test_viewmodel_candidate_check_fails_on_a_planar_sample,
              test_viewmodel_candidate_check_skipped_without_a_sample,
+             test_viewmodel_probe_check_fails_when_the_opener_never_fires,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

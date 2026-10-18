@@ -1159,6 +1159,27 @@ def viewmodel_candidate_geometry(sample):
     }
 
 
+def viewmodel_window_ran(probe):
+    """GH #67 step 1 (fifth correction, ADR-0487): did the probe run at all?
+
+    Pure. ``probe`` is :func:`viewmodel_probe_stats` output. The submission
+    observer logs its interval tallies on every sampled frame whether or not the
+    window ever opened, so a non-empty ``submission_lines`` proves
+    ``ViewmodelObserve=1`` on a #0482+ hook. That distinction matters: with an
+    opener that never fires (measured: ``ViewmodelWindowOpener=2`` on the live
+    level -- ``arrayIn=0`` for every interval of a whole run) ``lines`` is empty,
+    and treating that as "the probe was not run" silently hides a *failed*
+    identification. Returns
+    ``{"ran": bool, "intervals": int, "in_window_draws": int}``.
+    """
+    lines = (probe or {}).get("submission_lines") or []
+    return {
+        "ran": bool(lines),
+        "intervals": len(lines),
+        "in_window_draws": sum(int(ln.get("array_inside") or 0) for ln in lines),
+    }
+
+
 def viewmodel_probe_stats(log_text):
     """GH #67 step 2: summarise the observation-only first-person viewmodel probe.
 
@@ -2646,6 +2667,7 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
     # controller. Skipped (not failed) when the probe was not run, so this does
     # not fail a normal capture.
     probe = viewmodel_probe_stats(fresh_log)
+    probe_run = viewmodel_window_ran(probe)
     if probe["lines"]:
         opened = [p for p in probe["lines"] if p["inside"] > 0]
         max_inside = max((p["inside"] for p in probe["lines"]), default=0)
@@ -2653,6 +2675,25 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
                   f"{max_inside}" + (", matrix sampled" if probe["matrix"] else ""))
         checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
                        "ok": bool(opened), "detail": detail})
+    elif probe_run["in_window_draws"] > 0:
+        # The submission tallies are the ground truth for "the window opened":
+        # an in-window draw exists even if the 300-swap summary line is absent
+        # (a hand-crafted/partial log, or a run shorter than one sample).
+        checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
+                       "ok": True,
+                       "detail": (f"the probe ran ({probe_run['intervals']} interval(s)) and "
+                                  f"counted {probe_run['in_window_draws']} in-window draw(s); "
+                                  f"no swap summary line was captured")})
+    elif probe_run["ran"]:
+        # GH #67 step 1 (fifth correction, ADR-0487): the probe ran but the
+        # configured opener never fired (no in-window draw in any interval).
+        # That is a *failed* identification, not an absent probe -- e.g. the
+        # measured NearPlaneDrop run (`arrayIn=0`, every projection load `P?`).
+        checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
+                       "ok": False,
+                       "detail": (f"the probe ran ({probe_run['intervals']} interval(s)) but "
+                                  f"no draw fell inside the window (arrayIn=0): the "
+                                  f"configured ViewmodelWindowOpener never opened it")})
     else:
         checks.append({"group": "viewmodel", "check": "viewmodel_pass_identified",
                        "ok": True, "skip": True,
@@ -2681,6 +2722,16 @@ def evaluate(args, artifacts: Path, host_log: str, fresh_log: str, launch=None):
         checks.append({"group": "viewmodel",
                        "check": "viewmodel_candidate_is_volumetric",
                        "ok": volumetric, "detail": detail})
+    elif probe_run["ran"] and probe_run["in_window_draws"] == 0:
+        # GH #67 step 1 (fifth correction, ADR-0487): the probe ran, the opener
+        # never fired -> there is no in-window candidate at all. Grade that as a
+        # failure so an inoperative opener cannot masquerade as "probe disabled".
+        checks.append({"group": "viewmodel",
+                       "check": "viewmodel_candidate_is_volumetric",
+                       "ok": False,
+                       "detail": ("the probe ran but the configured window opener never "
+                                  "opened a window, so there is no in-window candidate "
+                                  "to grade")})
     else:
         checks.append({"group": "viewmodel",
                        "check": "viewmodel_candidate_is_volumetric",
@@ -2884,6 +2935,17 @@ def cmd_selftest(require_image_deps=False):
         viewmodel_candidate_geometry(box)["volumetric"] is True and
         viewmodel_candidate_geometry(invalid)["volumetric"] is False and
         viewmodel_candidate_geometry(plane)["extent"] == [0.9, 0.9, 0.05])
+
+    # GH #67 step 1 (fifth correction, ADR-0487): a probe that ran but whose
+    # opener never fired (submission tallies present, arrayIn=0) must be *visible*
+    # as a ran-probe, not reported as "ViewmodelObserve=0 / pre-#67 host".
+    never = ("ViewmodelProbe submission [#300]: arrayIn=0 arrayOut=900 listIn=0 "
+             "listOut=0 ptrSize=3 ptrType=5126 ptrStride=0 inSample=0 outSample=1\n")
+    ran = viewmodel_window_ran(viewmodel_probe_stats(never))
+    absent = viewmodel_window_ran(viewmodel_probe_stats(""))
+    results["viewmodel_opener_never_fired_is_visible"] = (
+        ran["ran"] is True and ran["intervals"] == 1 and ran["in_window_draws"] == 0 and
+        absent["ran"] is False and absent["intervals"] == 0)
 
     skipped = []
     if not have_image_deps():

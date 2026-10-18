@@ -120,6 +120,14 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   selects the opener). The signature is PROVISIONAL and is confirmed via the
   per-frame `Viewmodel suppression [#N]: last frame draws=.. suppressed=..` log
   line on a headset before it is trusted. See ADR-0439.
+- **`NearPlaneDrop` is inert on the 2009 target as measured (ADR-0487).** The
+  engine loads its projection through `glLoadMatrixf` (never `glFrustum`), and
+  the hook's `m[14]/(m[10]-1)` near extraction rejects every load, so the pass
+  trace shows `P?` and the near-drop test never has an input. On a live level
+  `ViewmodelWindowOpener=2` counted `arrayIn=0` in 21/21 intervals while
+  `ViewmodelObserve=1` was on. The opener stays supported (a fixed extraction
+  would make it usable); do not read a silent near-drop window as "the engine
+  has no short near plane".
 - **GH #67 step 2 — observation-only identification.** The same depth-only-clear
   boundary also drives a non-suppressing probe: `ViewmodelObserve=1` opens the
   window and records, per sampled frame, how many draws fell **inside/outside**
