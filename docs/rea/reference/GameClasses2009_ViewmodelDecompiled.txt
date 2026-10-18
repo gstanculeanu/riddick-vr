@@ -1,0 +1,168 @@
+# GameClasses_Win32_x86.dll (2009 Dark Athena) — the VIEWMODEL site DECOMPILED
+# (GH #67 step 1; corrects ADR-0492 §3b/§5)
+#
+# subject : F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll
+#           size 9,016,560 B
+#           sha256 d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79
+#           image base 0x10000000   format PE   architecture x86
+# provider: Ghidra 12.1.4 (the REA `ghidra` provider, official headless script)
+# method  : read-only. REA imports an *ephemeral* copy of the module into a temp
+#           project; the install is never written (import_mode
+#           "ephemeral-source-immutable", the provider's own analysis profile).
+# purpose : GH #67 step 1. ADR-0492 recorded (by raw byte scan) that the engine's
+#           first-person viewmodel is an item *property* `VIEWMODEL` on
+#           `CRPG_Object_Inventory`, that its sole code xref is the `push` at VA
+#           0x10265a92 inside `FUN_10265a70`, and that the site's read-vs-set was
+#           unresolved because the 9.0 MB module "does not fit the provider's
+#           analysis budget" (330 s). This file records the *decompilation* that
+#           resolves that: the budget is configurable, and the two functions
+#           decompile.
+# ------------------------------------------------------------------------------
+
+## 1. Reproducer (read-only; ~6 min per procedure)
+
+The default Ghidra "startup deadline" is 330 s (`REA_GHIDRA_STARTUP_TIMEOUT_MS`,
+`DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS = 330_000` — the provider's own default). On
+this 9.0 MB module that deadline expires during auto-analysis, which is what
+ADR-0492 §5 recorded as a hard limit. It is **not** a hard limit: raising the
+deadline makes the same request succeed.
+
+    $env:REA_GHIDRA_STARTUP_TIMEOUT_MS = "1500000"     # 1500 s, not 330 s
+    rea decompile "F:\The Chronicles of Riddick - Assault on Dark Athena\Content\GameClasses_Win32_x86.dll" `
+        --procedure 0x10265a70 --format json
+    # exit 0, wall clock 382 s
+    rea decompile "...\Content\GameClasses_Win32_x86.dll" `
+        --procedure 0x100162e0 --format json
+    # exit 0, wall clock 380 s
+
+Both ran on 2026-10-18 (autoloop wake 92) and returned
+`provider.id = ghidra`, `provider.version = 12.1.4`,
+`subject.digest.sha256 = d7e81d7d3726…`, `confidence = observed`,
+`authority = shipped-artifact`. The 382 s / 380 s wall clocks are the whole
+request (Ghidra import + default auto-analysis + the one decompile); every
+request re-imports the module, so the cost is paid per procedure.
+
+## 2. `FUN_10265a70` — the sole `VIEWMODEL` xref site (VA 0x10265a70)
+
+Ghidra `procedure_pseudo_code`, verbatim:
+
+    void FUN_10265a70(void)
+
+    {
+      FUN_10260940();
+      FUN_100162e0("VIEWMODEL");
+      FUN_1026d790();
+      return;
+    }
+
+Reading (with ADR-0492 §3b's raw disassembly):
+
+    10265a70  8b 44 24 0c        mov  eax,[esp+0Ch]     ; (leaf, 3 stack args)
+    ...
+    10265a88  83 ec 08           sub  esp,8             ; temp object on the stack
+    10265a8b  8b cc              mov  ecx,esp           ; this = &temp
+    10265a8d  89 64 24 24        mov  [esp+24h],esp     ; spill &temp
+    10265a91  68 44 a1 75 10     push 0x1075a144        ; "VIEWMODEL"
+    10265a96  e8 45 08 db ff     call 0x100162e0        ; CStr::CStr(const char*)
+    10265a9b  e8 f0 7c 00 00     call 0x1026d790
+    10265aa3  5f                   pop  edi
+    10265aa4  5e                   pop  esi
+    10265aa5  c2 0c 00           ret  0Ch
+
+so the "call 0x100162e0" the raw scan saw is a **temporary `CStr` construction**
+from the string literal, not a property lookup (see §3). The literal is therefore
+passed *by name* into `FUN_1026d790`, bracketed by `FUN_10260940()` and
+`FUN_1026d790()`.
+
+What is *not* resolved here: neither `FUN_10260940` (the first call) nor
+`FUN_1026d790` (the receiver of the name) nor `FUN_10265a70`'s **callers** were
+decompiled — each is another full request — so "does this site read or set the
+`VIEWMODEL` property?" is **still open**. The decompile does, however, falsify the
+"name-keyed lookup helper" reading of the callee (§3) and it falsifies ADR-0492's
+"the module cannot be decompiled" limit (§4).
+
+## 3. `FUN_100162e0` — it is `CStr::CStr(const char*)`, not a lookup
+
+Ghidra `procedure_pseudo_code`, verbatim:
+
+    void FUN_100162e0(char *param_1)
+
+    {
+      char cVar1;
+      uint uVar2;
+      int iVar3;
+      char *pcVar4;
+      int *in_ECX;
+      void *unaff_ESI;
+      void *local_c;
+      undefined1 *puStack_8;
+      undefined4 local_4;
+
+      puStack_8 = &LAB_106ef423;
+      local_c = ExceptionList;
+      uVar2 = DAT_10842474 ^ (uint)&stack0xffffffe8;
+      ExceptionList = &local_c;
+      *in_ECX = (int)CStr::vftable;
+      in_ECX[1] = 0;
+      local_4 = 1;
+      if (param_1 == (char *)0x0) {
+        iVar3 = 0;
+      }
+      else {
+        pcVar4 = param_1;
+        do {
+          cVar1 = *pcVar4;
+          pcVar4 = pcVar4 + 1;
+        } while (cVar1 != '\0');
+        iVar3 = (int)pcVar4 - (int)(param_1 + 1);
+      }
+      (**(code **)(*in_ECX + 0x68))(param_1,iVar3,uVar2);
+      ExceptionList = unaff_ESI;
+      return;
+    }
+
+This is a compiler-generated constructor: it installs `CStr::vftable` into
+`[this]`, zeroes `[this+4]`, computes `strlen(param_1)` inline, and calls vtable
+slot `0x68` (the class's own assign/append). `in_ECX` is the `this` pointer — at the
+`FUN_10265a70` call site that is the stack temp (`mov ecx,esp`). So:
+
+- **`CStr` is the engine's own string class** (vftable symbol `CStr::vftable` at
+  `DAT_10842474`'s table), and `0x100162e0` is its `const char*` constructor.
+- ADR-0492 §3b's "the same name-keyed helper" description of `0x100162e0` is
+  **corrected**: it is the string constructor. Any other site that pushes a
+  literal and calls `0x100162e0` is constructing a `CStr`, not looking a property
+  up.
+
+## 4. The 330 s "budget" is a configurable deadline, and `--snapshot` does not help
+
+- **Measured:** with `REA_GHIDRA_STARTUP_TIMEOUT_MS = 1500000` both requests
+  returned exit 0 in 382 s / 380 s. The 330 s default is what ADR-0492 §5 hit; the
+  module is analysable.
+- **Measured:** `--snapshot docs/rea/snapshots/GameClasses2009.json` was passed on
+  **both** calls. The second call still took 380 s (a fresh import + full
+  auto-analysis), so the snapshot is **not** an analysis cache for the CLI Ghidra
+  provider: **no cross-call reuse**. The provider's own stated limitations agree —
+  *"The imported Program and temporary project are ephemeral and deleted on
+  close"* and *"the next provider query imports the original artifact again"* —
+  and the analysis profile pins `import_mode = "ephemeral-source-immutable"`.
+  The snapshot file (6,733 B) was written after the first call but did not change
+  the second call's cost.
+- **Consequence:** the "persist a Ghidra analysis snapshot so the 2009 modules can
+  be decompiled across wakes" route (ADR-0492 §Next 2) does **not** work as a cost
+  reduction for the CLI. Cross-wake reuse would need a persistent Ghidra project
+  driven directly (`analyzeHeadless` + a postScript), which is **not** implemented
+  here (a tooling change, not an evidence claim). What *is* established is that each
+  `rea decompile` on this module costs ≈6.4 min and needs the raised deadline.
+
+## not claimed
+
+- Whether `FUN_10265a70` reads or *sets* `VIEWMODEL` (its callees
+  `FUN_10260940`/`FUN_1026d790` and its callers are not decompiled).
+- That `FUN_1026d790` is the property accessor, or that `CStr`'s vtable slot
+  `0x68` is an assign — both are named by the decompiled shape.
+- Whether the viewmodel model is created from this property (still an inference
+  from the name; the consumer is not located).
+- Whether the viewmodel is drawn at all on the passive/unarmed level start (wake
+  89's open state question).
+- Anything about the 2004 (*Escape from Butcher Bay*) module: this file is the
+  2009 build only.

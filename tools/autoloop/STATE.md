@@ -2,6 +2,95 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 92 — 2026-10-18 09:36 (scheduled loop)
+- **Unit:** GH **#67 step 1 (eleventh correction, ADR-0493)** — wake 90's recorded
+  "the 9.0 MB 2009 `GameClasses` does **not** fit the provider's analysis budget"
+  is **measured false in its decisive part**: `330_000` is only the **default**
+  `REA_GHIDRA_STARTUP_TIMEOUT_MS`; with it raised to `1500000` two `rea decompile`
+  requests on the same module returned **exit 0** (382 s / 380 s wall), and the
+  sole `VIEWMODEL` xref `FUN_10265a70` is now **decompiled**. Read-only REA; the
+  provider imports an *ephemeral* copy (install never written). No C++, no build,
+  no deploy, no install write, no live run.
+- **Why this unit:** the explicit "Next" of wake 90 / ADR-0492 ("the `VIEWMODEL`
+  consumer … or the engine's own FP attach state" + "persist a Ghidra analysis
+  snapshot so the 2009 modules can be decompiled across wakes") and the top
+  player-visible item (#67). It also **re-drove wake 91's unit, which was lost**
+  (see the anomaly note below).
+- **Measured (read-only; subject `Content\GameClasses_Win32_x86.dll`, 9,016,560 B,
+  `sha256 d7e81d7d3726…`, provider Ghidra 12.1.4, `confidence=observed`,
+  `authority=shipped-artifact`):**
+  - **`FUN_10265a70`** (VA `0x10265a70`) = `procedure_pseudo_code` verbatim
+    `void FUN_10265a70(void){ FUN_10260940(); FUN_100162e0("VIEWMODEL");
+    FUN_1026d790(); return; }` — so ADR-0492 §3b's raw-scan reading is
+    **corrected**: `call 0x100162e0` is a **temporary `CStr` construction**
+    (`sub esp,8; mov ecx,esp; push "VIEWMODEL"`), not a property lookup, and the
+    literal is passed *by name* into `FUN_1026d790`, bracketed by
+    `FUN_10260940()`/`FUN_1026d790()`.
+  - **`FUN_100162e0`** = `CStr::CStr(const char*)`: installs `CStr::vftable` into
+    `[this]`, zeroes `[this+4]`, computes the length inline, calls vtable slot
+    `0x68`. It is the engine's **string class constructor**, so any site that
+    pushes a literal and calls it is building a `CStr`.
+  - **`--snapshot` is NOT a cross-call analysis cache for the CLI Ghidra
+    provider:** both calls passed `--snapshot docs/rea/snapshots/GameClasses2009.json`
+    and the **second still took 380 s** (fresh import + full auto-analysis). The
+    provider's own limitations say the imported Program/temp project are
+    *ephemeral* and "the next provider query imports the original artifact again";
+    `import_mode = "ephemeral-source-immutable"`. → the "persist a snapshot across
+    wakes" route (ADR-0492 §Next 2) is **falsified as a cost reduction**; true
+    reuse needs a persistent `analyzeHeadless` project (not implemented).
+- **Change (docs + guard only, NO C++):**
+  - **NEW `docs/rea/reference/GameClasses2009_ViewmodelDecompiled.txt`** — subject
+    hash, the exact commands + wall clocks, both decompilations verbatim, the
+    snapshot measurement, and a "not claimed" section.
+  - **NEW `docs/adr/0493-gh67-2009-gameclasses-decompiles-and-the-budget-is-a-deadline.md`.**
+  - `docs/rea/reference/GameClasses2009_ViewmodelProperties.txt` — CORRECTED
+    banners in §3b, §5 and "not claimed" (kept as the raw-scan record; the
+    `provider_timeout` record stands as the *default-budget* record).
+  - `tools/verify_reported_fixes.py` — new GH #67 invariant pinning the decompiled
+    artifact (hash, `REA_GHIDRA_STARTUP_TIMEOUT_MS`, `1500000`, `FUN_10265a70`,
+    `CStr::vftable`, `ephemeral-source-immutable`) + ADR-0493.
+  - `src/hook/README.md` (ADR-0493 bullet), `docs/vr-scenarios.md` (wake-92
+    correction), `.gitignore` (`docs/rea/snapshots/` is scratch output).
+- **EVIDENCE offline:** `verify_reported_fixes` PASS (with the new invariant),
+  `scenario_tests.py --check` PASS, `verify_test_artifacts` PASS,
+  `verify_hook_init` PASS, `validate_addresses` PASS, `xrsim --selftest` PASS, all
+  **12 `tools/test_*.py` exit 0**. **No C++ → no `build-all`/CTest** (documented).
+  Artifacts: `%TEMP%\oc_wake92\decompile_a70.json` (+`.err`),
+  `decompile_162e0.json` (+`.err`).
+- **Anomaly recorded (wake 91, the 09:09 run):** that run announced it had
+  "launched the decompile in the background (`REA_GHIDRA_STARTUP_TIMEOUT_MS=1500000`,
+  `--snapshot docs/rea/snapshots/GameClasses2009.json`)" then returned control; its
+  run ended 09:14:17 with **no** commit, **no** `STATE.md` entry, and **no**
+  snapshot file — the work was lost (background children die at run end). Its
+  traces: `%TEMP%\rea-ghidra-8d8ab984…` (created 09:11:31, the 9 MB target's own
+  Ghidra log reaching `DecompileCallback` at 09:12:48) and
+  `%TEMP%\rea-ghidra-ebc40b6a…` (09:13:53, log stops at `ANALYZING all memory and
+  code` 09:14:09). **No stray process remained.** The empty `docs/rea/snapshots/`
+  dir was its residue (now used + gitignored). This wake re-drove the unit in the
+  **foreground** so the result is durable. Related: GH #83 (overlapping runs),
+  GH #88 (append-only log).
+- **Blocker:** none. **Limits (honest):** one procedure per ≈6.4 min request (each
+  `rea decompile` re-imports and re-analyses); **read-vs-set at the `VIEWMODEL`
+  site is still unresolved** (`FUN_10260940`/`FUN_1026d790` and the function's
+  callers are not decompiled); "the viewmodel model is created from this property"
+  remains an inference (the consumer is not located); the ≈6.4 min wall clock is
+  one machine; and whether the viewmodel is **drawn at all** in the sampled
+  passive/unarmed level start is still open (wake 89's state question).
+- **Next:** (1) **#67 step 1 — resolve read-vs-set and find the consumer:**
+  `rea decompile` `FUN_1026d790` (the name receiver) and/or `FUN_10260940`, plus
+  `rea xrefs 0x10265a70` to find the caller of the `VIEWMODEL` site (each ≈6.4 min;
+  one or two per wake); (2) optionally build a **persistent `analyzeHeadless`
+  project + postScript** to amortise the per-call analysis (only if a wake needs
+  many queries) — `--snapshot` is measured not to help; (3) the "is the viewmodel
+  drawn on this level?" state question (GH #80); (4) `ViewmodelObserve=0` stays the
+  default; (5) the deploy-gated ladder on a real scene (#76 step 1, #79 hook half,
+  #68 req 5); (6) page-content discriminator for `gameplay_full_bleed_reached`
+  (#71 req 2); (7) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget; (8) GH #83 / GH #88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY — only an ephemeral import copy in `%TEMP%`); no leftover processes;
+  no live lock taken (no live run). `STATE.log` **appended** (never replaced —
+  GH #88).
+
 ## Wake 90 — 2026-10-18 08:55 (scheduled loop)
 - **Unit:** GH **#67 step 1 (tenth correction, ADR-0492)** — the **engine-side**
   identification the geometric corrections could not give: on the live (2009)

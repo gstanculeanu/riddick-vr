@@ -290,6 +290,20 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   state, not another threshold. Recorded (with the provider-timeout limit on the
   9.0 MB module) in `docs/rea/reference/GameClasses2009_ViewmodelProperties.txt`.
   See ADR-0492.
+- **ADR-0493 — the 2009 `GameClasses` module *does* decompile.** ADR-0492's "the
+  9.0 MB module exceeds the provider's analysis budget" is corrected: 330 s is
+  just the **default** Ghidra startup deadline (`REA_GHIDRA_STARTUP_TIMEOUT_MS`);
+  raised to 1500 s, two `rea decompile` requests returned **exit 0** (382 s / 380 s
+  wall). `FUN_10265a70` decompiles to
+  `{ FUN_10260940(); CStr::CStr("VIEWMODEL"); FUN_1026d790(); }`, and the callee
+  `0x100162e0` is **`CStr::CStr(const char*)`** — *not* the "name-keyed helper"
+  ADR-0492 §3b read from the raw bytes — so the `VIEWMODEL` literal is passed *by
+  name* into `FUN_1026d790`. `--snapshot` was measured **not** to be a cross-call
+  analysis cache for the CLI Ghidra provider (the second call re-imported and
+  re-analysed; `import_mode = "ephemeral-source-immutable"`), so the
+  "persist a snapshot" route does not reduce cost. Read-vs-set at the site is
+  still open (its callees/callers are not decompiled). Recorded in
+  `docs/rea/reference/GameClasses2009_ViewmodelDecompiled.txt`. See ADR-0493.
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

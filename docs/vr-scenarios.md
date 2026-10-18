@@ -433,6 +433,22 @@ attach state, not another threshold. Recorded in
 that the 9.0 MB 2009 module exceeds the provider's single-request analysis budget,
 so the deep REA needs a persistent snapshot).
 
+**Correction (wake 92, ADR-0493): the 2009 module *does* decompile — the 330 s
+budget is a configurable deadline.** ADR-0492's "the 9.0 MB module exceeds the
+provider's analysis budget" is corrected in place. `330_000` ms is only
+`REA_GHIDRA_STARTUP_TIMEOUT_MS`'s **default**; with it raised to `1500000` two
+`rea decompile` requests on the same module returned **exit 0** (~382 s / ~380 s
+wall). `FUN_10265a70` (the sole `VIEWMODEL` xref) decompiles to
+`{ FUN_10260940(); CStr::CStr("VIEWMODEL"); FUN_1026d790(); }`, and the callee
+`0x100162e0` is **`CStr::CStr(const char*)`** (it installs `CStr::vftable`, zeroes
+`[this+4]`, calls vtable slot `0x68`) — **not** the "name-keyed helper" the raw
+scan read, so the literal is passed *by name* into `FUN_1026d790`. `--snapshot`
+was measured **not** to be a cross-call analysis cache (the second call
+re-imported and re-analysed; the provider pins
+`import_mode = "ephemeral-source-immutable"`), so the "persist a snapshot" route
+does not reduce cost; read-vs-set at the site is still open. Recorded in
+`docs/rea/reference/GameClasses2009_ViewmodelDecompiled.txt`.
+
 
 **Launch reliability (GH #87, ADR-0479):** a live run can end with
 `DarkAthena.exe` exiting within ~2 s — no hook log (or one that stops during

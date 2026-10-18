@@ -484,6 +484,29 @@ def main():
             "CRPG_Object_Inventory, recorded from the live 2009 GameClasses module) "
             "must stay recorded (ADR-0492)")
 
+    # GH #67 step 1 (eleventh correction, ADR-0493): the ADR-0492 limit was
+    # tested and corrected -- the 330 s Ghidra deadline is the *default*
+    # (REA_GHIDRA_STARTUP_TIMEOUT_MS), and with it raised the 9.0 MB 2009
+    # GameClasses decompiles (exit 0, ~382 s / ~380 s wall); --snapshot is NOT a
+    # cross-call cache (the second call still re-imported); and the callee
+    # 0x100162e0 is CStr::CStr(const char*), not a "name-keyed helper". Pin the
+    # decompiled artifact + the ADR so the correction cannot silently rot.
+    vm_dec = ROOT / "docs/rea/reference/GameClasses2009_ViewmodelDecompiled.txt"
+    _vm_dec_text = vm_dec.read_text(encoding="utf-8") if vm_dec.exists() else ""
+    require(vm_dec.exists() and
+            "d7e81d7d3726d8f75e320c76e237b5fae69a0bea2f64ef729c53e3c1ddd72b79" in _vm_dec_text and
+            "REA_GHIDRA_STARTUP_TIMEOUT_MS" in _vm_dec_text and
+            "1500000" in _vm_dec_text and
+            "FUN_10265a70" in _vm_dec_text and
+            "CStr::vftable" in _vm_dec_text and
+            "ephemeral-source-immutable" in _vm_dec_text and
+            (ROOT / "docs/adr/0493-gh67-2009-gameclasses-decompiles-and-the-budget-is-a-deadline.md").exists() and
+            "ADR-0493" in (ROOT / "src/hook/README.md").read_text(encoding="utf-8"),
+            "GH #67: the 2009 GameClasses module must stay recorded as *decompilable* "
+            "once REA_GHIDRA_STARTUP_TIMEOUT_MS is raised above the 330 s default, with "
+            "--snapshot measured NOT to be a cross-call cache and 0x100162e0 identified "
+            "as CStr::CStr (ADR-0493)")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

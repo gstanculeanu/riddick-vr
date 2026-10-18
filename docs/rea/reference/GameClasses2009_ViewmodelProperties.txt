@@ -132,6 +132,17 @@ attach point" configuration. The lookup helper (`0x10283bba`) is the object's
 
 ### 3b. `FUN_10265a70` references `VIEWMODEL`
 
+> **CORRECTED (wake 92 / ADR-0493,
+> `GameClasses2009_ViewmodelDecompiled.txt`).** The function now **is**
+> decompiled. `FUN_10265a70` is
+> `{ FUN_10260940(); CStr::CStr("VIEWMODEL"); FUN_1026d790(); }`. The
+> `call 0x100162e0` below is the **`CStr` string constructor** (a temporary built
+> on the stack: `sub esp,8; mov ecx,esp; push "VIEWMODEL"`), **not** a property
+> lookup — `0x100162e0` = `CStr::CStr(const char*)`, which installs
+> `CStr::vftable` and calls vtable slot `0x68`. The literal is passed by name into
+> `FUN_1026d790`. Read-vs-set is still unresolved (its callees/callers are not
+> decompiled).
+
     10265a70  8b 44 24 0c        mov  eax,[esp+0Ch]
     ...
     10265a88  83 ec 08           sub  esp,8
@@ -159,6 +170,15 @@ is not proven (§ "not claimed").
 
 ## 5. The 2009 module does not fit the provider's analysis budget
 
+> **CORRECTED (wake 92 / ADR-0493).** This is the *default* 330 s deadline, not a
+> limit of the module. With `REA_GHIDRA_STARTUP_TIMEOUT_MS=1500000` the same
+> requests return **exit 0** (382 s / 380 s wall; see
+> `GameClasses2009_ViewmodelDecompiled.txt`). Also measured there: `--snapshot`
+> does **not** reduce the per-call cost (the second call re-imported and
+> re-analysed). The `provider_timeout` record below is kept as the *record of the
+> default budget*; the "repeating the unchanged request is not expected to
+> succeed" advice applied to the 330 s default only.
+
 The full-function analysis that would decompile `FUN_10265a70`/`FUN_10265ab0`
 **timed out** on this module, twice, on 2026-10-18:
 
@@ -185,6 +205,11 @@ a persistent analysis snapshot across wakes or a smaller module; a single 330 s
 request is not enough for this DLL.
 
 ## not claimed
+
+> **CORRECTED (wake 92 / ADR-0493):** the first bullet below ("No
+> decompilation") no longer holds — `FUN_10265a70` and `FUN_100162e0` are
+> decompiled in `GameClasses2009_ViewmodelDecompiled.txt`. `FUN_10265ab0` is
+> still raw-scan only.
 
 - **No decompilation.** `FUN_10265a70` and `FUN_10265ab0` are located by raw scan
   (SEH/leaf prologue + the property-name `push`), not recovered by Ghidra. The
