@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0511` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0512` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -69,7 +69,18 @@ every ADR names the epic #57 subsystem it advances.
   (identity + the expected translate) are both correct; and the ADR-0510 tracker is
   measured to disagree with the driver's real `GL_COLOR_WRITEMASK` (`cw off=0` beside
   `cmask=0x0`), so the gate must move to the queried mask.
-  **Head = `0511`; the next new ADR is `0512`.**
+  ADR-0512 acts on both of ADR-0511's readings: the **use gate** is recalibrated to the
+  *relative* form ADR-0511 asked for (`DualFrameUsableVsEngine` — each eye carries at
+  least half the engine frame's own coverage, plus a low absolute floor, so a dark level
+  is accepted while an empty re-issue is refused) and is judged **only on a frame that
+  carried the span** (the 60-swap sample tick used to overwrite a good verdict with a
+  black no-span reading, flipping the pass at ~1 Hz). Live, `use` goes **0→1** on every
+  sampled in-level span (the first acceptance in seven wakes) and the flicker is gone
+  (`used/frames` 50.6% → 99.6%) — but the renderer's own `DisplayMode:` branch is
+  **CINEMA for the whole run** (zero `FULL-BLEED` lines), so the pair is still never
+  presented and the harness cannot grade it: the **presentation branch** (GH #72) is now
+  the measured blocker, not the pass.
+  **Head = `0512`; the next new ADR is `0513`.**
 
 ## Known defect: duplicate numbers (GH #74)
 

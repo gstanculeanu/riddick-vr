@@ -419,6 +419,25 @@ ADR-0510 per-draw mask tracker is measured to disagree with the driver's real
 `GL_COLOR_WRITEMASK` (`cw=[on=59 off=0]` beside `sstate=[… cmask=0x0 …]`). Evidence only;
 `StereoDualRender=0` stays the default.
 
+**ADR-0512 (wake 110; GH #76 / GH #90) acts on ADR-0511's Next 1 and on the flicker its
+own line exposed.** The per-eye **use gate** is now *relative* (`stereo_dual.h`:
+`DualFrameUsableVsEngine` — each eye must carry at least `kDualEyeCoverageFraction = 0.5`
+of the engine frame's own coverage **and** clear a low
+`kDualMinEyeCoverageAbsolute = 0.05`, so a dark level is accepted while an empty re-issue
+is refused) instead of the absolute `0.5` floor, and it is refreshed **only on a frame
+that carried the span** — a 60-swap sample tick that lands on a no-re-issue frame
+(`draws=0`) used to overwrite a good verdict with a black-frame reading and flip the pass
+at ~1 Hz. `m_dualCoverOk` starts `false` and the `DualRender:` line gains
+`gate=[floor=… L=… R=… ok=…]`. Measured live (wake 110) the in-level span reads
+`coverL=coverR=0.286..0.290`, `engine=[cover=0.295..0.299 luma=10.4..10.6]`,
+`gate=[floor=0.147..0.149 L=1 R=1 ok=1]` and **`use=1`** (the first acceptance in seven
+wakes), with `used/frames` rising 50.6% → **99.6%**, while a no-span frame still reads
+`L=0 R=0 ok=0`, `use=0`. Native stereo is still **not presented**: the renderer's own
+`DisplayMode:` branch is **CINEMA for the whole run** (zero `FULL-BLEED` lines), so the
+`!isCinema && dualUsedThisFrame` presentation branch is never taken and the harness labels
+every frame `cinema` — the **presentation branch** (GH #72) is the measured next blocker,
+not the pass. `StereoDualRender=0` stays the default (no regression).
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

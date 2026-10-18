@@ -550,5 +550,26 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   to disagree with the driver's real `GL_COLOR_WRITEMASK`. Evidence only: no draw
   decision changes, `StereoDualRender=0` stays the default.
 
+- **The use gate is read against the engine frame and judged only on a span frame
+  (ADR-0512, wake 110; GH #76 / GH #90).** ADR-0511 measured the fixed `0.5` floor to be
+  the blocker, so `stereo_dual.h` gains the *relative* gate —
+  `kDualEyeCoverageFraction = 0.5` (each eye carries at least half the engine frame's own
+  coverage), `kDualMinEyeCoverageAbsolute = 0.05` (never a near-black eye, and the
+  fallback when the engine sample failed) and `DualEyeCoverageFloor` /
+  `DualEyeFrameTracksEngine` / `DualFrameUsableVsEngine`. `m_dualCoverOk` is that
+  decision, refreshed **only on a frame that carried the span**
+  (`m_dualEligible >= kDualMinEligibleDraws`): a no-span frame now *holds* the last span
+  verdict instead of overwriting it with a black-frame reading (which had flipped the
+  pass off for 60 swaps at a time), `m_dualCoverOk` starts **false**, and the
+  `DualRender:` line gains `gate=[floor=… L=… R=… ok=…]`. Measured live (wake 110): the
+  in-level span reads `coverL=coverR=0.286..0.290`, `engine=[cover=0.295..0.299
+  luma=10.4..10.6]`, `gate=[floor=0.147..0.149 L=1 R=1 ok=1]`, **`use=1`** (the first
+  acceptance in seven wakes) and `used/frames` rises 50.6% → **99.6%**; a no-span frame
+  still reads `L=0 R=0 ok=0`, `use=0`. **Native stereo is still not presented** — the
+  renderer's own `DisplayMode:` branch is **CINEMA for the whole run** (zero `FULL-BLEED`
+  lines), so `if (!isCinema && dualUsedThisFrame)` is never taken and the harness labels
+  every frame `cinema`: the **presentation branch** (GH #72) is the next blocker, not the
+  pass. `StereoDualRender=0` stays the default (no regression).
+
 
 

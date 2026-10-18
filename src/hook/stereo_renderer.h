@@ -193,7 +193,9 @@ private:
     // the re-issued draw ran under inside the eye framebuffer, and the modelview probe
     // -- together they say whether the dark eye frames are "a dark scene" (the fixed
     // coverage floor) or "the re-issue produced no image" (the eye FBO's own state or a
-    // non-identity modelview). All evidence only.
+    // non-identity modelview). ADR-0512 turns the first reading into the gate itself:
+    // `m_dualCoverOk` is now `DualFrameUsableVsEngine` (each eye graded against
+    // `m_dualEngineCover` plus a low absolute floor), not the absolute `0.5` floor.
     float m_dualEngineCover = 0.0f;
     float m_dualEngineLuma = 0.0f;
     DualEyeFrameState m_dualEyeState;
@@ -209,7 +211,10 @@ private:
     unsigned m_dualFrames = 0;
     unsigned m_dualFramesUsed = 0;
     int m_dualCoverCountdown = 0;
-    bool m_dualCoverOk = true;
+    // GH #76/#90 (ADR-0512): start *closed* -- the per-eye pair is presented only once
+    // a span frame has been sampled and graded (a no-span frame holds the verdict, so
+    // the initial value only applies before the first span sample).
+    bool m_dualCoverOk = false;
     float m_dualCoverL = 0.0f;
     float m_dualCoverR = 0.0f;
 };

@@ -18,9 +18,14 @@ using RiddickVR::DualDarkSideName;
 using RiddickVR::DualDrawState;
 using RiddickVR::DualDrawStateWritesNoColour;
 using RiddickVR::DualEyeColourNibble;
+using RiddickVR::DualEyeCoverageFloor;
 using RiddickVR::DualEyeFrameState;
+using RiddickVR::DualEyeFrameTracksEngine;
 using RiddickVR::DualEyeFrameWritesNoColour;
 using RiddickVR::DualFrameUsable;
+using RiddickVR::DualFrameUsableVsEngine;
+using RiddickVR::kDualEyeCoverageFraction;
+using RiddickVR::kDualMinEyeCoverageAbsolute;
 using RiddickVR::DualMeanLuminance;
 using RiddickVR::DualModelviewIsIdentity;
 using RiddickVR::DualModelviewTranslation;
@@ -431,6 +436,59 @@ int main() {
         float zeroed[16] = {0};
         Check(!DualModelviewIsIdentity(zeroed), "an all-zero matrix is not identity");
         Check(!DualModelviewIsIdentity(nullptr), "a null matrix is not identity");
+    }
+
+    // 14. GH #76/#90 (ADR-0512): the *use* gate is read against the engine's own frame,
+    //     not a fixed absolute floor. ADR-0511 measured the in-level engine frame to be
+    //     as dark as the eye frames (both cover ~0.28), so the old 0.5 floor refused a
+    //     faithful pair; the recalibrated gate accepts it while still refusing the
+    //     measured pre-level case (engine cover 1.000, eye 0.000).
+    {
+        // The floor tracks the engine frame, but never drops below the absolute floor.
+        Check(DualEyeCoverageFloor(0.294f) > 0.14f && DualEyeCoverageFloor(0.294f) < 0.16f,
+              "the floor is the engine frame's fraction when that is above the absolute floor");
+        Check(DualEyeCoverageFloor(1.0f) == kDualEyeCoverageFraction,
+              "a fully covered engine frame sets the floor to the fraction");
+        Check(DualEyeCoverageFloor(0.0f) == kDualMinEyeCoverageAbsolute,
+              "an unread/black engine frame degrades to the absolute floor");
+        Check(DualEyeCoverageFloor(-0.5f) == kDualMinEyeCoverageAbsolute,
+              "a nonsensical engine reading cannot lower the floor");
+
+        // The measured in-level span (ADR-0511: engine cover 0.294, eye 0.285) is
+        // accepted -- the old absolute floor refused exactly this faithful pair.
+        Check(DualFrameUsableVsEngine(0.294f, 0.285f, 0.285f),
+              "the measured in-level pair (engine ~0.29, eye ~0.29) is accepted");
+        Check(!DualFrameUsable(0.285f, 0.285f),
+              "the old absolute gate refused the same faithful pair");
+        Check(DualFrameUsableVsEngine(0.276f, 0.267f, 0.267f),
+              "the darkest measured in-level tick (engine 0.276, eye 0.267) is accepted");
+
+        // The measured pre-level case: a bright engine frame with black eyes is the
+        // re-issue's failure, and is still refused.
+        Check(!DualFrameUsableVsEngine(1.0f, 0.0f, 0.0f),
+              "a bright engine frame with black eyes is still refused");
+        Check(!DualFrameUsableVsEngine(0.4f, 0.1f, 0.1f),
+              "an eye carrying well under the fraction of a lit engine frame is refused");
+
+        // One eye only: the decision is per eye, so a black peer is never excused.
+        Check(!DualFrameUsableVsEngine(0.294f, 0.28f, 0.0f),
+              "one eye tracking the engine does not excuse a black peer");
+
+        // An unread engine sample (0.0) cannot accept a black eye, and a black pair is
+        // refused; the absolute floor is exactly where an unread-engine eye passes.
+        Check(!DualEyeFrameTracksEngine(0.0f, 0.0f),
+              "a black eye is refused even with an unread engine frame");
+        Check(!DualFrameUsableVsEngine(0.0f, 0.0f, 0.0f), "a black pair is refused");
+        Check(DualEyeFrameTracksEngine(kDualMinEyeCoverageAbsolute, 0.0f),
+              "an eye at the absolute floor passes an unread engine frame");
+
+        // A bright scene still needs a bright pair: the relative term dominates.
+        Check(!DualEyeFrameTracksEngine(0.4f, 1.0f),
+              "0.4 coverage under a fully covered engine frame is under the fraction");
+        Check(DualEyeFrameTracksEngine(0.5f, 1.0f),
+              "0.5 coverage under a fully covered engine frame is exactly the fraction");
+        Check(!DualEyeFrameTracksEngine(0.0f, 1.0f),
+              "a black eye under a fully covered engine frame is refused");
     }
 
     if (g_failures == 0) {

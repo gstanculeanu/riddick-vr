@@ -1283,6 +1283,25 @@ def main():
             "cannot be told from a dark scene) and read the eye FBO's own state plus the "
             "per-eye modelview -- ADR-0510 named the re-issue on the eye reading alone")
 
+    # GH #76 / GH #90 / ADR-0512: ADR-0511 measured the fixed absolute coverage floor to
+    # be the blocker (the engine's own frame is as dark as the eye frames on the in-level
+    # span), so the gate must be *relative* to the engine frame -- and it must be judged
+    # only on a frame that carried the span, because a 60-swap sample tick that lands on a
+    # no-re-issue frame reads black eyes and flips the pass at ~1 Hz.
+    require("kDualEyeCoverageFraction" in stereo_dual_h and
+            "kDualMinEyeCoverageAbsolute" in stereo_dual_h and
+            "DualEyeCoverageFloor" in stereo_dual_h and
+            "DualEyeFrameTracksEngine" in stereo_dual_h and
+            "DualFrameUsableVsEngine" in stereo_dual_h and
+            "DualFrameUsableVsEngine(" in stereo_renderer_cpp and
+            "m_dualEligible < kDualMinEligibleDraws" in stereo_renderer_cpp and
+            "gate=[floor=%.3f L=%d R=%d ok=%d]" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0512-gh76-use-gate-against-the-engine-frame.md").exists(),
+            "GH #76 / GH #90 / ADR-0512: the per-eye use gate must be read against the "
+            "engine's own frame (ADR-0511's control) and refreshed only on a span frame "
+            "-- ADR-0511 measured the fixed floor to be the blocker and its own log "
+            "showed the verdict alternating")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

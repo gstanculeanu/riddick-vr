@@ -1867,15 +1867,34 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             bool dualUsedThisFrame = false;
             if (m_dualEnabled) {
                 if (m_dualCoverCountdown <= 0) {
-                    m_dualCoverCountdown = kDualCoverageEverySwaps;
-                    // GH #76/#90 (ADR-0511): the engine's own frame at the *same*
-                    // swap, so the eye reading has a control (dark scene vs empty
-                    // re-issue) -- sampled only on the coverage tick, so the cost
-                    // stays bounded to the existing throttle.
-                    m_dualEngineCover = SampleEngineFrame(&m_dualEngineLuma);
-                    m_dualCoverL = SampleDualCoverage(true, &m_dualMeanL);
-                    m_dualCoverR = SampleDualCoverage(false, &m_dualMeanR);
-                    m_dualCoverOk = DualFrameUsable(m_dualCoverL, m_dualCoverR);
+                    // GH #76/#90 (ADR-0512): the verdict must come from a frame that
+                    // actually carries the world span. Sampling on a frame with no
+                    // re-issued draw reads black eye frames (`draws=0`), which used to
+                    // overwrite a good verdict with `ok=0` and flip the pass off for the
+                    // next 60 swaps (measured: `used=3840/7593`, alternating). Keep the
+                    // last *span* verdict and retry on the next swap instead.
+                    if (m_dualEligible < kDualMinEligibleDraws) {
+                        // no span this frame: hold the verdict, re-check next swap
+                    } else {
+                        m_dualCoverCountdown = kDualCoverageEverySwaps;
+                        // GH #76/#90 (ADR-0511): the engine's own frame at the *same*
+                        // swap, so the eye reading has a control (dark scene vs empty
+                        // re-issue) -- sampled only on the coverage tick, so the cost
+                        // stays bounded to the existing throttle.
+                        m_dualEngineCover = SampleEngineFrame(&m_dualEngineLuma);
+                        m_dualCoverL = SampleDualCoverage(true, &m_dualMeanL);
+                        m_dualCoverR = SampleDualCoverage(false, &m_dualMeanR);
+                        // GH #76/#90 (ADR-0512): grade each eye against the engine's own
+                        // frame (ADR-0511's control), not the old fixed `0.5` floor -- the
+                        // in-level engine frame is measured as dark as the eye frames
+                        // (both `cover ~0.28`), so an absolute floor refused a faithful
+                        // pair. An eye that tracks a dark engine frame is accepted; one
+                        // that stays black while the engine is lit is still refused, and a
+                        // low absolute floor keeps a black eye out when the engine frame
+                        // itself is (near) black.
+                        m_dualCoverOk = DualFrameUsableVsEngine(
+                            m_dualEngineCover, m_dualCoverL, m_dualCoverR);
+                    }
                 } else {
                     --m_dualCoverCountdown;
                 }
@@ -1900,6 +1919,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     "sstate=[cap=%d cmask=0x%X dmask=%d drawbuf=0x%X "
                                     "vp=%d,%d,%dx%d sc=%d scissor=%d,%d,%dx%d dt=%d blend=%d] "
                                     "engine=[cover=%.3f luma=%.1f] dark=%s "
+                                    "gate=[floor=%.3f L=%d R=%d ok=%d] "
                                     "eyeFbo=[cap=%d drawbuf=0x%X vp=%d,%d,%dx%d dt=%d cmask=0x%X] "
                                     "mv=[cap=%d id=%d pre=%.3f,%.3f,%.3f post=%.3f,%.3f,%.3f]",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
@@ -1935,6 +1955,10 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     DualDarkSideName(ClassifyDualDarkSide(
                                         m_dualEngineCover, m_dualEngineLuma,
                                         m_dualCoverL, m_dualMeanL)),
+                                    DualEyeCoverageFloor(m_dualEngineCover),
+                                    (int)DualEyeFrameTracksEngine(m_dualCoverL, m_dualEngineCover),
+                                    (int)DualEyeFrameTracksEngine(m_dualCoverR, m_dualEngineCover),
+                                    (int)m_dualCoverOk,
                                     (int)m_dualEyeState.captured, m_dualEyeState.drawBuffer,
                                     m_dualEyeState.viewport[0], m_dualEyeState.viewport[1],
                                     m_dualEyeState.viewport[2], m_dualEyeState.viewport[3],

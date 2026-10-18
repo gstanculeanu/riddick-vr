@@ -2,6 +2,83 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 110 - 2026-10-18 17:27 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the per-eye
+  USE gate is recalibrated against the engine's own frame and judged only on a span frame,
+  so `use` goes 0->1 on every sampled in-level span (ADR-0512)**, implementing
+  ADR-0511's Next 1 verbatim ("recalibrate the gate against the engine frame ... a
+  relative floor plus a low absolute floor").
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0511's explicit Next 1.
+  ADR-0511 measured the engine's own presented frame to be as dark as the eye frames on
+  the in-level span (both cover ~0.28), so the fixed `kDualMinEyeCoverage=0.5` floor
+  refused a *faithful* pair.
+- **Change (render + pure policy; opt-in, gated):**
+  - `stereo_dual.h`: `kDualEyeCoverageFraction=0.5`, `kDualMinEyeCoverageAbsolute=0.05`,
+    `DualEyeCoverageFloor`, `DualEyeFrameTracksEngine`, `DualFrameUsableVsEngine`;
+    `kDualMinEyeCoverage` stays the absolute "has an image" floor for
+    `ClassifyDualDarkSide`/`DualFrameUsable` but is no longer the use gate.
+  - `stereo_renderer.{h,cpp}`: `m_dualCoverOk = DualFrameUsableVsEngine(m_dualEngineCover,
+    m_dualCoverL, m_dualCoverR)`; the verdict is refreshed **only on a frame that carried
+    the span** (`m_dualEligible >= kDualMinEligibleDraws`) - a no-span frame now *holds*
+    the last span verdict instead of overwriting it with a black-frame reading (measured
+    to flip the pass at ~1 Hz); `m_dualCoverOk` starts **false**; the `DualRender:` line
+    gains `gate=[floor=%.3f L=%d R=%d ok=%d]`.
+  - `tests/stereo_dual_tests.cpp` new section 14 (the measured in-level and pre-level
+    pairs, the floor, the per-eye + unread-engine edges); NEW
+    `docs/adr/0512-gh76-use-gate-against-the-engine-frame.md`; `docs/adr/README.md`
+    (head -> 0512, curated range -> 0457-0512), `docs/vr-scenarios.md`,
+    `src/hook/README.md`; `verify_reported_fixes.py` new #76/#90/ADR-0512 invariant.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 527872 B
+  `b793297c376f` + x64 host); CTest **32/32 (x86)** and **30/30 (x64)**;
+  `verify_reported_fixes.py`, `scenario_tests.py --check`, `xrsim --selftest`,
+  `verify_hook_init.py`, `validate_addresses.py`, `verify_test_artifacts.py` PASS; all 12
+  `tools/test_*.py` exit 0.
+- **EVIDENCE live** (RIDDICKVR_SIM=1, read-only per-run shadows, `--shadow-install
+  "F:\The Chronicles of Riddick - Assault on Dark Athena" --reach-gameplay --duration 80
+  --advance-menu --advance-min-taps 8 --require-fresh-hook --require-parallax
+  --dump-branch any --downscale 4 --ini StereoDualRender=1`; `deployed_hook_matches_build`
+  PASS each):
+  - **Run 1 (gate only, hook `13edc57d3189`):** the in-level span reads
+    `draws=549 eligible=549 active=1 coverL=coverR=0.289 luma=[L=10.4 R=10.4]
+    engine=[cover=0.298 luma=10.5] dark=both-dark gate=[floor=0.149 L=1 R=1 ok=1]
+    use=1` - the **first acceptance in seven wakes**; a no-span frame reads
+    `draws=0 L=0 R=0 ok=0 use=0`. BUT `used=3840/7593` (50.6%): the verdict alternates
+    because the 60-swap sample tick also lands on no-span frames -> decision 2.
+  - **Run 2 (final, hook `b793297c376f`):** the flip is gone - **`used=7256/7287`
+    (99.6%)** - and every sampled in-level tick reads `coverL=coverR=0.286..0.290`
+    `engine=[cover=0.295..0.299 luma=10.4..10.6]` `gate=[floor=0.147..0.149 L=1 R=1 ok=1]`
+    `use=1`; `gameplay_full_bleed_reached` fill 1.00; `both_eyes_non_black` /
+    `same_eye_resolution` / `no_vertical_disparity` PASS.
+- **VERDICT (honest):** the recalibrated, span-judged gate **works and is measured** (the
+  in-level pair is accepted; a black/no-span frame is still refused; the verdict is
+  stable). **Native stereo is still NOT presented**, and the blocker has moved for the
+  third time - to the **presentation branch**: the renderer's own `DisplayMode:` branch is
+  **CINEMA for the whole run** (exactly one `DisplayMode:` line, **zero** `FULL-BLEED`
+  lines, `latch=1 fill=-1.00`), so `if (!isCinema && dualUsedThisFrame)` is never taken
+  and the pair is never blitted; the harness labels every frame `cinema`, so
+  `--require-parallax` could not be graded (`stereo_parallax_present` FAIL,
+  `stereo_kind=shift-only`, `spread=0`). `Has3DThisFrame()` is **not** the cause (444
+  `glLoadMatrixf [3D VR PROJECTION]` loads); the surviving branch term is `HasMenuCursor()`
+  (hypothesis, not a result). Filed as NEW **GH #91**. **NO REGRESSION**
+  (`StereoDualRender=0` default keeps the shifted capture).
+- **LIMITS:** the gate is an 8-row coverage/luma reading, not a pixel-difference proof
+  that the two eyes are a correct per-eye image (`use=1` says "as populated as the engine
+  frame"); both runs labelled all frames cinema (GH #72); the presentation branch is
+  diagnosed, not explained; ADR-0511's mask-tracker disagreement (its Next 2) is **not**
+  addressed (its measured direction is the harmless one); the 2004 build is untouched;
+  no headset.
+- **Next:** (1) **fix the display-branch latch (the presentation blocker, GH #91)** -
+  log the branch inputs (`Has3DThisFrame`/`HasMenuCursor`/`haveFill`/`activeFill`/
+  `fullBleedSeen`) and then present the pair; (2) re-run `--require-parallax` on a
+  gameplay-labelled frame and require a non-zero per-tile spread; (3) gate on the
+  **queried** `GL_COLOR_WRITEMASK` at the draw (ADR-0511 Next 2); (4) keep
+  `StereoDualRender=0`/`StereoParallaxDibr=0`/`StereoReplayProbe=0` defaults; (5) the
+  player-visible queue GH #63/#64/#61 then the P1 bugs #45/#49/#50/#51/#65; (6)
+  `DEFAULT_GAME_DIR` 2004-vs-2009; (7) GH #83/#88/#89/#74.
+- **OPS:** install untouched (READ-ONLY per-run shadow, no deploy, no install write), no
+  leftover game/host processes, live lock released, `tests/xrsim/report.json` reverted to
+  the committed baseline.
+
 ## Wake 109 - 2026-10-18 17:15 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the eye
   frames are compared to the ENGINE'S OWN presented frame, the eye FBO's state and the

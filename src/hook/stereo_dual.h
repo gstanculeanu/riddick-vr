@@ -70,10 +70,14 @@ inline bool DualRenderDrawEligible(const VertexSample& sampled) {
 // the shipped shifted capture. `coverage` is the non-black fraction sampled from
 // an eye frame.
 //
-// The floor is deliberately high: the first live run (wake 103) had a 4-row / 5%
-// gate pass frames whose presented mean luminance was only ~3/255 (the sampled
-// rows caught a little content over an otherwise black frame), which is not a
-// usable eye image. A frame must be mostly content to be used.
+// This is the **absolute** form of the floor: a frame must be *mostly* content. It is
+// still used as the "does this frame carry an image at all?" threshold (the
+// `ClassifyDualDarkSide` tie-break and `DualFrameUsable`), but it is **no longer the
+// gate that decides whether the per-eye pair is presented** -- ADR-0511 measured that
+// a fixed floor refuses a *faithful* pair on a dark level (the engine's own frame
+// reads the same `cover ~0.28`), so the use decision moved to
+// `DualFrameUsableVsEngine` below (ADR-0512), which grades each eye against the
+// engine frame's own coverage in the same swap.
 constexpr float kDualMinEyeCoverage = 0.5f;
 
 // Non-black fraction of an RGBA8 buffer (`pixels` 4-byte texels). A texel counts
@@ -95,6 +99,51 @@ inline bool DualFrameUsable(float coverageLeft, float coverageRight,
                             float minCoverage = kDualMinEyeCoverage) {
     if (!(coverageLeft >= minCoverage) || !(coverageRight >= minCoverage)) return false;
     return true;
+}
+
+// --- GH #76/#90 (ADR-0512): the *use* gate, read against the engine's own frame ---
+//
+// `kDualMinEyeCoverage` above is an *absolute* floor, and ADR-0511 measured why that
+// cannot be the criterion: on the in-level span the engine's **own presented frame**
+// is as dark as the eye frames (both `cover ~0.28`, `luma ~10.3`), so a fixed `0.5`
+// floor refuses a *faithful* pair because the *level* is dark. The gate therefore has
+// to be read against what the engine itself painted **in the same swap** (ADR-0511's
+// `SampleEngineFrame`): an eye that tracks a dark engine frame is accepted, an eye
+// that tracks nothing while the engine is lit is not.
+//
+//   * each eye must carry at least `kDualEyeCoverageFraction` of the engine frame's
+//     own non-black coverage -- the measured pre-level case (`engine cover 1.000`,
+//     eye `0.000`) is refused, the measured in-level case (`0.294` vs `0.285`) is
+//     accepted; and
+//   * each eye must clear a low `kDualMinEyeCoverageAbsolute`, so the relative term
+//     alone cannot pass a black eye when the engine frame is (near) black, and a run
+//     whose engine sample failed (`engineCoverage == 0`) degrades to that floor
+//     rather than accepting anything.
+//
+// The floor is the same for both eyes (they share one engine frame), but the decision
+// is taken per eye so the two eyes can never disagree about what the scene carries.
+constexpr float kDualEyeCoverageFraction = 0.5f;
+constexpr float kDualMinEyeCoverageAbsolute = 0.05f;
+
+inline float DualEyeCoverageFloor(float engineCoverage,
+                                  float fraction = kDualEyeCoverageFraction,
+                                  float absoluteFloor = kDualMinEyeCoverageAbsolute) {
+    const float engine = engineCoverage > 0.0f ? engineCoverage : 0.0f;
+    const float relative = fraction * engine;
+    return relative > absoluteFloor ? relative : absoluteFloor;
+}
+
+inline bool DualEyeFrameTracksEngine(float eyeCoverage, float engineCoverage,
+                                     float fraction = kDualEyeCoverageFraction,
+                                     float absoluteFloor = kDualMinEyeCoverageAbsolute) {
+    return eyeCoverage >= DualEyeCoverageFloor(engineCoverage, fraction, absoluteFloor);
+}
+
+inline bool DualFrameUsableVsEngine(float engineCoverage, float coverageLeft, float coverageRight,
+                                    float fraction = kDualEyeCoverageFraction,
+                                    float absoluteFloor = kDualMinEyeCoverageAbsolute) {
+    return DualEyeFrameTracksEngine(coverageLeft, engineCoverage, fraction, absoluteFloor) &&
+           DualEyeFrameTracksEngine(coverageRight, engineCoverage, fraction, absoluteFloor);
 }
 
 // Mean luminance (0..255) of an RGBA8 sample. The non-black *fraction* alone cannot
