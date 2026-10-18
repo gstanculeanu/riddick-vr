@@ -2,6 +2,91 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 83 — 2026-10-18 05:12 (scheduled loop)
+- **Unit:** GH **#67 step 1 (fourth correction)** — the "arms candidate" is a
+  **plane**, so the window being identified is *not* the viewmodel. Wake 82 read
+  the sampled `fp` draw as "a real mesh + camera-relative = the FP viewmodel
+  signature"; this wake measured its *shape* and both readings are wrong.
+  Harness-only (`tools/xrsim.py` + 3 tests + `--selftest` case + ADR-0484 +
+  `docs/vr-scenarios.md` + `src/hook/README.md` + the #67 `verify_reported_fixes`
+  invariant); **no C++ change, no build, no deploy, no install write**.
+- **Why this unit:** it is the explicit "Next" of wake 82 ("confirm the 2520-vertex
+  in-window mesh *is* the engine FP viewmodel") and the top player-visible item
+  (#67); the answer is *no*, and the reason is decisive.
+- **Root cause (measured, read-only + live):** the sample's bounds are
+  `min=(-0.450,-0.450,-0.050) max=(0.450,0.450,0.000)` = **0.90 × 0.90 × 0.05**,
+  *symmetric about the origin*: `dz/dx = 0.056`. The engine's first-person arms are
+  a 3-D mesh with depth comparable to their width; a flat, origin-centred,
+  screen-space mesh is an overlay (the ADR-0482 `±0.5` screen quad is the same
+  family). "Byte-identical under a 39.5° head-yaw sweep" is also exactly what a
+  *screen-space* element does — it is not evidence of arms.
+- **DECISIVE (why the page is not gameplay):** the run's own dumped "gameplay"
+  captures are the game's **start screen**. Converted the live BMPs
+  (`tests/xrsim/artifacts/right_10200.bmp` / `test_frame_10500.bmp`, 29 pairs,
+  frames 4500–12900) to PNG: every one is the *"THE CHRONICLES OF RIDDICK /
+  ASSAULT ON DARK ATHENA"* title card, pulsing between two brightness states
+  (mean 85.6 ↔ 99.9, 68 % of pixels differing > 8 purely from the fade) and
+  otherwise identical. The harness's `gameplay` branch is "full-bleed (BarScan
+  fill 1.00) + a recent perspective projection (`3Dfresh=1`)", and this title
+  page is a *full-bleed 3-D page*, so it satisfies both; the hook's chain is
+  `CINEMA screen (3Dfresh=0 menuCursor=1)` → `3D Gameplay projection intercepted`
+  → `cold-start latch demoted a letterboxed 3D frame to CINEMA (fill=0.40)` →
+  `BarScan: snap to (0,0)-(1280,605)` → `FULL-BLEED gameplay (3Dfresh=1 fill=1.00)`
+  and then **no further branch change for the rest of the run** (~13.7 k frames
+  on one page). So wakes 79–82 observed the *start screen*, and `--sim-confirm`
+  was not part of those runs (GH #71 / the route in GH #80 remain the blocker).
+- **Change:** `tools/xrsim.py` — `VIEWMODEL_CANDIDATE_MIN_THICKNESS_RATIO = 0.15`
+  + pure `viewmodel_candidate_geometry(sample)` (axis extents, `thickness_ratio`,
+  `volumetric`), attached to each parsed submission sample so the run report
+  carries it; `evaluate` adds the **graded** check
+  `viewmodel_candidate_is_volumetric` (FAIL for a planar `fp` sample, PASS for a
+  mesh-shaped one, SKIP when no sample was captured — so a run without
+  `ViewmodelObserve=1` is unaffected). `viewmodel_pass_identified` is unchanged
+  (the window still draws). The positive case is explicitly **unverified** (no run
+  has reached in-game gameplay yet), so this is a *necessary*, not sufficient,
+  condition — recorded in ADR-0484.
+- **Evidence (live, `RIDDICKVR_SIM=1`, per-run read-only shadow
+  `%TEMP%\riddickvr-shadow-6008`, `--ini ViewmodelObserve=1 --ini
+  ViewmodelTrace=1 --require-fresh-hook`, NO deploy, hook `sha256 e82a2dee526e`
+  495616 B = the repo build, `deployed_hook_matches_build` PASS, 29 gameplay
+  captures, HMD yaw span **39.549°**): `[PASS] viewmodel: viewmodel_pass_identified
+  (17 probe line(s), max in-window draws=5700, matrix sampled)` and
+  **`[FAIL] viewmodel: viewmodel_candidate_is_volumetric (candidate
+  extent=[0.9, 0.9, 0.05] thickness_ratio=0.056 (min 0.15)@count=2520 -- the
+  in-window draw is planar/screen-space, so the engine's first-person viewmodel
+  pass was NOT identified)`**; the `fp` sample is byte-identical to wake 82's
+  (`first=(0.400,-0.400,0.000) … count=2520`). **XRSIM RESULT: FAIL** — which is
+  now the *honest* verdict for a run that never leaves the start screen (the
+  previous PASS was the false red). Artifacts/report in `%TEMP%\oc_wake83`
+  (committed `tests/xrsim/*` untouched), install untouched (install log mtime
+  still `2026-10-18T00:25`, ini/dll unchanged), no leftover processes, live lock
+  released.
+- **Evidence (offline):** `tools/test_xrsim.py` **PASS** (+3:
+  `test_viewmodel_candidate_geometry_distinguishes_plane_from_mesh`,
+  `test_viewmodel_candidate_check_fails_on_a_planar_sample`,
+  `test_viewmodel_candidate_check_skipped_without_a_sample`); `xrsim --selftest`
+  PASS (+1 `viewmodel_candidate_geometry_planar_vs_volume`); all **12
+  `tools/test_*.py` PASS**; `verify_reported_fixes` (extended #67 invariant),
+  `scenario_tests.py --check`, `verify_hook_init`, `validate_addresses` (PASS),
+  `verify_test_artifacts` PASS. **No C++ → no `build-all`/CTest** (documented).
+- **Blocker / honest limit:** the harness still cannot *tell* the start screen
+  from gameplay from any signal it has (the branch is full-bleed + perspective,
+  and the sim cannot drive the *game's* input, so no gameplay content can exist
+  yet) — so this wake makes the #67 claim honest, it does not reach gameplay. The
+  geometric test is a necessary condition only; the threshold (0.15) is loose and
+  must be re-read against a real gameplay sample once one exists. `count=2520`
+  "a real draw" is unaffected; the refuted claim is specifically "the largest
+  in-window draw *is* the arms".
+- **Next:** (1) **GH #80/#71** — the only route to a valid #67 datum: get the
+  sim's in-process confirm to actually advance the start screen (add a tap
+  counter to the input-bridge report line, then check the engine's pad-connect /
+  packet handling), and only then re-read the `fp` sample; (2) the
+  deploy-gated ladder that does not depend on gameplay (#68 req 5, #79 hook half,
+  #76 step 1, #72 req 1 already landed); (3) `DEFAULT_GAME_DIR` 2004-vs-2009
+  retarget; (4) GH #83 manual-session blind spot.
+- **Branch:** committed on **main** (single-writer) as `ac79fb5`; install
+  untouched (read-only shadow only), no leftover processes, live lock released.
+
 ## Wake 82 — 2026-10-18 04:47 (scheduled loop)
 - **Unit:** GH **#67 step 1 (third correction)** — the FP-pass signature, taken
   from wake 81's explicit "Next": the depth-only-clear window's **first** in-window
