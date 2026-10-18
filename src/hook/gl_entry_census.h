@@ -119,27 +119,104 @@ struct ArrayBindingTracker {
 // `glEnableVertexAttribArray[ARB]`) and `glInterleavedArrays`. Any of these being
 // called says the fixed-function `glVertexPointer` the sampler records is not the
 // array the draw actually used.
+//
+// ADR-0508 (GH #76/#90 Next after ADR-0507): a *per-index* record, because the
+// generic-attribute path establishes the array without any fixed-function
+// `glVertexPointer` at all, and the decisive question is not "was the path called"
+// but "at THIS draw, which array would a re-issued `glDrawElements` read, and is
+// its position data in a buffer object". GL keeps an array buffer *per attribute*
+// at the moment the pointer is set, so this records the `GL_ARRAY_BUFFER` binding
+// in force at each `NoteAttribPointer` rather than the live binding at the draw
+// (which is a different attribute's buffer by the time the draw happens).
+constexpr unsigned kGlFloatAttrib = 0x1406u;   // GL_FLOAT, for the attribute type
+constexpr unsigned kGenericAttribMax = 16;     // the GL minimum; bounded the same way
+
 struct AttributePathCensus {
     unsigned attribPointerCalls = 0;
     unsigned enableArrayCalls = 0;
+    unsigned disableArrayCalls = 0;
+    unsigned enableClientStateCalls = 0;
+    unsigned disableClientStateCalls = 0;
     unsigned interleavedCalls = 0;
+
+    // The last call's shape, kept for the evidence line (unchanged from ADR-0507).
     unsigned lastIndex = 0;
     unsigned lastSize = 0;
     unsigned lastType = 0;
     int lastStride = 0;
     bool lastPointerSet = false;
+    unsigned lastArrayBufferId = 0;
 
-    void NoteAttribPointer(unsigned index, unsigned size, unsigned type, int stride,
-                           const void* pointer) {
+    // Per-index generic-attribute state. This is GL state: it persists across
+    // draws until the engine disables it, exactly like the fixed-function pointer.
+    bool enabled[kGenericAttribMax] = {};
+    unsigned size[kGenericAttribMax] = {};
+    unsigned type[kGenericAttribMax] = {};
+    int stride[kGenericAttribMax] = {};
+    bool pointerSet[kGenericAttribMax] = {};
+    unsigned arrayBufferId[kGenericAttribMax] = {};  // GL_ARRAY_BUFFER bound at set time
+
+    void NoteAttribPointer(unsigned index, unsigned attrSize, unsigned attrType, int attrStride,
+                           const void* pointer, unsigned boundArrayBufferId) {
         ++attribPointerCalls;
         lastIndex = index;
-        lastSize = size;
-        lastType = type;
-        lastStride = stride;
+        lastSize = attrSize;
+        lastType = attrType;
+        lastStride = attrStride;
         lastPointerSet = pointer != nullptr;
+        lastArrayBufferId = boundArrayBufferId;
+        if (index < kGenericAttribMax) {
+            size[index] = attrSize;
+            type[index] = attrType;
+            stride[index] = attrStride;
+            pointerSet[index] = pointer != nullptr;
+            arrayBufferId[index] = boundArrayBufferId;
+        }
     }
-    void NoteEnableArray() { ++enableArrayCalls; }
+    void NoteEnableArray(unsigned index) {
+        ++enableArrayCalls;
+        if (index < kGenericAttribMax) enabled[index] = true;
+    }
+    void NoteDisableArray(unsigned index) {
+        ++disableArrayCalls;
+        if (index < kGenericAttribMax) enabled[index] = false;
+    }
+    // glEnableClientState/glDisableClientState (the fixed-function path); counted
+    // so a run can state whether the fixed-function vertex array is even enabled.
+    void NoteEnableClientState() { ++enableClientStateCalls; }
+    void NoteDisableClientState() { ++disableClientStateCalls; }
     void NoteInterleaved() { ++interleavedCalls; }
+
+    unsigned EnabledCount() const {
+        unsigned n = 0;
+        for (unsigned i = 0; i < kGenericAttribMax; ++i) {
+            if (enabled[i]) ++n;
+        }
+        return n;
+    }
+    bool AnyEnabled() const { return EnabledCount() != 0u; }
+
+    // The position-like generic attribute: the lowest enabled index holding a
+    // 3+-component GL_FLOAT array -- the shape every measured world draw uses
+    // (GL_FLOAT, 3 components, stride 56; ADR-0506/0507). -1 when there is none.
+    int PositionAttribIndex() const {
+        int best = -1;
+        unsigned bestSize = 0;
+        for (unsigned i = 0; i < kGenericAttribMax; ++i) {
+            if (!enabled[i] || type[i] != kGlFloatAttrib || size[i] < 3u) continue;
+            if (best < 0 || size[i] > bestSize) {
+                best = static_cast<int>(i);
+                bestSize = size[i];
+            }
+        }
+        return best;
+    }
+    // The buffer object that holds that attribute's data (0 = client memory).
+    unsigned PositionBufferId() const {
+        const int i = PositionAttribIndex();
+        return i >= 0 ? arrayBufferId[i] : 0u;
+    }
+    bool PositionBufferBacked() const { return PositionBufferId() != 0u; }
 
     void Reset() { *this = AttributePathCensus{}; }
 };

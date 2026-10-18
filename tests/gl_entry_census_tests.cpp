@@ -18,6 +18,7 @@
 using RiddickVR::ArrayBindingTracker;
 using RiddickVR::AttributePathCensus;
 using RiddickVR::GlProcNameCensus;
+using RiddickVR::kGenericAttribMax;
 using RiddickVR::kGlArrayBuffer;
 using RiddickVR::kGlElementArrayBuffer;
 using RiddickVR::SpanDrawCensus;
@@ -90,22 +91,65 @@ int main() {
         Check(ab.sawArrayBuffer, "the historical sighting is not cleared by an unbind");
     }
 
-    // 4. The generic-attribute path and glInterleavedArrays are counted separately.
+    // 4. The generic-attribute path and glInterleavedArrays are counted separately,
+    //    and the per-index state records the buffer bound *at the pointer set* --
+    //    the source of the *array* the draw reads (ADR-0508).
     {
         AttributePathCensus ap;
         Check(ap.attribPointerCalls == 0u && ap.interleavedCalls == 0u, "nothing called initially");
-        ap.NoteAttribPointer(3u, 3u, 0x1406u, 56, reinterpret_cast<const void*>(0x40));
+        Check(!ap.AnyEnabled() && ap.EnabledCount() == 0u, "no attribute array enabled initially");
+        Check(ap.PositionAttribIndex() == -1 && ap.PositionBufferId() == 0u,
+              "no position attribute initially");
+
+        // The measured world-draw shape: GL_FLOAT, 3 components, stride 56, set while
+        // the array buffer 12 was bound (ADR-0506/0507).
+        ap.NoteAttribPointer(3u, 3u, 0x1406u, 56, reinterpret_cast<const void*>(0x40), 12u);
         Check(ap.attribPointerCalls == 1u, "a generic attribute pointer is counted");
-        Check(ap.lastIndex == 3u && ap.lastSize == 3u && ap.lastType == 0x1406u && ap.lastStride == 56,
-              "the last attribute pointer is recorded");
+        Check(ap.lastIndex == 3u && ap.lastSize == 3u && ap.lastType == 0x1406u &&
+              ap.lastStride == 56 && ap.lastArrayBufferId == 12u,
+              "the last attribute pointer is recorded with its bind-time buffer");
         Check(ap.lastPointerSet, "a non-null attribute pointer is recorded as set");
-        ap.NoteAttribPointer(0u, 3u, 0x1406u, 56, nullptr);
-        Check(!ap.lastPointerSet, "a null attribute pointer is recorded as unset");
-        ap.NoteEnableArray();
+
+        // Enabled only after glEnableVertexAttribArray: the pointer alone is not live.
+        Check(ap.PositionAttribIndex() == -1, "an enabled-only query ignores a disabled index");
+        ap.NoteEnableArray(3u);
+        Check(ap.EnabledCount() == 1u && ap.AnyEnabled(), "the enable is counted per index");
+        Check(ap.PositionAttribIndex() == 3, "the enabled position index is found");
+        Check(ap.PositionBufferId() == 12u && ap.PositionBufferBacked(),
+              "the position array's bind-time buffer is reported");
+        Check(ap.stride[3] == 56, "the per-index stride is recorded");
+
+        // A client-memory attribute (set while the array buffer was 0) is not backed.
+        ap.NoteAttribPointer(0u, 3u, 0x1406u, 56, nullptr, 0u);
+        ap.NoteEnableArray(0u);
+        Check(ap.EnabledCount() == 2u, "two attribute arrays enabled");
+        Check(ap.PositionAttribIndex() == 0, "the lowest enabled position index wins");
+        Check(ap.PositionBufferId() == 0u && !ap.PositionBufferBacked(),
+              "a client-memory position array is not buffer backed");
+
+        // Disabling index 0 falls back to index 3 (still enabled and buffer backed).
+        ap.NoteDisableArray(0u);
+        Check(ap.EnabledCount() == 1u && ap.disableArrayCalls == 1u, "the disable is counted");
+        Check(ap.PositionAttribIndex() == 3 && ap.PositionBufferBacked(),
+              "disabling the client array falls back to the buffer-backed one");
+
+        // A non-float 2-component attribute is not a position candidate.
+        ap.NoteEnableArray(5u);
+        ap.NoteAttribPointer(5u, 2u, 0x1401u, 0, nullptr, 0u);
+        Check(ap.PositionAttribIndex() == 3, "a non-float/short attribute is not the position");
+
         ap.NoteInterleaved();
-        Check(ap.enableArrayCalls == 1u, "the enable-array call is counted");
+        Check(ap.enableArrayCalls == 3u, "every enable-array call is counted");
         Check(ap.interleavedCalls == 1u, "glInterleavedArrays is counted separately");
-        Check(ap.attribPointerCalls == 2u, "the attribute-pointer count is not disturbed");
+        Check(ap.attribPointerCalls == 3u, "the attribute-pointer count is not disturbed");
+
+        // Out-of-range indices are tallied but never corrupt the bounded table.
+        ap.NoteEnableArray(kGenericAttribMax + 4u);
+        Check(ap.enableArrayCalls == 4u, "an out-of-range enable is still counted");
+        Check(ap.EnabledCount() == 2u, "an out-of-range index enables nothing");
+        ap.Reset();
+        Check(ap.attribPointerCalls == 0u && ap.EnabledCount() == 0u && !ap.AnyEnabled(),
+              "Reset clears the per-index state");
     }
 
     // 5. The sampler's tally says how many glVertexPointer calls passed a null

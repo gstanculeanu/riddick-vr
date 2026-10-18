@@ -41,19 +41,27 @@ namespace RiddickVR {
 // (ADR-0482/0483) -- sit within +/-0.5 of the origin. `kNearFieldMaxAbs` (16
 // units, ~0.5 m) is the measured separator from ADR-0490, reused here.
 //
-// A draw is duplicated per eye only when it is a *decodable* client-array draw
-// whose sampled bounds are NOT near-field:
-//   * HUD / screen-space draws must NOT be translated: their coordinates are not
-//     metres, so an eye-space translation would slide them by a meaningless
-//     fraction of the screen.
-//   * the engine's own first-person viewmodel geometry is near-field as well, so
-//     it is excluded too -- it is replaced by the VR hands (#61/#64), so leaving
-//     it out of the per-eye pass is the #63 outcome, not a loss.
-//   * an *undecodable* draw (non-float array, unknown index type) is not
-//     classified and is left to the failing gate rather than guessed at.
+// A draw is duplicated per eye when it belongs to the 3-D world:
+//   * a *decodable* client-array draw whose sampled bounds are NOT near-field. HUD
+//     / screen-space draws must NOT be translated (their coordinates are not
+//     metres), and the engine's own first-person viewmodel geometry is near-field
+//     as well -- it is replaced by the VR hands (#61/#64), so leaving it out of the
+//     per-eye pass is the #63 outcome, not a loss.
+//   * an *undecodable* draw that used the **generic-attribute path** (ADR-0508).
+//     ADR-0507 measured why the world draws do not decode: the engine establishes
+//     the array through `glVertexAttribPointer[ARB]` (called ~695x/frame) into
+//     buffer objects, and leaves the fixed-function `glVertexPointer` the sampler
+//     reads **null by design** (83% of its calls). Re-issuing such a draw needs no
+//     decoded vertices at all -- the arrays and buffers are current GL state at the
+//     draw site -- so the source *path* is the discriminator, not the sampled
+//     bounds. The near-field exclusion above still applies to every decodable draw,
+//     so a screen-space/HUD draw (which is decodable) is never translated.
+//   * any other undecodable draw (no vertex array and no generic attributes, a
+//     non-float fixed-function type, an unknown index type) stays excluded rather
+//     than guessed at.
 inline bool DualRenderDrawEligible(const VertexSample& sampled) {
-    if (!sampled.valid) return false;
-    return !IsNearFieldSample(sampled);
+    if (sampled.valid) return !IsNearFieldSample(sampled);
+    return sampled.genericAttributeEnabled;
 }
 
 // Fail-safe gate for the per-eye frames. The dual pass writes only to its own
@@ -165,6 +173,16 @@ struct SpanDrawCensus {
     // (offset 0 into a bound buffer) or genuinely unset.
     bool rejectArrayBufferBound = false;
     unsigned rejectArrayBufferId = 0;
+    // GH #76/#90 (ADR-0508): the draws the pass re-issues *without* a decodable
+    // client array, i.e. on the generic-attribute path. `genericBufferBacked` is
+    // the subset whose position array's data lives in a buffer object (the
+    // bind-time GL_ARRAY_BUFFER binding was non-zero); `genericEnabled` is the
+    // generic-attribute arrays enabled at the first such draw.
+    unsigned genericEligible = 0;
+    unsigned genericBufferBacked = 0;
+    bool hasGenericSig = false;
+    unsigned genericEnabled = 0;
+    unsigned genericBufferId = 0;
 
     void Add(const VertexSample& s) {
         switch (DualSampleScaleOf(s)) {
@@ -173,7 +191,18 @@ struct SpanDrawCensus {
             case DualSampleScale::World: ++world;     break;
             default:                     ++unknown;   break;
         }
-        if (DualRenderDrawEligible(s)) return;  // a world draw the pass re-issues
+        if (DualRenderDrawEligible(s)) {        // a world draw the pass re-issues
+            if (!s.valid) {                     // ... via the generic-attribute path
+                ++genericEligible;
+                if (s.genericPositionBufferId != 0u) ++genericBufferBacked;
+                if (!hasGenericSig) {
+                    hasGenericSig = true;
+                    genericEnabled = s.genericAttributeEnabled ? 1u : 0u;
+                    genericBufferId = s.genericPositionBufferId;
+                }
+            }
+            return;
+        }
         ++skipped;
         if (s.valid) return;                    // decoded, but near-field (viewmodel/HUD)
         ++decodeRejected;

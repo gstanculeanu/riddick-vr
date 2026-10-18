@@ -50,12 +50,29 @@ static VertexSample MakeSample(bool valid, float lo, float hi, unsigned count = 
 }
 
 int main() {
-    // 1. An undecodable draw is never classified as world geometry (it is left to
-    //    the fail-safe gate instead of being guessed at).
+    // 1. An undecodable draw with *no* generic-attribute path is never classified as
+    //    world geometry (it is left to the fail-safe gate instead of being guessed at).
     {
         VertexSample invalid = MakeSample(false, -2.0e3f, 2.0e3f, 4096u);
+        Check(!invalid.genericAttributeEnabled, "the default sample uses no generic attributes");
         Check(!DualRenderDrawEligible(invalid),
-              "an undecodable draw must not be duplicated per eye");
+              "an undecodable draw with no generic attributes must not be duplicated per eye");
+    }
+
+    // 1b. GH #76/#90 (ADR-0508): an undecodable draw that used the generic-attribute
+    //     path *is* the engine's 3-D geometry (ADR-0507: the fixed-function client
+    //     array is null by design; the array is established by glVertexAttribPointer
+    //     into buffer objects). Re-issuing it needs no decoded vertices, so the
+    //     source path makes it eligible -- with or without a buffer-backed position.
+    {
+        VertexSample generic = MakeSample(false, 0.0f, 0.0f, 12u);
+        generic.genericAttributeEnabled = true;
+        generic.genericPositionBufferId = 12u;
+        Check(DualRenderDrawEligible(generic),
+              "an undecodable generic-attribute draw is duplicated per eye");
+        generic.genericPositionBufferId = 0u;  // client memory, still the generic path
+        Check(DualRenderDrawEligible(generic),
+              "the generic path is eligible even without a buffer-backed position");
     }
 
     // 2. Measured world geometry (ADR-0490: eye-space |coord| ~ 1.6e3..3.5e3) is
@@ -199,6 +216,32 @@ int main() {
         census.Reset();
         Check(census.skipped == 0u && census.decodeRejected == 0u && !census.hasRejectSig,
               "Reset clears the census");
+    }
+
+    // 9b. GH #76/#90 (ADR-0508): an undecodable draw on the generic-attribute path is
+    //     *eligible* (re-issued), so it is counted there -- not skipped and not a
+    //     decode rejection. The buffer-backed subset and the first such draw's state
+    //     are recorded so the run states the array source.
+    {
+        SpanDrawCensus census;
+        VertexSample generic = MakeSample(false, 0.0f, 0.0f, 12u);
+        generic.genericAttributeEnabled = true;
+        generic.genericPositionBufferId = 42u;
+        census.Add(generic);
+        Check(census.genericEligible == 1u && census.genericBufferBacked == 1u,
+              "a buffer-backed generic draw is counted as eligible");
+        Check(census.skipped == 0u && census.decodeRejected == 0u,
+              "an eligible generic draw is neither skipped nor a rejection");
+        Check(census.unknown == 1u, "the undecodable draw is still the Unknown band");
+        Check(census.hasGenericSig && census.genericEnabled == 1u && census.genericBufferId == 42u,
+              "the first generic draw's state is recorded");
+
+        VertexSample genericClient = MakeSample(false, 0.0f, 0.0f, 12u);
+        genericClient.genericAttributeEnabled = true;   // client memory, buffer 0
+        census.Add(genericClient);
+        Check(census.genericEligible == 2u && census.genericBufferBacked == 1u,
+              "a client-memory generic draw is eligible but not buffer backed");
+        Check(census.genericBufferId == 42u, "the first generic signature is not overwritten");
     }
 
     // 10. The sampler records the raw GL state it was handed, so a rejection can be

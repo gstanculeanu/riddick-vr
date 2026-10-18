@@ -105,6 +105,16 @@ struct VertexSample {
     // not in client memory -- which is the discriminator ADR-0506 needed.
     bool arrayBufferBound = false;
     unsigned arrayBufferId = 0;
+    // GH #76/#90 (ADR-0508): the generic-attribute path at this draw. ADR-0507
+    // measured that the null fixed-function vertex pointer is the engine's own
+    // doing (83% of glVertexPointer calls pass NULL) and that the whole core
+    // buffer-object set plus glVertexAttribPointerARB are used ~700x/frame, so the
+    // world geometry is on this path, not the client array the sampler reads. These
+    // are stamped by the proxy at the draw (the pure sampler does not know them),
+    // so an undecodable draw can still be classified as the engine's 3-D geometry
+    // rather than guessed at.
+    bool genericAttributeEnabled = false;   // a generic attribute array was enabled
+    unsigned genericPositionBufferId = 0;   // its position array's buffer (0 = client)
     VertexSampleReason reason = VertexSampleReason::Ok;  // why, when !valid
     float first[3] = {};      // the first sampled vertex
     float min[3] = {};        // axis-aligned bounds over the sampled vertices

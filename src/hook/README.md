@@ -487,5 +487,18 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   fixed-function client array the sampler reads (`buf=0` at the rejected draws).
   Read-only: no draw decision changes.
 
+- **The per-eye pass classifies by the array source (ADR-0508, wake 106; GH #76 /
+  GH #90).** ADR-0507's finding is acted on: `AttributePathCensus` is a **per-index**
+  record (`enabled/size/type/stride` plus the `GL_ARRAY_BUFFER` bound at the
+  *pointer set*, `PositionAttribIndex()`/`PositionBufferBacked()`), `VertexSample`
+  gains `genericAttributeEnabled`/`genericPositionBufferId`,
+  `DualRenderDrawEligible` re-issues an **undecodable generic-attribute draw** as
+  world geometry (no decoded vertices needed — the arrays/buffers are current at the
+  draw hook), and `glEnableVertexAttribArray`/`glDisableVertexAttribArray` keep the
+  per-index enabled state. The `GLProcCensus` line adds `attrLive=(..)` and
+  `DualRender:` adds `gen=/gbacked=/gsig=`. Every decodable near-field
+  (HUD/viewmodel) draw is still excluded, so screen-space geometry is never
+  eye-translated; the pass stays opt-in (`StereoDualRender=0`).
+
 
 

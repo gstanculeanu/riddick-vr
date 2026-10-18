@@ -2,6 +2,85 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 106 - 2026-10-18 16:05 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 - the
+  per-eye pass now classifies draws by the ARRAY SOURCE the engine actually uses
+  (ADR-0508)**, implementing ADR-0507's Next 1 (first half): the pass no longer
+  needs a *decoded* client array to re-issue a draw -- an undecodable draw on the
+  generic-attribute path IS re-issued per eye, because re-issuing needs no decoded
+  vertices (the arrays/buffers are current GL state at the draw hook). Measured
+  live: the in-level span capture jumps from ~60/735 draws to **706/735**.
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0507's explicit
+  Next 1. The blocked classification, not the re-issue, was the reason the pass lost
+  ~92% of the span (ADR-0505/0506/0507).
+- **Change (render + evidence; opt-in, gated):**
+  - `gl_entry_census.h`: `AttributePathCensus` is now a **per-index** record
+    (`enabled/size/type/stride/pointerSet` + `arrayBufferId`: the `GL_ARRAY_BUFFER`
+    bound *at the pointer set*), with `AnyEnabled()`, `PositionAttribIndex()`,
+    `PositionBufferId()`/`PositionBufferBacked()`; `NoteDisableArray` +
+    `glEnableClientState`/`Disable` counts.
+  - `vertex_submission_observe.h`: `VertexSample.genericAttributeEnabled` /
+    `genericPositionBufferId` (stamped by the proxy at the draw).
+  - `stereo_dual.h`: `DualRenderDrawEligible` = decodable-and-not-near-field **or**
+    undecodable-but-generic-attribute; `SpanDrawCensus` adds `genericEligible`,
+    `genericBufferBacked` and the first generic draw's `enabled`/`buffer` signature.
+  - `opengl_proxy.{h,cpp}`: the `glVertexAttribPointer` wrapper records the bind-time
+    array buffer; NEW `glDisableVertexAttribArray[ARB]` wrapper; `SampleSubmittedArray`
+    stamps the two fields; `GLProcCensus` adds `attrLive=(enabled/posIdx/posBuf/bufBacked)`;
+    `DualRender:` adds `gen=/gbacked=/gsig=`.
+  - `tests/gl_entry_census_tests.cpp` + `tests/stereo_dual_tests.cpp` extended;
+    NEW `docs/adr/0508-gh76-generic-attribute-array-source.md`; `docs/adr/README.md`
+    (head -> 0508), `docs/vr-scenarios.md`, `src/hook/README.md`;
+    `verify_reported_fixes.py` new #76/#90/ADR-0508 invariant.
+- **EVIDENCE offline:** `build-all.ps1` Release clean (x86 hook 524288 B
+  `b9be707e6923` + x64 host); CTest **32/32 (x86)** and **30/30 (x64)**;
+  `verify_reported_fixes.py`, `scenario_tests.py --check`, `xrsim --selftest`,
+  `verify_hook_init.py`, `validate_addresses.py`, `verify_test_artifacts.py` all
+  PASS; all `tools/test_*.py` exit 0.
+- **EVIDENCE live** (RIDDICKVR_SIM=1, read-only per-run shadow
+  `riddickvr-shadow-4380`, `--reach-gameplay --duration 70 --advance-menu
+  --advance-min-taps 8 --require-fresh-hook --require-parallax --dump-branch any
+  --downscale 4 --ini StereoDualRender=1`; `deployed_hook_matches_build` PASS,
+  hook `b9be707e6923` = repo build; reached live gameplay, 33 gameplay/7 cinema of
+  40 frames, full-bleed fill 1.00): every in-level `DualRender:` line reads
+  `draws=706 eligible=706 skipped=29` (was ~`draws=60`) with
+  `gen=646 gbacked=640 gsig=[enabled=1 buf=368]` -- i.e. ~96% of the span draws are
+  now re-issued, and 640 of the 646 generic draws are buffer-backed, the position
+  array's bind-time buffer id 368. **BUT the per-eye frames are still not usable:**
+  `use=0` on every sampled in-level frame (`coverL=coverR=0.000..0.287`, below the
+  `kDualMinEyeCoverage=0.5` gate; `frames=5347 used=421` shows 421 frames *did* pass
+  the gate earlier in the run, so the gate is not dead), and `--require-parallax`
+  still **FAILs** (`stereo_kind=shift-only`, per-tile disparity `spread=0`, 33
+  gameplay frames) -- gameplay keeps the shipped shifted capture. **NO REGRESSION:**
+  `frame_budget` PASS (n=10140, p50=2.81 ms, p95=9.36 ms) despite ~706 extra
+  per-eye draws/frame; both-eyes-non-black, same-eye-resolution, no-vertical-
+  disparity, horizontal-disparity-present (dx=-24..-14), not-mono-duplicate all PASS.
+- **VERDICT (honest):** the classification is fixed and measured -- the array source
+  is the generic-attribute/VBO path and the pass now captures the full world span --
+  but re-issuing those draws does NOT produce a usable per-eye image, so native
+  stereo is still NOT achieved and the blocker has MOVED: it is no longer "which
+  draws" but "why do the re-issued draws render no usable colour" (candidate: the
+  world span is a depth/colour-masked or depth-prepass stage, or the eye FBO's
+  target/viewport/state differs from the engine's at the draw).
+- **LIMITS:** the classification is a measured hypothesis (a generic-attribute draw
+  is assumed 3-D world; the near-field exclusion on decodable draws is the guard);
+  the position bounds are NOT decoded from the bound buffer; the coverage value
+  logged can be up to 59 swaps stale (sampled every 60, logged every 300); the
+  low-luminance frames (mean ~8/255) may also indicate a dark stage; the 2004 build
+  is untouched; no headset.
+- **Next:** (1) instrument WHY the re-issued draws produce no usable colour --
+  log the eye-FBO coverage every frame during a span, and log `glColorMask`/
+  `glDepthMask`/`glDrawBuffer`/`glViewport` at the draw (a colour-masked or
+  depth-only world stage would explain black at high draw counts); (2) alternatively
+  classify by decoded position bounds from the bound buffer (`glGetBufferSubData`)
+  to exclude a colour-masked stage; (3) keep `StereoDualRender=0` /
+  `StereoParallaxDibr=0` / `StereoReplayProbe=0` defaults; (4) player-visible queue
+  GH #63/#64/#61 then the P1 bugs #45/#49/#50/#51/#65; (5) DEFAULT_GAME_DIR
+  2004-vs-2009; (6) GH #83/#88/#89/#74.
+- **OPS:** install untouched (READ-ONLY per-run shadow; no deploy, no install write),
+  no leftover game/host processes, live lock released, `tests/xrsim/report.json`
+  reverted to the committed baseline.
+
 ## Wake 105 — 2026-10-18 15:45 (scheduled loop)
 - **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1) / GH #90 — the
   array source is MEASURED, and it falsifies ADR-0482's premise (ADR-0507)**: a new

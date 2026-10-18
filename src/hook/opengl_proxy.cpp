@@ -158,9 +158,11 @@ static AttributePathCensus s_attributePathCensus;
 typedef void (APIENTRY *PFN_glBindBuffer)(GLenum, GLuint);
 typedef void (APIENTRY *PFN_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
 typedef void (APIENTRY *PFN_glEnableVertexAttribArray)(GLuint);
+typedef void (APIENTRY *PFN_glDisableVertexAttribArray)(GLuint);
 static PFN_glBindBuffer real_glBindBuffer = nullptr;
 static PFN_glVertexAttribPointer real_glVertexAttribPointer = nullptr;
 static PFN_glEnableVertexAttribArray real_glEnableVertexAttribArray = nullptr;
+static PFN_glDisableVertexAttribArray real_glDisableVertexAttribArray = nullptr;
 
 // The engine resolves these through `wglGetProcAddress` (they are absent from its
 // static import table, ADR-0482). Each wrapper forwards verbatim and only tallies.
@@ -171,17 +173,25 @@ static void APIENTRY Hook_glBindBuffer(GLenum target, GLuint buffer) {
 static void APIENTRY Hook_glVertexAttribPointer(GLuint index, GLint size, GLenum type,
                                                 GLboolean normalized, GLsizei stride,
                                                 const void* pointer) {
+    // GH #76/#90 (ADR-0508): record the GL_ARRAY_BUFFER binding in force *at the
+    // pointer set* (GL keeps one buffer per attribute; the live binding at the draw
+    // is a different attribute's buffer).
     s_attributePathCensus.NoteAttribPointer(
         static_cast<unsigned>(index),
         size > 0 ? static_cast<unsigned>(size) : 0u,
         static_cast<unsigned>(type),
         static_cast<int>(stride),
-        pointer);
+        pointer,
+        s_arrayBinding.arrayBufferId);
     if (real_glVertexAttribPointer) real_glVertexAttribPointer(index, size, type, normalized, stride, pointer);
 }
 static void APIENTRY Hook_glEnableVertexAttribArray(GLuint index) {
-    s_attributePathCensus.NoteEnableArray();
+    s_attributePathCensus.NoteEnableArray(static_cast<unsigned>(index));
     if (real_glEnableVertexAttribArray) real_glEnableVertexAttribArray(index);
+}
+static void APIENTRY Hook_glDisableVertexAttribArray(GLuint index) {
+    s_attributePathCensus.NoteDisableArray(static_cast<unsigned>(index));
+    if (real_glDisableVertexAttribArray) real_glDisableVertexAttribArray(index);
 }
 // GH #67 step 1 (ninth correction, ADR-0491): the *mechanism* census -- the
 // immediate-mode path (glBegin/glEnd + glVertex3f/glVertex3fv/glVertex2f/
@@ -529,14 +539,17 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
         const ArrayBindingTracker& ab = s_arrayBinding;
         const AttributePathCensus& ap = s_attributePathCensus;
         VR_LOG_INFO("GLProcCensus [#%llu]: procs=%u names=%u arrayBuf=%u elemBuf=%u "
-                    "bindCalls=%u(ary=%u elem=%u) attribPtr=%u enableAttr=%u "
-                    "interleaved=%u attribLast=(idx=%u size=%u type=0x%X stride=%d ptr=%d)",
+                    "bindCalls=%u(ary=%u elem=%u) attribPtr=%u enableAttr=%u disableAttr=%u "
+                    "interleaved=%u attribLast=(idx=%u size=%u type=0x%X stride=%d ptr=%d buf=%u) "
+                    "attrLive=(enabled=%u posIdx=%d posBuf=%u bufBacked=%d)",
             static_cast<unsigned long long>(s_swapFrameCount),
             s_glProcCensus.TotalCalls(), s_glProcCensus.UniqueNames(),
             ab.arrayBufferId, ab.elementBufferId, ab.bindCalls, ab.arrayBinds, ab.elementBinds,
-            ap.attribPointerCalls, ap.enableArrayCalls, ap.interleavedCalls,
+            ap.attribPointerCalls, ap.enableArrayCalls, ap.disableArrayCalls, ap.interleavedCalls,
             ap.lastIndex, ap.lastSize, ap.lastType, ap.lastStride,
-            ap.lastPointerSet ? 1 : 0);
+            ap.lastPointerSet ? 1 : 0, ap.lastArrayBufferId,
+            ap.EnabledCount(), ap.PositionAttribIndex(), ap.PositionBufferId(),
+            ap.PositionBufferBacked() ? 1 : 0);
         // New names only, so a long run states each resolved entry point once.
         static unsigned s_glProcNamesLogged = 0;
         for (unsigned i = s_glProcNamesLogged; i < s_glProcCensus.UniqueNames(); ++i) {
@@ -665,6 +678,12 @@ PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
     } else if (procName == "glEnableVertexAttribArray" || procName == "glEnableVertexAttribArrayARB") {
         real_glEnableVertexAttribArray = (PFN_glEnableVertexAttribArray)realProc;
         if (realProc) return (PROC)Hook_glEnableVertexAttribArray;
+    } else if (procName == "glDisableVertexAttribArray" || procName == "glDisableVertexAttribArrayARB") {
+        // GH #76/#90 (ADR-0508): keep the per-index enabled state accurate, so the
+        // "is the generic-attribute path in use at this draw" query is a statement
+        // about the engine rather than about an ever-growing enable tally.
+        real_glDisableVertexAttribArray = (PFN_glDisableVertexAttribArray)realProc;
+        if (realProc) return (PROC)Hook_glDisableVertexAttribArray;
     }
 
     return realProc;
@@ -1090,6 +1109,13 @@ VertexSample OpenGLProxy::SampleSubmittedArray(unsigned count, unsigned indexTyp
     // array at all" instead of being read as an absent array either way.
     s.arrayBufferBound = s_arrayBinding.arrayBufferId != 0u;
     s.arrayBufferId = s_arrayBinding.arrayBufferId;
+    // GH #76/#90 (ADR-0508): the *array source*. A generic attribute array enabled
+    // at the draw is the engine's 3-D geometry path (the fixed-function client array
+    // is null by design, ADR-0507), so it is what lets an undecodable draw be
+    // classified instead of guessed at. `genericPositionBufferId` is the buffer
+    // bound when that array's pointer was set (0 = client memory).
+    s.genericAttributeEnabled = s_attributePathCensus.AnyEnabled();
+    s.genericPositionBufferId = s_attributePathCensus.PositionBufferId();
     return s;
 }
 

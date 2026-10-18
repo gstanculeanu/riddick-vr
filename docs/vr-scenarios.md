@@ -356,6 +356,18 @@ move to the generic-attribute + buffer path (ADR-0507 Next 1); the pass is
 unchanged, opt-in (`StereoDualRender=0`), `use=0`, and `--require-parallax` still
 fails.
 
+**ADR-0508 (wake 106; GH #76 / GH #90) classifies by the array source.** The
+per-eye pass no longer requires a *decoded* client array to re-issue a draw: an
+undecodable draw that used the **generic-attribute path** is re-issued per eye,
+because re-issuing needs no decoded vertices — the arrays and buffers are current
+GL state at the draw hook. `gl_entry_census.h`'s `AttributePathCensus` is now a
+**per-index** record (`enabled/size/type/stride` + the `GL_ARRAY_BUFFER` bound
+*when the pointer was set*), `VertexSample` carries the stamped
+`genericAttributeEnabled`/`genericPositionBufferId`, and the `GLProcCensus` line
+adds `attrLive=(..)` while `DualRender:` adds `gen=/gbacked=/gsig=`. Every
+*decodable* near-field draw (HUD/viewmodel) is still excluded, so screen-space
+geometry is never eye-translated. Opt-in (`StereoDualRender=0` stays the default).
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

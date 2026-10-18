@@ -1180,6 +1180,34 @@ def main():
             "-- ADR-0506 measured the world draws reading a null pointer with no "
             "way to say whether a buffer was bound")
 
+    # GH #76 / GH #90 / ADR-0508: ADR-0507 measured that the world geometry is on
+    # the generic-attribute + buffer-object path (glVertexAttribPointerARB ~695x a
+    # frame) and that the fixed-function glVertexPointer the sampler reads is null
+    # *by design*.  The per-eye pass must therefore classify by the array *source*:
+    # a per-index attribute record that keeps the GL_ARRAY_BUFFER bound at the
+    # pointer set, the enable/disable state, and queries for the position-like
+    # attribute; an undecodable draw on that path is re-issued (no decoded vertices
+    # needed -- the arrays and buffers are current at the draw site), while every
+    # decodable near-field draw stays excluded.  The evidence line carries the
+    # generic-eligible counts.
+    require("kGenericAttribMax" in gl_entry_census_h and
+            "NoteDisableArray" in gl_entry_census_h and
+            "PositionAttribIndex" in gl_entry_census_h and
+            "PositionBufferBacked" in gl_entry_census_h and
+            "genericAttributeEnabled" in vertex_observe_h and
+            "genericPositionBufferId" in vertex_observe_h and
+            "genericEligible" in stereo_dual_h and
+            "genericBufferBacked" in stereo_dual_h and
+            "Hook_glDisableVertexAttribArray" in (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8") and
+            "genericPositionBufferId" in (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8") and
+            "gbacked=%u" in stereo_renderer_cpp and
+            (ROOT / "docs/adr/0508-gh76-generic-attribute-array-source.md").exists(),
+            "GH #76 / GH #90 / ADR-0508: the per-eye pass must classify draws by the "
+            "array source the engine actually uses (the per-index generic-attribute "
+            "record + bind-time GL_ARRAY_BUFFER + the position/queries), not only by "
+            "a decodable fixed-function client array -- ADR-0507 measured that array "
+            "to be null by design on the world draws")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never
