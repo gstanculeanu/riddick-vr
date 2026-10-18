@@ -171,6 +171,12 @@ public:
     static void BindRealFramebuffer(GLenum target, GLuint fbo) {
         if (real_glBindFramebuffer) real_glBindFramebuffer(target, fbo);
     }
+    // GH #76 (interim depth-based reprojection, ADR-0501): the last non-zero
+    // framebuffer the engine bound for drawing. The engine renders the 3D scene
+    // into its own FBO and presents a colour-only copy to the window, so the
+    // window's depth buffer reads uniformly far (measured live); this is the id
+    // whose depth attachment carries the scene depth. 0 = none seen yet.
+    static GLuint GetLastBoundFramebuffer();
     static PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers;
     static PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers;
     static PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D;

@@ -60,6 +60,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND RIDDICKVR_BUILD_PROXY)
         src/hook/vertex_submission_observe.h
         src/hook/immediate_mode_observe.h
         src/hook/projection_near.h
+        src/hook/depth_parallax.h
         src/hook/display_branch.h
         src/hook/sim_input_bridge.h
         src/hook/sim_input_bridge_win32.cpp
@@ -234,6 +235,16 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
     )
     add_test(NAME projection_near COMMAND riddick_vr_projection_near_tests)
+
+    # GH #76 (interim depth-based reprojection, ADR-0501): the pure warp math --
+    # window depth -> view distance for both projection conventions, distance ->
+    # per-eye source-pixel shift, the IPD from the eye views, and the nearest
+    # depth of a grid cell. Pure, headless.
+    add_executable(riddick_vr_depth_parallax_tests tests/depth_parallax_tests.cpp)
+    target_include_directories(riddick_vr_depth_parallax_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hook
+    )
+    add_test(NAME depth_parallax COMMAND riddick_vr_depth_parallax_tests)
 
     # GH #61: the baked diffuse + the arm mesh UVs must be skin-toned, never a
     # white / flat patch (refutes the "decodes white" premise that disabled it).

@@ -57,6 +57,9 @@ OpenGLProxy::PFN_glFinish OpenGLProxy::glFinish = nullptr;
 OpenGLProxy::PFN_real_glClear OpenGLProxy::real_glClearFunc = nullptr;
 PFNGLBINDFRAMEBUFFERPROC OpenGLProxy::real_glBindFramebuffer = nullptr;
 
+// GH #76 (ADR-0501): last non-zero draw framebuffer the engine bound.
+static GLuint s_lastBoundFramebuffer = 0;
+
 // Real WGL & GL Typedefs
 typedef HGLRC (WINAPI *PFN_wglCreateContext)(HDC);
 typedef BOOL  (WINAPI *PFN_wglDeleteContext)(HGLRC);
@@ -744,9 +747,19 @@ void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
 
 void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffer) {
     RiddickVR_EnsureHookInitialized();
+    // GH #76 (ADR-0501): remember the last non-zero draw framebuffer the engine
+    // bound. The 3D scene's depth lives in the engine's own FBO, not in the
+    // window backbuffer (measured: the window depth reads uniformly far).
+    if (framebuffer != 0 && target != 0x8CA8 /* GL_READ_FRAMEBUFFER */) {
+        s_lastBoundFramebuffer = framebuffer;
+    }
     if (real_glBindFramebuffer) {
         real_glBindFramebuffer(target, framebuffer);
     }
+}
+
+GLuint OpenGLProxy::GetLastBoundFramebuffer() {
+    return s_lastBoundFramebuffer;
 }
 
 // GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program path. These are

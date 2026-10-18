@@ -3,6 +3,7 @@
 #include "vr_hand_renderer.h"
 #include "vr_config.h" // GH #9: ComfortEnabled / ComfortMaxDim gate
 #include "display_branch.h" // GH #72 req 1: cold-start full-bleed latch
+#include "depth_parallax.h" // GH #76 interim: depth-based per-eye reprojection
 #include "logging.h"
 #include <tlhelp32.h>
 #include <algorithm>
@@ -323,6 +324,157 @@ void ApplyComfortVignetteToEye(GLuint fbo, float maxAlpha, uint32_t eyeW, uint32
 }
 
 } // namespace (file-local)
+
+// ---------------------------------------------------------------------------
+// GH #76 (interim depth-based reprojection, ADR-0501).
+//
+// The renderer captures the game's backbuffer ONCE and blits it into both eye
+// FBOs. The single global half-IPD shift has no depth dependence, so XRSIM
+// classifies every frame `stereo_kind: shift-only` (ADR-0461). True per-eye
+// rendering is architecturally blocked on this title (the engine's transform is
+// applied engine-side with an identity modelview and the hook cannot ask for a
+// second view); the interim the issue names is a depth-based reprojection.
+//
+// Here: read the engine's own depth buffer (throttled), reduce it to a coarse
+// grid, and give each grid cell a horizontal source shift that depends on that
+// cell's nearest depth. The image is then blitted cell-by-cell per eye with
+// +/-disp/2, so disparity finally varies with depth. Purely observational:
+// it never changes the game's own render, and it falls back to the legacy
+// uniform shift whenever the depth signal is unusable.
+namespace {
+
+typedef void (WINAPI *DibrReadPixels_t)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
+
+static DibrReadPixels_t s_dibrReadPixels = nullptr;
+static bool s_dibrReadTried = false;
+
+static DibrReadPixels_t DibrReadPixels() {
+    if (!s_dibrReadTried) {
+        s_dibrReadTried = true;
+        HMODULE hReal = OpenGLProxy::GetRealOpenGLModule();
+        if (!hReal) hReal = GetModuleHandleA("opengl32.dll");
+        if (hReal) s_dibrReadPixels = (DibrReadPixels_t)GetProcAddress(hReal, "glReadPixels");
+    }
+    return s_dibrReadPixels;
+}
+
+struct DibrGrid {
+    int cols = 0;
+    int rows = 0;
+    std::vector<float> fullDispPx; // cols*rows full-IPD disparity, 0 = unknown
+    float minZ = 0.0f, maxZ = 0.0f;
+    float minDisp = 0.0f, maxDisp = 0.0f;
+    int validCells = 0;
+    int depthW = 0, depthH = 0;    // depth buffer the grid was built from
+    GLuint fbo = 0;                // engine FBO used (0 = window backbuffer)
+    bool valid = false;            // a usable, depth-varying warp
+};
+
+static DibrGrid s_dibrGrid;
+static std::vector<float> s_dibrDepth;
+static int s_dibrCountdown = 0;     // swaps until the next depth readback
+
+// Read the depth of the active region and reduce it to the per-cell warp. Does
+// NOT throw: every failure leaves `s_dibrGrid.valid == false` (legacy fallback).
+//
+// Two depth sources are tried, in order:
+//   1. the window backbuffer's depth;
+//   2. the engine's own last-bound FBO depth (measured: the engine renders the
+//      3D scene into its own FBO and presents a colour-only copy, so the window
+//      depth reads uniformly far). The FBO resolves against its OWN viewport and
+//      the cells are mapped to the source rect by normalised coordinates, so a
+//      size difference between the FBO and the window is not a problem.
+static void BuildDibrGrid(GLint ox, GLint oy, GLint srcW, GLint srcH,
+                          const float* proj, float baselineM) {
+    s_dibrGrid.valid = false;
+    DibrReadPixels_t read = DibrReadPixels();
+    if (!read || srcW < 8 || srcH < 8) return;
+    const int cols = g_vrConfig.dibrCols;
+    const int rows = g_vrConfig.dibrRows;
+    // Bounded readback: refuse an absurd buffer rather than allocate it.
+    if (static_cast<double>(srcW) * static_cast<double>(srcH) > 4.0e6) return;
+
+    const float fPx = FocalPixelsFromProjection(proj, srcW);
+    if (!(fPx > 0.0f)) return;
+
+    // Reduce a filled depth buffer of dw x dh to the per-cell warp; returns true
+    // when the depth varies enough to be a usable signal.
+    auto reduce = [&](int dw, int dh) -> bool {
+        if (dw < 8 || dh < 8) return false;
+        s_dibrDepth.resize(static_cast<size_t>(dw) * static_cast<size_t>(dh));
+        s_dibrGrid.cols = cols;
+        s_dibrGrid.rows = rows;
+        s_dibrGrid.depthW = dw;
+        s_dibrGrid.depthH = dh;
+        s_dibrGrid.fullDispPx.assign(static_cast<size_t>(cols) * static_cast<size_t>(rows), 0.0f);
+        float minZ = 0.0f, maxZ = 0.0f, minD = 0.0f, maxD = 0.0f;
+        int valid = 0;
+        for (int r = 0; r < rows; ++r) {
+            const int y0 = (r * dh) / rows;
+            const int y1 = ((r + 1) * dh) / rows;
+            for (int c = 0; c < cols; ++c) {
+                const int x0 = (c * dw) / cols;
+                const int x1 = ((c + 1) * dw) / cols;
+                const float z = CellMinViewZ(s_dibrDepth.data(), dw, dh, x0, y0, x1, y1, proj);
+                if (!(z > 0.0f)) continue;
+                const float disp = ParallaxShiftPx(z, fPx, baselineM, g_vrConfig.dibrStrength);
+                s_dibrGrid.fullDispPx[static_cast<size_t>(r) * cols + c] = disp;
+                if (valid == 0) {
+                    minZ = maxZ = z;
+                    minD = maxD = disp;
+                } else {
+                    if (z < minZ) minZ = z;
+                    if (z > maxZ) maxZ = z;
+                    if (disp < minD) minD = disp;
+                    if (disp > maxD) maxD = disp;
+                }
+                ++valid;
+            }
+        }
+        s_dibrGrid.validCells = valid;
+        s_dibrGrid.minZ = minZ;
+        s_dibrGrid.maxZ = maxZ;
+        s_dibrGrid.minDisp = minD;
+        s_dibrGrid.maxDisp = maxD;
+        // A usable warp needs depth that actually varies across the frame. A
+        // uniform read (no depth buffer / a cleared depth) must fall back to the
+        // legacy uniform shift rather than flatten the image to zero disparity.
+        return (valid > 0) && ((maxD - minD) >= 0.5f);
+    };
+
+    // 1. Window backbuffer depth (the read framebuffer is already 0/GL_BACK).
+    read(ox, oy, srcW, srcH, 0x1902 /*GL_DEPTH_COMPONENT*/, 0x1406 /*GL_FLOAT*/,
+         s_dibrDepth.data());
+    s_dibrGrid.fbo = 0;
+    s_dibrGrid.valid = reduce(srcW, srcH);
+    if (s_dibrGrid.valid) return;
+
+    // 2. The engine's own FBO depth, resolved against its own viewport.
+    const GLuint fbo = OpenGLProxy::GetLastBoundFramebuffer();
+    if (fbo == 0 || !OpenGLProxy::real_glBindFramebuffer) return;
+    typedef void (WINAPI *DibrGetIntegerv_t)(GLenum, GLint*);
+    static DibrGetIntegerv_t s_getIntegerv = nullptr;
+    if (!s_getIntegerv) {
+        HMODULE hReal = OpenGLProxy::GetRealOpenGLModule();
+        if (!hReal) hReal = GetModuleHandleA("opengl32.dll");
+        if (hReal) s_getIntegerv = (DibrGetIntegerv_t)GetProcAddress(hReal, "glGetIntegerv");
+    }
+    if (!s_getIntegerv) return;
+    OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, fbo);
+    GLint vp[4] = { 0, 0, 0, 0 };
+    s_getIntegerv(0x0BA2 /* GL_VIEWPORT */, vp);
+    bool used = false;
+    if (vp[2] >= 8 && vp[3] >= 8 && vp[0] >= 0 && vp[1] >= 0 &&
+        static_cast<double>(vp[2]) * static_cast<double>(vp[3]) <= 4.0e6) {
+        read(vp[0], vp[1], vp[2], vp[3], 0x1902, 0x1406, s_dibrDepth.data());
+        used = reduce(vp[2], vp[3]);
+    }
+    if (used) s_dibrGrid.fbo = fbo;
+    OpenGLProxy::real_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, 0);
+    s_dibrGrid.valid = used;
+}
+
+} // namespace (DIBR helpers)
 
 bool StereoRenderer::Initialize(HDC hdc, HGLRC hglrc) {
     if (m_initialized) return true;
@@ -950,6 +1102,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             // Track C #9: comfort vignette adds a motion-scaled extra shift.
             // Desktop mirror is untouched: only eye-FBO source rects shift.
             GLint spanW = ax1 - ax0;
+            GLint spanH = ay1 - ay0;
             GLint halfIpdPx = (std::max)(1, spanW / 240);
             GLint comfortPx = 0;
             if (m_sharedState.comfortVignette > 0.01f) {
@@ -961,6 +1114,66 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
             GLint rightSrcX0 = ax0 + halfIpdPx + comfortPx;
             GLint rightSrcX1 = ax1 + halfIpdPx + comfortPx;
 
+            // GH #76 (interim depth-based reprojection, ADR-0501): when enabled
+            // and the engine's depth is usable, replace the single global shift
+            // with a per-cell shift derived from the scene depth, so disparity
+            // varies with depth instead of being a flat translation. Falls back
+            // to the legacy uniform shift whenever the depth read is unusable.
+            const float* dibrProj = OpenGLProxy::GetLastProjectionMatrix();
+            bool useDibr = false;
+            if (g_vrConfig.stereoParallaxDibr && dibrProj != nullptr) {
+                if (s_dibrCountdown <= 0) {
+                    s_dibrCountdown = g_vrConfig.dibrDepthEvery;
+                    const float baseline = EyeBaselineMeters(m_sharedState.leftEyeView.m,
+                                                             m_sharedState.rightEyeView.m, 0.065f);
+                    BuildDibrGrid(ax0, ay0, spanW, spanH, dibrProj, baseline);
+                    static uint32_t s_dibrLogThrottle = 0;
+                    if (++s_dibrLogThrottle >= 12) {
+                        s_dibrLogThrottle = 0;
+                        VR_LOG_INFO("DIBR: grid=%dx%d depth=%dx%d fbo=%u depth_z=[%.2f..%.2f]m "
+                                    "fullDisp=[%.2f..%.2f]px baseline=%.3fm valid=%d/%d use=%d",
+                                    s_dibrGrid.cols, s_dibrGrid.rows, s_dibrGrid.depthW, s_dibrGrid.depthH,
+                                    (unsigned)s_dibrGrid.fbo, s_dibrGrid.minZ, s_dibrGrid.maxZ,
+                                    s_dibrGrid.minDisp, s_dibrGrid.maxDisp, baseline,
+                                    s_dibrGrid.validCells, s_dibrGrid.cols * s_dibrGrid.rows,
+                                    (int)s_dibrGrid.valid);
+                    }
+                    useDibr = s_dibrGrid.valid;
+                } else {
+                    --s_dibrCountdown;
+                    useDibr = s_dibrGrid.valid;
+                }
+            }
+
+            if (useDibr) {
+                const int cols = s_dibrGrid.cols;
+                const int rows = s_dibrGrid.rows;
+                for (int eye = 0; eye < 2; ++eye) {
+                    const bool isLeft = (eye == 0);
+                    for (int r = 0; r < rows; ++r) {
+                        const GLint sy0 = ay0 + (r * spanH) / rows;
+                        const GLint sy1 = ay0 + ((r + 1) * spanH) / rows;
+                        // The legacy single blit flips vertically (src top ->
+                        // dst bottom); reproduce that per cell.
+                        const GLint dy0 = dstY + ((rows - 1 - r) * dstH) / rows;
+                        const GLint dy1 = dstY + ((rows - r) * dstH) / rows;
+                        for (int c = 0; c < cols; ++c) {
+                            const GLint sx0 = ax0 + (c * spanW) / cols;
+                            const GLint sx1 = ax0 + ((c + 1) * spanW) / cols;
+                            const GLint dx0 = dstX + (c * dstW) / cols;
+                            const GLint dx1 = dstX + ((c + 1) * dstW) / cols;
+                            const float full = s_dibrGrid.fullDispPx[
+                                static_cast<size_t>(r) * cols + c];
+                            const float v = (isLeft ? -0.5f : 0.5f) * full;
+                            const int shift = static_cast<int>(v >= 0.0f ? v + 0.5f : v - 0.5f);
+                            BlitEye(isLeft, sx0 + shift, sy1, sx1 + shift, sy0,
+                                    dx0, dy0, dx1, dy1);
+                        }
+                    }
+                    // Render always-visible 3D VR tactical hands into this eye.
+                    VRHandRenderer::Instance().RenderHands(m_sharedState, isLeft, m_eyeWidth, m_eyeHeight);
+                }
+            } else {
             // Blit active gameplay region full-bleed into both eyes
             // (y-flipped src: top-down into GL bottom-up).
             // In gameplay mode (dstX=0, dstY=0, dstW=m_eyeWidth, dstH=m_eyeHeight),
@@ -975,6 +1188,7 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
 
             // Render always-visible 3D VR tactical hands into Right Eye buffer
             VRHandRenderer::Instance().RenderHands(m_sharedState, false, m_eyeWidth, m_eyeHeight);
+            }
 
             // GH #9: true dynamic locomotion comfort vignette. Peripheral
             // dimming over each eye FBO (desktop mirror untouched). Zero cost

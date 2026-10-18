@@ -182,6 +182,20 @@ void LoadVRConfig() {
         // branch (default off; provisional thresholds, needs one live A/B).
         cfg.displayBranchColdStartLatch = ReadInt(iniPath, "DisplayBranchColdStartLatch", cfg.displayBranchColdStartLatch) ? 1 : 0;
         VR_LOG_INFO("Display branch config: cold_start_latch=%d", cfg.displayBranchColdStartLatch);
+        // GH #76 (interim, ADR-0501): depth-based per-eye reprojection.
+        cfg.stereoParallaxDibr = ReadInt(iniPath, "StereoParallaxDibr", cfg.stereoParallaxDibr) ? 1 : 0;
+        cfg.dibrStrength = ClampF(ReadFloat(iniPath, "DibrStrength", cfg.dibrStrength), 0.0f, 4.0f);
+        cfg.dibrDepthEvery = ReadInt(iniPath, "DibrDepthEvery", cfg.dibrDepthEvery);
+        if (cfg.dibrDepthEvery < 1) cfg.dibrDepthEvery = 1;
+        if (cfg.dibrDepthEvery > 60) cfg.dibrDepthEvery = 60;
+        cfg.dibrCols = ReadInt(iniPath, "DibrCols", cfg.dibrCols);
+        if (cfg.dibrCols < 1) cfg.dibrCols = 1;
+        if (cfg.dibrCols > 64) cfg.dibrCols = 64;
+        cfg.dibrRows = ReadInt(iniPath, "DibrRows", cfg.dibrRows);
+        if (cfg.dibrRows < 1) cfg.dibrRows = 1;
+        if (cfg.dibrRows > 64) cfg.dibrRows = 64;
+        VR_LOG_INFO("Stereo parallax (DIBR interim): enabled=%d strength=%.2f depth_every=%d grid=%dx%d",
+            cfg.stereoParallaxDibr, cfg.dibrStrength, cfg.dibrDepthEvery, cfg.dibrCols, cfg.dibrRows);
         VR_LOG_INFO("VR config loaded from %s (snap=%.0f move_dz=%.2f comfort=%d seated=%d scale=%.2f paw=%d native_hands=%d native_pose=%d native_tex=%d native_rot=[%.0f,%.0f,%.0f] guard_y=[%.2f,%.2f] guard_z=[%.2f,%.2f] guard_span=%.2f strike=[fwdVz=%.2f hookVx=%.2f upperVy=%.2f crossVx=%.2f] suppress_viewmodel=%d depth_window=%d)",
             iniPath, cfg.snapAngleDeg, cfg.moveDeadzone, cfg.comfortEnabled,
             cfg.seated, cfg.worldScale, cfg.southpaw, cfg.nativeHands,

@@ -263,6 +263,25 @@ the run is labelled `shift-only`. `--require-parallax` (or a scenario's
 acceptance instrument for GH #76. It is **off by default** (the shift is the
 current documented interim), so a default run's verdict is unchanged.
 
+**Interim depth-based reprojection (GH #76, ADR-0501, wake 99):** the issue's
+option 2 is implemented behind `StereoParallaxDibr=1` (default **off**): the
+single uniform-shift blit is replaced by a `DibrCols x DibrRows` grid of blits,
+each cell shifted by its own depth-derived disparity (`fPx * IPD / z`, left
+`-disp/2` / right `+disp/2`), so disparity varies with depth. It **falls back**
+to the legacy uniform shift whenever the reduced depth grid does not vary
+(`>= 0.5 px`), so a missing depth buffer can never flatten the image. Live
+measurement on the reached level: the window backbuffer's depth reads
+**uniformly far** (`2048.01 m`) on 347/348 grid rebuilds, so the warp falls back
+and the run stays `shift-only`; the engine's own FBO (`fbo=6`) is not a usable
+depth source either; but **one** sampled frame exposed real world depth
+(`z=[4.00..2048.01] m`, `fullDisp=[0.03..14.11] px`, `use=1`), so the mechanism
+works when depth is present — the source is unreliable **at `SwapBuffers`
+time**. Next: capture the world-pass depth inside `Hook_glClear` at the mid-frame
+depth-only clear (the viewmodel-window opener), before the engine clears it.
+Also recorded: `CameraHook::StabilizeViewMatrix` (the ADR-0406 "intended seam")
+is **dead code** (no call sites); head-look is injected as mouse movement, so
+per-eye dual rendering has no engine hook seam on this title.
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

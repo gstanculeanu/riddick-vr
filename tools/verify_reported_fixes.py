@@ -969,6 +969,40 @@ def main():
             "global shift (monoscopic blit) or depth-varying parallax, report it "
             "as stereo_kind, and grade it with --require-parallax")
 
+    # GH #76 (interim depth-based reprojection, ADR-0501): the issue's option 2 --
+    # keep the single capture but make each region's horizontal shift depend on
+    # the scene depth -- is implemented behind an opt-in flag with a safe
+    # fallback, and its depth source is measured. The guard pins the pure warp
+    # math, the renderer wiring (grid blits + the engine-FBO depth source), the
+    # config keys, the headless test, and the ADR, so the interim cannot silently
+    # disappear or be reverted to a single global shift without a red.
+    depth_parallax_h = (ROOT / "src/hook/depth_parallax.h").read_text(encoding="utf-8")
+    stereo_renderer_cpp = (ROOT / "src/hook/stereo_renderer.cpp").read_text(encoding="utf-8")
+    opengl_proxy_h = (ROOT / "src/hook/opengl_proxy.h").read_text(encoding="utf-8")
+    opengl_proxy_cpp = (ROOT / "src/hook/opengl_proxy.cpp").read_text(encoding="utf-8")
+    vr_config_h = (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8")
+    require("inline float DepthToViewZ" in depth_parallax_h and
+            "inline float ParallaxShiftPx" in depth_parallax_h and
+            "inline float EyeBaselineMeters" in depth_parallax_h and
+            "inline float CellMinViewZ" in depth_parallax_h and
+            "kMaxParallaxShiftPx" in depth_parallax_h and
+            "BuildDibrGrid" in stereo_renderer_cpp and
+            "s_dibrGrid.fullDispPx" in stereo_renderer_cpp and
+            "GL_DEPTH_COMPONENT" in stereo_renderer_cpp and
+            "GetLastBoundFramebuffer" in stereo_renderer_cpp and
+            "GetLastBoundFramebuffer" in opengl_proxy_h and
+            "s_lastBoundFramebuffer" in opengl_proxy_cpp and
+            "stereoParallaxDibr" in vr_config_h and
+            "dibrStrength" in vr_config_h and
+            "tests/depth_parallax_tests.cpp" in
+            (ROOT / "CMakeLists.txt").read_text(encoding="utf-8") and
+            (ROOT / "tests/depth_parallax_tests.cpp").exists() and
+            (ROOT / "docs/adr/0501-gh76-interim-depth-reprojection-and-its-depth-source.md").exists(),
+            "GH #76 / ADR-0501: the interim depth-based per-eye reprojection must "
+            "exist (pure warp math + the depth-varying grid blits + the "
+            "engine-FBO depth source), be opt-in via StereoParallaxDibr, and stay "
+            "covered by the headless depth_parallax test")
+
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline
     # (identity rotation, +/- half-IPD, identical projections -- mock mode never

@@ -2,6 +2,92 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 99 — 2026-10-18 12:44 (scheduled loop)
+- **Unit:** GH **#76 NATIVE STEREO (top gap, epic #57 DoD item 1)** — the issue's
+  **interim option 2** (depth-based per-eye reprojection) is implemented behind an
+  opt-in flag with a safe fallback, and **its depth source is measured
+  unavailable at swap time** (ADR-0501). Real C++ change -> `build-all` + CTest on
+  both arches; three live runs on read-only per-run shadows (no deploy, no install
+  write).
+- **Why this unit:** the standing prompt's top item. Route **(1)** (per-eye
+  view/projection, "the intended seam `CameraHook::StabilizeViewMatrix`,
+  ADR-0406") is measured **architecturally blocked**: the function is **dead
+  code** (declared `camera_hook.h:18`, defined `camera_hook.cpp:327`, **zero call
+  sites**), `ScanForCameraSignature()` is `return false;`, and head-look is
+  injected as **mouse movement** — the hook never touches the engine's view
+  matrix and cannot ask for a second render (consistent with ADR-0481/0482: the
+  engine applies its transform engine-side with an identity GL modelview).
+- **Change:**
+  - **NEW `src/hook/depth_parallax.h`** (pure, headless): `DepthToViewZ` (both
+    projection conventions; the engine's z-flipped one from ADR-0488),
+    `ParallaxShiftPx` (`fPx*IPD/z`, clamped to 128 px), `FocalPixelsFromProjection`,
+    `EyeBaselineMeters` (from the host's per-eye views), `CellMinViewZ`.
+  - `src/hook/stereo_renderer.cpp`: opt-in `StereoParallaxDibr=1` replaces the
+    single uniform-shift blit with a `DibrCols x DibrRows` grid of blits, each
+    cell shifted by its own depth-derived disparity (left `-disp/2`, right
+    `+disp/2`). Depth is read from (1) the window backbuffer and (2) the engine's
+    last non-zero draw FBO, resolved against its viewport. **Fail-safe:** used only
+    when the reduced grid varies (`>= 0.5 px`), else the legacy uniform shift.
+  - `src/hook/opengl_proxy.{h,cpp}`: track the last non-zero draw framebuffer
+    (`Hook_glBindFramebuffer`) and expose it (`GetLastBoundFramebuffer`).
+  - `src/hook/vr_config.{h,cpp}` + `tools/riddick_vr.ini.example`: new keys
+    `StereoParallaxDibr` (default **0**), `DibrStrength`, `DibrDepthEvery`,
+    `DibrCols`, `DibrRows`.
+  - **NEW `tests/depth_parallax_tests.cpp`** (CTest `depth_parallax`, both
+    arches); **NEW `docs/adr/0501-…`**; `tools/verify_reported_fixes.py` new
+    #76/ADR-0501 invariant; `docs/vr-scenarios.md` + `docs/adr/README.md` (head ->
+    0501).
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook + x64
+  host); **CTest 29/29 (x86) and 27/27 (x64)** (+1 each); all 12 `tools/test_*.py`
+  exit 0; `xrsim --selftest`, `verify_reported_fixes`, `scenario_tests.py --check`,
+  `verify_hook_init`, `validate_addresses`, `verify_test_artifacts` all PASS.
+- **EVIDENCE live (3 read-only per-run shadows, `RIDDICKVR_SIM=1`,
+  `--reach-gameplay --duration 80 --advance-menu --advance-min-taps 8
+  --require-fresh-hook --require-parallax --downscale 4 --ini
+  StereoParallaxDibr=1`; all reached full-bleed gameplay fill 1.00;
+  `deployed_hook_matches_build` PASS in each):**
+  - **Run A** (build `e6a2314dc3f1`): **347** grid rebuilds, every one
+    `depth_z=[2048.01..2048.01]m fullDisp=[0.03..0.03]px valid=48/48 use=0` — the
+    window backbuffer's depth is **uniformly at the far plane** while the *colour*
+    backbuffer is populated (BarScan fill 1.00).
+  - **Run B** (build `749d7ef68ff0`, adds the engine-FBO source): **344/344**
+    `use=0 fbo=6` — the engine **does** bind its own FBO (id 6) but **its** depth
+    also reads far.
+  - **Run C** (build `2f4b28e1d69b`, FBO viewport-resolved): depth read is
+    window/FBO `0` at `~1216x605`; **one** sampled frame exposed real world depth
+    — `depth=1209x603 depth_z=[4.00..2048.01]m fullDisp=[0.03..14.11]px valid=48/48
+    use=1` (a real 4.0 m world near plane, ADR-0488, with a 14 px disparity range)
+    — so the warp **works when depth is present**; the source is just unreliable
+    **at `SwapBuffers` time** (~1 of 120 sampled frames).
+  - **No regression:** with the flag on, the graded gameplay frames are still
+    `stereo_kind: shift-only` and every other stereo/capture check passes
+    (`both_eyes_non_black`, `no_vertical_disparity`, `same_eye_resolution`,
+    `not_mono_duplicate`, `gameplay_full_bleed_reached`); `--require-parallax` FAILs
+    naming the shift (the honest verdict). `StereoParallaxDibr=0` stays the default.
+- **Verdict / consequence (honest):** GH #76's *named* interim depth source (the
+  window backbuffer's depth at `SwapBuffers`) is **not reliably available** on this
+  title; the engine's own FBO is not a usable substitute. Route (1) has **no
+  engine hook seam** on this title (the ADR-0406 seam is dead code). The interim
+  mechanism is landed and safe; its depth source is the blocker.
+- **Blocker / honest limit:** the depth is absent for a **timing/present-path**
+  reason (real depth appears on some frames), not a math/GL-call reason — the exact
+  cause is not identified. The engine FBO `6`'s identity is not established. The
+  `--require-parallax` gate fails; nothing about the 2004 build; no headset; the
+  disparity sign is provisional (unvalidated on a headset).
+- **Next:** (1) **capture the world-pass depth at a deterministic point** — read it
+  inside `Hook_glClear` when the mask is `GL_DEPTH_BUFFER_BIT` alone (the mid-frame
+  depth-only clear that opens the viewmodel window, ADR-0439), before the engine
+  clears it, and cache that grid for the swap; (2) failing that, identify the
+  engine's depth attachment (its FBO `6` depth is not it, or not readable after
+  unbind); (3) route (1) proper needs an engine render seam (a second view) —
+  scope it separately, the ADR-0406 seam is unavailable; (4) `StereoParallaxDibr=0`
+  stays the default; (5) GH #63/#64 (hands), then the P1 bugs #45/#49/#50/#51/#65;
+  (6) `DEFAULT_GAME_DIR` 2004-vs-2009; (7) GH #83/#88.
+- **Branch:** committed on **main** (single-writer) and pushed; install untouched
+  (READ-ONLY per-run shadows under `%TEMP%`; no deploy, no install write); no
+  leftover game/host processes; live lock released. `STATE.log` **appended**
+  (never replaced — GH #88).
+
 ## Wake 98 — 2026-10-18 12:00 (scheduled loop)
 - **Unit:** GH **#67 state question (ADR-0499)** — XRSIM gains a sim-safe
   **in-level key drive**, posting the *player profile's own scan codes* to the
