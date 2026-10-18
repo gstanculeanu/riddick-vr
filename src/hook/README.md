@@ -158,9 +158,13 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   `display_branch_cold_start_latch`) adds a *cold-start* latch: while
   `DisplayBranchColdStartLatch=1`, a fill `<= 0.75` is cinema until the first
   full-bleed fill `>= 0.90` is ever measured; after that the demotion can never
-  fire again, so GH #44 is unaffected. **Off by default** (provisional
-  thresholds; needs one live A/B). The `DisplayMode` line now carries
-  `latch=.. fill=.. fullBleed=..`. See ADR-0459.
+  fire again, so GH #44 is unaffected. **On by default since the 2026-10-18 live
+  A/B (ADR-0478):** a live XRSIM run demoted the letterboxed startup page
+  (`fill=0.40`) to cinema and still reached full-bleed gameplay
+  (`fill=1.00 fullBleed=1`); no full-bleed page appeared before gameplay. Set
+  `DisplayBranchColdStartLatch=0` for the legacy bit. The `DisplayMode` line now
+  carries `latch=.. fill=.. fullBleed=..`, and the latch logs its own demotion
+  once (`cold-start latch demoted ...`). See ADR-0459 / ADR-0478.
 
 
 

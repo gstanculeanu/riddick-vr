@@ -143,11 +143,11 @@ struct VRConfig {
     // GH #72 req 1: demote a *letterboxed* frame to the cinema branch until the
     // first full-bleed frame is ever seen, so the static 2D startup splash is
     // not published as 3D gameplay (the `cinemaMode` bit the XRSIM dump gate and
-    // the per-frame stereo skip trust). Default OFF: the BarScan fill thresholds
-    // (0.90 full-bleed / 0.75 letterboxed) are provisional and the "a
-    // full-bleed page appears before gameplay" case needs one live A/B
-    // (ADR-0459).
-    int displayBranchColdStartLatch = 0;
+    // the per-frame stereo skip trust). Default ON since the 2026-10-18 live
+    // A/B (ADR-0478): the latch demoted the letterboxed startup page in a live
+    // run while real gameplay still reached full-bleed, and no full-bleed page
+    // appeared before gameplay. Set 0 for the legacy verdict.
+    int displayBranchColdStartLatch = 1;
 };
 
 extern VRConfig g_vrConfig;

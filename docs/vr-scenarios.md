@@ -97,7 +97,7 @@ scenario playback until gameplay is reached is follow-up work (#71/#72), and the
 (**addressed** by GH #72 requirement 1 / ADR-0459: an opt-in
 `DisplayBranchColdStartLatch` demotes a clearly letterboxed frame — BarScan fill
 `<= 0.75` — to cinema until the first full-bleed frame `>= 0.90` is ever
-measured; default off, needs one live A/B).
+measured; **on by default** since the 2026-10-18 live A/B, ADR-0478).
 
 **Caveat (GH #71 requirement 1, ADR-0466):** a mock run currently **stalls on the
 "PRESS ENTER" splash** and never reaches gameplay. `RIDDICKVR_SIM=1` suppresses

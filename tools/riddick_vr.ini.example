@@ -159,5 +159,5 @@ ViewmodelDriveRoll=0
 ; rect <= 0.75 of the window) to the cinema branch until the first full-bleed
 ; frame (>= 0.90) is measured, so the static 2D startup splash is not published
 ; as 3D gameplay. Once the latch is set it never fires again (GH #44 safe).
-; Default 0: provisional thresholds, needs one live A/B.
-DisplayBranchColdStartLatch=0
+; Default 1 since the 2026-10-18 live A/B (ADR-0478); set 0 for the legacy bit.
+DisplayBranchColdStartLatch=1

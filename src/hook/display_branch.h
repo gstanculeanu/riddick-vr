@@ -22,16 +22,19 @@
 // demotion can never fire again, so GH #44 (real gameplay that still carries
 // engine-baked bars) is unaffected after the first gameplay frame.
 //
-// Off by default (`DisplayBranchColdStartLatch=0`): the thresholds are
-// provisional and the "a full-bleed page appears before gameplay" case needs
-// one live A/B before the bit is trusted by default.
+// On by default (`DisplayBranchColdStartLatch=1`) since the 2026-10-18 live
+// A/B (ADR-0478): in a live XRSIM run the latch demoted the letterboxed startup
+// page (BarScan fill 0.40) to cinema while real gameplay still reached
+// full-bleed (fill 1.00, `fullBleed=1`), and no full-bleed page appeared before
+// gameplay (the case the header above said needed the A/B). Set
+// `DisplayBranchColdStartLatch=0` for the legacy verdict.
 //
 // Pure and dependency-free so the decision is unit-tested headlessly.
 
 namespace RiddickVR {
 
 struct DisplayBranchConfig {
-    bool coldStartLatch = false;
+    bool coldStartLatch = true;
     // Active-rect area / window area at or above which a frame counts as
     // full-bleed (live gameplay, measured 1.00).
     float fullBleedFill = 0.90f;

@@ -404,7 +404,8 @@ def main():
     # structural input (splash ~0.31-0.36 vs gameplay 1.00); a *cold-start* latch
     # demotes a clearly letterboxed frame until the first full-bleed frame has
     # ever been seen (so gameplay with engine-baked bars is unaffected, GH #44).
-    # Opt-in: the thresholds are provisional and need one live A/B.
+    # Default ON since the 2026-10-18 live A/B (ADR-0478): a live run demoted the
+    # letterboxed startup page and still reached full-bleed gameplay.
     display_branch = (ROOT / "src/hook/display_branch.h").read_text(encoding="utf-8")
     config_header = (ROOT / "src/hook/vr_config.h").read_text(encoding="utf-8")
     config_source = (ROOT / "src/hook/vr_config.cpp").read_text(encoding="utf-8")
@@ -412,16 +413,20 @@ def main():
     require("ComputeDisplayBranch" in display_branch and
             "DisplayBranchConfig" in display_branch and
             "coldStartLatch" in display_branch and
+            "bool coldStartLatch = true;" in display_branch and
             "fullBleedSeen" in display_branch and
             "ComputeDisplayBranch(" in renderer and
+            "cold-start latch demoted" in renderer and
             "displayBranchColdStartLatch" in config_header and
+            "int displayBranchColdStartLatch = 1;" in config_header and
             'ReadInt(iniPath, "DisplayBranchColdStartLatch"' in config_source and
-            "DisplayBranchColdStartLatch=0" in
+            "DisplayBranchColdStartLatch=1" in
             (ROOT / "riddick_vr.ini").read_text(encoding="utf-8") and
             "tests/display_branch_tests.cpp" in cmake and
             "display_branch_cold_start_latch" in cmake,
             "GH #72: the display branch must demote a letterboxed startup page "
-            "behind an opt-in cold-start latch driven by the BarScan fill")
+            "behind a cold-start latch (default on, ADR-0478) driven by the "
+            "BarScan fill, and report the demotion it makes")
 
     # GH #68 requirement 1: every dumped frame must record the head/eye transform
     # and projection it was rendered with, so a capture is self-describing in 3D

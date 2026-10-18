@@ -877,6 +877,20 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                 OpenGLProxy::Has3DThisFrame(), s_cursorMenu, activeFill, haveFill,
                 branchCfg, s_branchState);
             m_sharedState.cinemaMode = isCinema;
+            // GH #72 req 1 / ADR-0478: report the latch's *own* decision once, so
+            // a live run proves the demotion instead of inferring it from an
+            // absent `DisplayMode` transition (the branch simply never changes).
+            if (branchLatch && isCinema && haveFill && !s_cursorMenu &&
+                OpenGLProxy::Has3DThisFrame() &&
+                activeFill <= branchCfg.letterboxFill && !s_branchState.fullBleedSeen) {
+                static bool s_latchDemotionLogged = false;
+                if (!s_latchDemotionLogged) {
+                    s_latchDemotionLogged = true;
+                    VR_LOG_INFO("DisplayMode: cold-start latch demoted a "
+                                "letterboxed 3D frame to CINEMA (fill=%.2f "
+                                "latch=1 fullBleed=0)", activeFill);
+                }
+            }
             {
                 static bool s_lastCinema = false;
                 static bool s_cinemaLogged = false;

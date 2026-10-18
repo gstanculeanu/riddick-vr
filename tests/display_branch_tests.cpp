@@ -3,6 +3,7 @@
 // "3D gameplay" (src/hook/display_branch.h).
 //
 // These pin the semantics the branch decision relies on:
+//   - the compiled default is the latch ON (ADR-0478, live A/B),
 //   - with the latch off the verdict is exactly the legacy one,
 //   - before a fill is measured the verdict is still the legacy one,
 //   - a letterboxed fill demotes a gameplay-labelled page to cinema only while
@@ -36,10 +37,15 @@ static bool Frame(DisplayBranchState& state, const DisplayBranchConfig& cfg,
 }
 
 int main() {
+    // 0. The compiled default is ON since the 2026-10-18 live A/B (ADR-0478).
+    Check(DisplayBranchConfig().coldStartLatch,
+          "the compiled default must be the cold-start latch on (ADR-0478)");
+
     // 1. Legacy behaviour is preserved when the latch is off: a perspective
     //    frame without a menu cursor is gameplay regardless of the fill.
     {
-        DisplayBranchConfig cfg; // coldStartLatch = false
+        DisplayBranchConfig cfg;
+        cfg.coldStartLatch = false;
         DisplayBranchState st;
         Check(!Frame(st, cfg, true, false, 0.31f),
               "latch off: a letterboxed fill must not change the verdict");

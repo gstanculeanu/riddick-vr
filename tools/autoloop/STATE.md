@@ -2,6 +2,83 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 77 — 2026-10-18 03:06 (scheduled loop)
+- **Unit:** GH **#72 requirement 1** — the display-branch cold-start latch is now
+  **ON by default**, decided by the live A/B that ADR-0459 said was missing. Hook
+  (`display_branch.h` default + `vr_config.h` default + a one-shot demotion log in
+  `stereo_renderer.cpp`) + tests + ini/example + docs + ADR-0478 + the
+  `verify_reported_fixes` invariant. **No deploy** (read-only shadow installs
+  only), no game-install write.
+- **Why this unit:** it is the top of the deploy-gated ladder, it is
+  **player-visible** (GH #43/#44: the branch bit drives the cinema-screen vs
+  full-bleed decision *and* the XRSIM dump gate / per-eye stereo skip), and
+  ADR-0471's shadow install (wake 70) removed the only reason it was still
+  default-OFF ("needs one live A/B").
+- **A/B/C (live, `RIDDICKVR_SIM=1`, read-only shadow, hook = repo build,
+  `--require-fresh-hook` PASS each time).** One shadow
+  (`%TEMP%\latch-ab\shadow-doc`, source `F:\…\Assault on Dark Athena`), the two
+  first runs differ **only** in the shadow's `riddick_vr.ini`:
+  - **A (latch 0, the old default):** hook log
+    `DisplayMode: FULL-BLEED gameplay (3Dfresh=1 menuCursor=0 latch=0 fill=-1.00
+    fullBleed=0)` for a page the very next line measures as
+    `BarScan: first active rect (280,96)-(992,533) of (1280,605)` =
+    **fill 0.402** → the GH #72 mislabel, live, with the fill proving it (the
+    BarScan line only exists *because* the gameplay branch was taken).
+  - **B (latch 1 via ini, old build):** the same page produced **no** FULL-BLEED
+    transition; the branch changed only at
+    `DisplayMode: FULL-BLEED gameplay (… latch=1 fill=1.00 fullBleed=1)`.
+  - **C (new build, **no ini key** → compiled default):**
+    `Display branch config: cold_start_latch=1`, then
+    **`DisplayMode: cold-start latch demoted a letterboxed 3D frame to CINEMA
+    (fill=0.40 latch=1 fullBleed=0)`**, then
+    `FULL-BLEED … (fill=1.00 fullBleed=1)`; **XRSIM RESULT PASS** (59 gameplay
+    frames, `gameplay_full_bleed_reached` fill 1.00, `capture_gate_matches_saved`
+    59/59, `comfort_vignette_applied` PASS).
+- **Decisive:** the demotion is now an **observation** (C's own log line), not the
+  inference B needed. The case ADR-0459 wanted ("a full-bleed page appears before
+  gameplay") **did not occur** in either run: the pre-gameplay pages are
+  letterboxed (0.40) and the first full-bleed frame is real gameplay. GH #44 is
+  safe by construction (the latch can only fire before the first full-bleed
+  frame) and by pure test case 4.
+- **Bonus (GH #69):** with the splash demoted, the harness's gameplay-only dump
+  gate no longer captures the frozen splash (A dumped 111 frames starting on the
+  letterboxed page; B/C start in real gameplay).
+- **Change:** `display_branch.h` `coldStartLatch = true`; `vr_config.h`
+  `displayBranchColdStartLatch = 1`; `stereo_renderer.cpp` logs the latch's own
+  demotion once (`cold-start latch demoted …`); `tests/display_branch_tests.cpp`
+  case 0 pins the new default and case 1 now sets `coldStartLatch = false`
+  explicitly; `riddick_vr.ini` + `tools/riddick_vr.ini.example` = 1 with the A/B
+  recorded; `src/hook/README.md` + `docs/vr-scenarios.md` wording;
+  `docs/adr/0478-display-branch-cold-start-latch-default-on.md`; the #72
+  invariant now requires the default, the `=1` ini and the demotion log.
+- **Evidence (offline):** `tools/build-all.ps1 -Config Release`, **no `-Deploy`**
+  OK (x86 proxy 490496 B + x64 host); **CTest 22/22 x64, 24/24 x86** (incl.
+  `display_branch_cold_start_latch`); `tools/test_*.py` **11/11 PASS**;
+  `verify_reported_fixes` (invariant extended), `scenario_tests.py --check`,
+  `verify_hook_init`, `validate_addresses` (PASS), `verify_test_artifacts`,
+  `xrsim --selftest` all PASS.
+- **New issue filed (GH #87, measured this wake):** a live run can end with
+  DarkAthena.exe exiting in ~2 s — no hook log (or a hook log that stops during
+  renderer init), host `Game Connected: WAITING`, all capture checks FAIL — and
+  the **identical re-run PASSes**. 2 of 3 fresh-shadow first launches this
+  session (C's first attempt: host.log 25 lines, no `riddick_vr.log`; re-run C2:
+  603 lines, 6030 frames, PASS). That false red is why the retry guard is the
+  proposed fix.
+- **Blocker / honest limit:** the thresholds (0.90/0.75) are validated against
+  *this* title's startup (0.40) vs gameplay (1.00), not every page the engine can
+  show; the A/B ran on the **2009** target install (the 2004 install's startup
+  was not A/B'd); and the first live run of the session captured nothing at all
+  (GH #87). No install write: the game's `System\Win32_x86` was only read (its
+  `riddick_vr.log` mtime stayed `2026-10-18T00:25`); every run used a shadow in
+  `%TEMP%`.
+- **Next:** (1) GH #87 — detect the ~2 s game exit in `tools/xrsim.py` and retry
+  once, reporting `launch_attempts`/a distinct check instead of grading capture
+  checks (harness-only, offline-testable); (2) the rest of the ladder is now
+  live-capable via `--shadow-install` (#67 step 3 `ViewmodelObserve=1` — one run
+  yields the probe + matrix the #67 comments ask for, #68 req 5, #79 hook half,
+  #76 step 1); (3) `DEFAULT_GAME_DIR` 2004-vs-2009 retarget decision (unchanged
+  from wake 76); (4) GH #83's manual-session blind spot.
+
 ## Wake 76 — 2026-10-18 02:39 (scheduled loop)
 - **Unit:** GH **#86** — the 41 red `TRIANGLES` problems on the target install
   are **not** a 2009 variant: `TRIANGLES`, like `NODES`, is **not exclusive to
