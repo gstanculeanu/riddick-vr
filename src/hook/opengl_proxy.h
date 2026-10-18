@@ -23,7 +23,10 @@ typedef void (APIENTRY *PFNGLDELETERENDERBUFFERSPROC)(GLsizei n, const GLuint *r
 
 // ARB Vertex Program / GLSL extension types
 typedef void (APIENTRY *PFNGLPROGRAMENVPARAMETER4FVARBPROC)(GLenum target, GLuint index, const GLfloat *params);
+typedef void (APIENTRY *PFNGLPROGRAMENVPARAMETER4FARBPROC)(GLenum target, GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
 typedef void (APIENTRY *PFNGLPROGRAMLOCALPARAMETER4FVARBPROC)(GLenum target, GLuint index, const GLfloat *params);
+typedef void (APIENTRY *PFNGLPROGRAMSTRINGARBPROC)(GLenum target, GLenum format, GLsizei len, const void *string);
+typedef void (APIENTRY *PFNGLBINDPROGRAMARBPROC)(GLenum target, GLuint program);
 
 // WGL_NV_DX_interop extension types
 #define WGL_ACCESS_READ_ONLY_NV     0x00000000
@@ -67,6 +70,25 @@ public:
     static void WINAPI Hook_glClear(GLbitfield mask);
     static void WINAPI Hook_glBindFramebuffer(GLenum target, GLuint framebuffer);
 
+    // GH #67 step 1 (corrected, ADR-0481): the live engine feeds its object/view
+    // transforms to ARB vertex programs (`glProgramEnvParameter4fvARB`), not to
+    // the fixed-function GL_MODELVIEW stack -- measured: RndrGL.dll's only
+    // modelview load in an 8790-frame run is an identity `glLoadMatrixf`, and it
+    // never calls glPushMatrix/glTranslatef, while it references the ARB program
+    // entry points. These intercept the extension calls the engine resolves via
+    // `wglGetProcAddress` (the proxy does not export them), forward them
+    // verbatim, and feed `vertex_program_observe.h` so the real transform source
+    // is observable in the same live run as the GH #67 step-2 probe. Both
+    // spellings of the env-parameter setter are covered, so a zero count is a
+    // statement about the engine, not about one name.
+    static void APIENTRY Hook_glProgramStringARB(GLenum target, GLenum format, GLsizei len, const void *string);
+    static void APIENTRY Hook_glBindProgramARB(GLenum target, GLuint program);
+    static void APIENTRY Hook_glProgramEnvParameter4fvARB(GLenum target, GLuint index, const GLfloat *params);
+    // The engine references BOTH spellings of the env-parameter setter
+    // (`…4fvARB` and `…4fARB`), so both must be intercepted for "no env params
+    // seen" to be a statement about the engine rather than about one spelling.
+    static void APIENTRY Hook_glProgramEnvParameter4fARB(GLenum target, GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+
     // Matrix state inspection
     static GLenum GetCurrentMatrixMode();
     static bool HasInterceptedProjection();
@@ -83,9 +105,13 @@ public:
 
     // GH #67 step 1: mirror the fixed-function GL_MODELVIEW stack so the matrix
     // returned by GetLastViewMatrix() is the *effective* modelview (composed
-    // from glLoadMatrixf + glPushMatrix/glTranslatef/glPopMatrix, all RndrGL
-    // uses -- see docs/rea/reference/RndrGL_GL_Path.txt section 3). Fed by the
-    // RndrGL IAT hooks in dllmain.cpp; each is a no-op outside GL_MODELVIEW.
+    // from glLoadMatrixf + glPushMatrix/glTranslatef/glPopMatrix -- the only
+    // matrix-composition calls RndrGL imports; see
+    // docs/rea/reference/RndrGL_GL_Path.txt section 3). Fed by the RndrGL IAT
+    // hooks in dllmain.cpp; each is a no-op outside GL_MODELVIEW. NOTE
+    // (ADR-0481): measured inert on the live title -- the engine's only modelview
+    // load is an identity and the real transform is applied engine-side (see
+    // vertex_program_observe.h).
     static void NoteModelviewLoadIdentity();
     static void NoteModelviewPush();
     static void NoteModelviewPop();

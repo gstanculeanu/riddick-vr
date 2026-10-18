@@ -252,6 +252,43 @@ def main():
             "glTranslatef/glPopMatrix mirrored by gl_matrix_tracker.h), not just "
             "the last loaded glLoadMatrixf")
 
+    # GH #67 step 1 (corrected, ADR-0481): the live engine puts its object/view
+    # transforms in ARB vertex-program *environment parameters*, not in the
+    # fixed-function GL_MODELVIEW (measured: one identity modelview load per run,
+    # zero pushes/translates; the 2009 RndrGL.dll imports the ARB program entry
+    # points and no glMultMatrixf/glLoadMatrixd/glRotatef). So the capture must
+    # intercept the ARB path the engine resolves through wglGetProcAddress, keep
+    # the observation off unless ViewmodelObserve=1, and be unit-tested; the
+    # vocabulary scan that established it must stay reproducible.
+    vp_observer = ROOT / "src/hook/vertex_program_observe.h"
+    vp_scan = ROOT / "tools/gl_vocabulary_scan.py"
+    require(vp_observer.exists() and
+            "class VertexProgramObserver" in vp_observer.read_text(encoding="utf-8") and
+            "NoteEnvParameter" in vp_observer.read_text(encoding="utf-8") and
+            "Hook_glProgramStringARB" in proxy and
+            "Hook_glBindProgramARB" in proxy and
+            "Hook_glProgramEnvParameter4fvARB" in proxy and
+            "Hook_glProgramEnvParameter4fARB" in proxy and
+            '"glProgramStringARB"' in proxy and
+            '"glBindProgramARB"' in proxy and
+            '"glProgramEnvParameter4fvARB"' in proxy and
+            '"glProgramEnvParameter4fARB"' in proxy and
+            "s_vertexProgramObserver.Configure(g_vrConfig.viewmodelObserve != 0)" in proxy and
+            "ViewmodelProbe program" in proxy and
+            "VIEWMODEL_PROGRAM_RE" in xrsim_tool and
+            "test_viewmodel_probe_program_lines_are_parsed" in
+            (ROOT / "tools/test_xrsim.py").read_text(encoding="utf-8") and
+            "vertex_program_observe.h" in cmake_text and
+            "vertex_program_observe" in cmake_text and
+            "vertex_program_tracker_tests.cpp" in cmake_text and
+            (ROOT / "docs/adr/0481-gh67-arb-vertex-program-transform-source.md").exists() and
+            vp_scan.exists() and
+            "def scan_names" in vp_scan.read_text(encoding="utf-8") and
+            (ROOT / "tools/test_gl_vocabulary_scan.py").exists(),
+            "GH #67: the live transform source is the ARB vertex-program path "
+            "(glProgramStringARB/glBindProgramARB/glProgramEnvParameter4fvARB via "
+            "wglGetProcAddress), the GL_MODELVIEW mirror is not it (ADR-0481)")
+
     # GH #58: the native hand path must be able to consume an offline-baked
     # posed variant of the mesh (FK(clip) + influence-weighted skinning,
     # ADR-0443), selected by an INI flag and defaulting to the bind geometry.

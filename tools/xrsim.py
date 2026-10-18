@@ -376,6 +376,14 @@ VIEWMODEL_PROBE_RE = re.compile(
     r"ViewmodelProbe \[#(\d+)\]: inside=(\d+) outside=(\d+) sample=([01])"
     r"(?: pushes=(\d+) translates=(\d+))?")
 VIEWMODEL_PROBE_MATRIX_RE = re.compile(r"ViewmodelProbe matrix:")
+# GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program path -- where the
+# engine's object/view transforms would live if it used one. `strings`/`binds`/
+# `env` are interval counts; both env-parameter spellings are intercepted in the
+# hook, so a zero env count is a statement about the engine, not about a name.
+VIEWMODEL_PROGRAM_RE = re.compile(
+    r"ViewmodelProbe program \[#(\d+)\]: strings=(\d+) binds=(\d+) env=(\d+) "
+    r"lastProg=(\d+) strLen=(\d+) strHash=([0-9a-fA-F]+) matrix=([01]) base=(\d+)")
+VIEWMODEL_PROGRAM_MATRIX_RE = re.compile(r"ViewmodelProbe program matrix:")
 _MATRIX_ROW_RE = re.compile(r"\[([-\d.eE ]+)\]")
 
 # GH #71 requirement 1 / GH #80 follow-up: the sim input bridge's observation
@@ -1078,6 +1086,10 @@ def viewmodel_probe_stats(log_text):
     in-window draw. Returns ``{"lines": [...], "matrix": [...16 floats]|None}``;
     an empty ``lines`` list means the probe was not enabled / not present (a
     pre-#67 hook or a run without the flag), so callers must *skip*, not fail.
+
+    ADR-0481 adds the ARB vertex-program tally (``program_lines`` plus a summed
+    ``program`` dict) -- the *other* candidate for the transform source. It is
+    present only from a hook that intercepts that path, so it too is additive.
     """
     lines = []
     matrix = None
@@ -1104,7 +1116,38 @@ def viewmodel_probe_stats(log_text):
                 vals = []
             if len(vals) == 16:
                 matrix = vals
-    return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates}
+    # GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program tally, the
+    # *other* candidate for "where the transforms are". Present only in a hook
+    # built with the ARB-path observation (and only with ViewmodelObserve=1).
+    program = []
+    program_matrix = None
+    for m in VIEWMODEL_PROGRAM_RE.finditer(text):
+        program.append({
+            "index": int(m.group(1)), "strings": int(m.group(2)),
+            "binds": int(m.group(3)), "env": int(m.group(4)),
+            "last_program": int(m.group(5)), "string_len": int(m.group(6)),
+            "string_hash": m.group(7), "matrix_assembled": m.group(8) == "1",
+            "matrix_base": int(m.group(9)),
+        })
+    if program:
+        pm = VIEWMODEL_PROGRAM_MATRIX_RE.search(text)
+        if pm:
+            rows = _MATRIX_ROW_RE.findall(text[pm.end():])
+            if len(rows) >= 4:
+                try:
+                    vals = [float(v) for row in rows[:4] for v in row.split()]
+                except ValueError:
+                    vals = []
+                if len(vals) == 16:
+                    program_matrix = vals
+    return {"lines": lines, "matrix": matrix, "pushes": pushes, "translates": translates,
+            "program_lines": program,
+            "program": {
+                "strings": sum(p["strings"] for p in program),
+                "binds": sum(p["binds"] for p in program),
+                "env_params": sum(p["env"] for p in program),
+                "matrix": program_matrix,
+            } if program else None}
 
 
 def content_gate_stats(host_log):

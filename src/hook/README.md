@@ -144,6 +144,22 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   verbatim (never suppresses); `OpenGLProxy::NoteModelview*` feeds the tracker and
   re-publishes `s_lastView`. Unit-tested by `gl_matrix_tracker`
   (`tests/gl_matrix_tracker_tests.cpp`). See ADR-0451.
+- **ADR-0481 — measured: that stack is inert on the live title, and so is the ARB
+  program path.** A live run logs exactly one `glLoadMatrixf [MODELVIEW #1]`
+  (identity) and zero `glPushMatrix`/`glTranslatef`; the projection loads are
+  per-view (only two distinct `(m0, m5)` pairs across 404 samples), and the ARB
+  vertex-program entry points the module references
+  (`glProgramStringARB`/`glBindProgramARB`/`glProgramEnvParameter4fvARB`/`…4fARB`,
+  resolved via `wglGetProcAddress` -- the proxy exports no `Program*` symbol) are
+  never called (`ViewmodelProbe program [#N]: strings=0 binds=0 env=0`).
+  `vertex_program_observe.h` (+ `Hook_glProgramStringARB`/`Hook_glBindProgramARB`/
+  `Hook_glProgramEnvParameter4fvARB`/`Hook_glProgramEnvParameter4fARB` in the
+  `wglGetProcAddress` hook) does that measurement; it is inert unless
+  `ViewmodelObserve=1`. **Consequence for GH #67:** the object/view transform is
+  not in GL state at all -- it is applied engine-side to the submitted vertices --
+  so a drive path has to hook the vertex submission (or REA the engine's own
+  matrix code), not a GL matrix. Unit-tested by `vertex_program_observe`
+  (`tests/vertex_program_tracker_tests.cpp`).
 
 ## Display branch / full-bleed vs cinema (GH #43 / #44 / #72)
 - The hook publishes one branch bit, `cinemaMode`, from `OnSwapBuffers`:

@@ -1334,6 +1334,36 @@ def test_truncated_capture_is_reported_not_crashed(td):
     assert unreadable and unreadable[0]["ok"] is False, payload["checks"]
 
 
+def test_viewmodel_probe_program_lines_are_parsed(td):
+    """GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program tally must be
+    parsed out of the hook log -- a run whose transform source was *not* the
+    fixed-function modelview must say so in the report, and the parse must be
+    additive (a log without the lines yields ``program is None``)."""
+    log = (
+        "[INFO] ViewmodelProbe [#300]: inside=100 outside=900 sample=1 pushes=0 translates=0\n"
+        "[INFO] ViewmodelProbe matrix: [1.0 0.0 0.0 0.0] [0.0 1.0 0.0 0.0] "
+        "[0.0 0.0 1.0 0.0] [0.0 0.0 0.0 1.0]\n"
+        "[INFO] ViewmodelProbe program [#300]: strings=0 binds=0 env=0 lastProg=0 "
+        "strLen=0 strHash=00000000 matrix=0 base=0\n"
+        "[INFO] ViewmodelProbe program [#600]: strings=2 binds=3 env=11 lastProg=7 "
+        "strLen=128 strHash=deadbeef matrix=1 base=4\n"
+        "[INFO] ViewmodelProbe program matrix: [1.0 2.0 3.0 4.0] [5.0 6.0 7.0 8.0] "
+        "[9.0 10.0 11.0 12.0] [13.0 14.0 15.0 16.0]\n"
+    )
+    stats = xrsim.viewmodel_probe_stats(log)
+    assert len(stats["lines"]) == 1 and stats["matrix"] is not None, stats
+    assert len(stats["program_lines"]) == 2, stats["program_lines"]
+    assert stats["program"]["strings"] == 2 and stats["program"]["binds"] == 3, stats
+    assert stats["program"]["env_params"] == 11, stats
+    assert stats["program"]["matrix"][3] == 4.0 and stats["program"]["matrix"][15] == 16.0, stats
+    assert stats["program_lines"][1]["string_hash"] == "deadbeef", stats["program_lines"][1]
+    # Additive: a pre-ADR-0481 log has the step-2 lines only.
+    legacy = xrsim.viewmodel_probe_stats(
+        "[INFO] ViewmodelProbe [#300]: inside=5 outside=6 sample=0 pushes=0 translates=0\n")
+    assert legacy["program"] is None and legacy["program_lines"] == [], legacy
+    assert xrsim.viewmodel_probe_stats("")["program"] is None
+
+
 def test_confirm_key_messages_are_wellformed(td):
     """GH #71 req 1: the posted confirm tap must be a well-formed Win32
     keydown/WM_CHAR/keyup triple with a correct lParam (repeat bit + key-up
@@ -1936,6 +1966,7 @@ def main() -> int:
              test_launch_reliability_flags_parse,
              test_ini_flag_parses_and_refuses_without_a_shadow,
              test_ini_overrides_reach_the_shadow_and_the_report,
+             test_viewmodel_probe_program_lines_are_parsed,
              test_truncated_capture_is_reported_not_crashed)
     with tempfile.TemporaryDirectory() as d:
         for t in tests:

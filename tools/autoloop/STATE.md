@@ -2,6 +2,68 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 80 — 2026-10-18 03:52 (scheduled loop)
+- **Unit:** GH **#67 step 1 (corrected)** — the engine's object/view transform is
+  **not in GL state at all**. Measured, read-only: (a) the live 2009 `RndrGL.dll`
+  binds exactly **96** OpenGL 1.1 entry points from `OPENGL32.dll` and its whole
+  matrix API is `glLoadMatrixf` + `glTranslatef` + `glPushMatrix` +
+  `glPopMatrix` + `glLoadIdentity` + `glMatrixMode` + `glFrustum` + `glOrtho` (no
+  `glMultMatrixf*`/`glLoadMatrixd`/`glRotatef`/`glScalef`, and **no** ARB entry
+  point); (b) two live runs log exactly **one** `glLoadMatrixf [MODELVIEW #1]`
+  (identity) each and **zero** pushes/translates; (c) the ARB vertex-program path
+  the module *references* is **silent** — 23 sampled `ViewmodelProbe program`
+  lines of `strings=0 binds=0 env=0` with **both** env setter spellings
+  intercepted; (d) the ~14 projection loads/frame show only **two** distinct
+  `(m0,m5)` pairs across 404 samples → per-view, not per-object. Change: the ARB
+  path is now observable (`src/hook/vertex_program_observe.h` +
+  `Hook_glProgramStringARB`/`Hook_glBindProgramARB`/
+  `Hook_glProgramEnvParameter4fvARB`/`…4fARB` returned from
+  `Hook_wglGetProcAddress`), reported as `ViewmodelProbe program [#N]` and parsed
+  by XRSIM; new `tools/gl_vocabulary_scan.py` (+ test) reproduces both the byte
+  scan and the **static import table** (`--imports`); ADR-0481; the false §3
+  premise in `docs/rea/reference/RndrGL_GL_Path.txt`, `gl_matrix_tracker.h`,
+  `opengl_proxy.h` and `src/hook/README.md` corrected; `verify_reported_fixes`
+  #67 invariant extended.
+- **Why this unit:** it is the explicit "Next" of wake 79 (which proposed
+  intercepting `glMultMatrixf`/`glLoadMatrixd`) and that proposal is **falsified**
+  by the shipped binary — the 2009 module references neither. Rather than
+  re-hit the matrix stack a third time, this wake instruments the *other*
+  remaining GL-state candidate (ARB vertex programs) and measures it, which
+  settles where the transform is not.
+- **Evidence (offline, read-only, installs untouched):**
+  `python tools/gl_vocabulary_scan.py --game-dir "F:\…\Assault on Dark Athena"
+  [--imports]`; `dist\opengl32.dll` built by `tools\build-all.ps1` Release (no
+  deploy) — CTest 23/23 x64 + 25/25 x86 (incl. the new `vertex_program_observe`,
+  9 cases), all 12 `tools/test_*.py` PASS (incl. `test_gl_vocabulary_scan.py`,
+  +1 in `test_xrsim.py`), `verify_reported_fixes` + `scenario_tests --check` +
+  `xrsim --selftest` + `verify_test_artifacts` + `verify_hook_init` +
+  `validate_addresses` PASS. Live (RIDDICKVR_SIM=1, per-run read-only shadow,
+  `--require-fresh-hook`, no deploy): three runs (`%TEMP%\xrsim-arb`,
+  `%TEMP%\xrsim-arb2`, `%TEMP%\xrsim-arb3`), the last on the final build
+  (sha256 `c71a36e9cf48`, mtime 03:53) — XRSIM **PASS** (30 gameplay captures,
+  `gameplay_full_bleed_reached` 1.00, `capture_gate_matches_saved` 30/30,
+  `viewmodel_pass_identified` 17 lines, `deployed_hook_matches_build` PASS);
+  `viewmodel_probe_stats` on its log = 17 step-2 lines (matrix = identity) + 24
+  program lines (`strings=0 binds=0 env=0`, program matrix none) and the report
+  carries `viewmodel_probe.program` = `{strings:0, binds:0, env_params:0,
+  matrix:null}` (end-to-end check of the new XRSIM parse). Game install
+  untouched (no write; `riddick_vr.log` mtime in the install unchanged), no
+  leftover processes, live lock released.
+- **BLOCKER/limit (honest):** "silent" is measured through the proxy's
+  `wglGetProcAddress`; whether the engine even *requested* those pointers is not
+  logged (a request log would separate "vestigial names" from "resolved but
+  unused" — either way they are not called). The 4-consecutive-index matrix
+  assembly is unit-tested but never exercised live. Nothing player-visible changed
+  (no rendering path altered); the value is a corrected target.
+- **Next:** (1) capture the transform where it actually is — IAT-hook the vertex
+  submission (`glVertexPointer`/`glVertex3fv`/`glVertex*`) and sample a submitted
+  coordinate, and/or REA the engine's own matrix/skinning code
+  (`CreateMatrixIW`/`TransformBones`, wakes 20/21) for the FP-viewmodel matrix;
+  (2) log the `wglGetProcAddress` requests (one line per intercepted name) to
+  close the attribution gap; (3) then the deploy-gated ladder (#68 req 5, #79 hook
+  half, #76 step 1), the `DEFAULT_GAME_DIR` 2004-vs-2009 retarget, and GH #83's
+  manual-session blind spot.
+
 ## Wake 79 — 2026-10-18 03:27 (scheduled loop)
 - **Unit:** GH **#67 step 3** — the viewmodel observation probe is now **reachable
   by a live run** (`tools/xrsim.py --ini KEY=VALUE` writes the flag into the

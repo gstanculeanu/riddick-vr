@@ -4,13 +4,24 @@
 // stack.
 //
 // Why this exists (evidence: docs/rea/reference/RndrGL_GL_Path.txt section 3):
-// RndrGL.dll composes object transforms from `glLoadMatrixf` + `glPushMatrix` +
-// `glTranslatef` + `glPopMatrix` (it does **not** import `glMultMatrixf` /
-// `glRotatef` / `glDepthRange`). Until this header the hook only observed
-// `glLoadMatrixf` (in `OpenGLProxy::Hook_glLoadMatrixf`, mirrored into
-// `s_lastView`), so the "modelview in effect at a draw" it recorded was at best
-// the last *loaded* base -- never the matrix the engine actually rendered with,
-// which is `base * translate(...)` for every pushed sub-object.
+// the shipped RndrGL.dll's only *imported* fixed-function matrix composition is
+// `glLoadMatrixf` + `glPushMatrix` + `glTranslatef` + `glPopMatrix` (it never
+// imports `glMultMatrixf` / `glRotatef` / `glLoadMatrixd`), so if the engine used
+// the stack at all, this is the vocabulary it would use. Until this header the
+// hook only observed `glLoadMatrixf` (in `OpenGLProxy::Hook_glLoadMatrixf`,
+// mirrored into `s_lastView`), so the "modelview in effect at a draw" it recorded
+// was at best the last *loaded* base -- never the matrix a stack-composing draw
+// would render with.
+//
+// MEASURED LIMIT (ADR-0481): on the live 2009 title this mirror is inert. A
+// live run logs exactly one `glLoadMatrixf [MODELVIEW #1]` (identity) and zero
+// `glPushMatrix`/`glTranslatef`/`glPopMatrix` calls: the engine renders
+// fixed-function geometry with an identity modelview and applies its object/view
+// transforms on the engine side (the projection is per-view, and the ARB
+// vertex-program path is not called either). Keep this mirror -- it is the
+// correct semantics and is unit-tested -- but do not expect the draw-time
+// modelview to be the viewmodel transform (see vertex_program_observe.h for the
+// measurement).
 //
 // The GH #67 step-2 observation probe (`ViewmodelSuppressor::SetObservedSample`,
 // ADR-0450) feeds off that value, so without this tracker the captured

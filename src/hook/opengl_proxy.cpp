@@ -6,6 +6,7 @@
 #include "viewmodel_suppressor.h"
 #include "viewmodel_drive.h"
 #include "gl_matrix_tracker.h"
+#include "vertex_program_observe.h"
 #include "logging.h"
 #include <string>
 
@@ -86,8 +87,23 @@ static float s_lastView[16] = {0};
 // GH #67 step 1: software mirror of the GL_MODELVIEW stack. `s_lastView` is kept
 // equal to the tracker's current matrix, so GetLastViewMatrix() (consumed by the
 // GH #67 step-2 observation probe) reports the *effective* modelview at a draw,
-// not merely the last loaded base.
+// not merely the last loaded base. NOTE (ADR-0481): on the live 2009 target this
+// mirror only ever sees the engine's single identity load -- the real transforms
+// are ARB vertex-program environment parameters, captured by
+// `s_vertexProgramObserver` below.
 static GlMatrixTracker s_modelviewTracker;
+
+// GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program path the live
+// engine actually uses for object/view transforms (see vertex_program_observe.h).
+// `real_*` are the pointers the engine resolved through `wglGetProcAddress`; the
+// proxy does not export these names, so that hook is the only place they can be
+// intercepted. `OpenGLProxy::glProgramEnvParameter4fvARB` (used by the native
+// hand renderer) stays the untouched real pointer.
+static PFNGLPROGRAMSTRINGARBPROC real_glProgramStringARB = nullptr;
+static PFNGLBINDPROGRAMARBPROC real_glBindProgramARB = nullptr;
+static PFNGLPROGRAMENVPARAMETER4FVARBPROC real_glProgramEnvParameter4fvARB = nullptr;
+static PFNGLPROGRAMENVPARAMETER4FARBPROC real_glProgramEnvParameter4fARB = nullptr;
+static VertexProgramObserver s_vertexProgramObserver;
 static bool s_hasProjection = false;
 static bool s_has3DGameplayProjection = false;
 // GH #43/#44: per-frame 3D freshness. Menus/cinematics use ortho/2D
@@ -372,6 +388,23 @@ BOOL WINAPI OpenGLProxy::Hook_wglSwapBuffers(HDC hdc) {
             }
         }
     }
+    // GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program path, which is
+    // where the live engine actually puts its object/view transforms. Logged on
+    // the same sampled frames as the probe above; the counts are the interval
+    // total since the previous sampled frame.
+    if (s_vertexProgramObserver.Observing() && (s_swapFrameCount % 300) == 0) {
+        const VertexProgramSnapshot vp = s_vertexProgramObserver.ComputeSnapshot();
+        VR_LOG_INFO("ViewmodelProbe program [#%llu]: strings=%u binds=%u env=%u lastProg=%u strLen=%u strHash=%08x matrix=%u base=%u",
+            static_cast<unsigned long long>(s_swapFrameCount),
+            vp.strings, vp.binds, vp.envParams, vp.lastProgramId, vp.lastStringLen,
+            vp.lastStringHash, vp.matrixAssembled ? 1u : 0u, vp.matrixBase);
+        if (vp.matrixAssembled) {
+            const float* m = vp.matrix;
+            VR_LOG_INFO("ViewmodelProbe program matrix: [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f]",
+                m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+        }
+    }
     s_driveCorrectionCached = false;
     StereoRenderer::Instance().OnSwapBuffers(hdc);
     return real_wglSwapBuffers ? real_wglSwapBuffers(hdc) : SwapBuffers(hdc);
@@ -401,6 +434,21 @@ PROC WINAPI OpenGLProxy::Hook_wglGetProcAddress(LPCSTR lpszProc) {
         glBlitFramebuffer = (PFNGLBLITFRAMEBUFFERPROC)realProc;
     } else if (procName == "glUniformMatrix4fv" || procName == "glUniformMatrix4fvARB") {
         glUniformMatrix4fv = (PFNGLUNIFORMMATRIX4FVPROC)realProc;
+    } else if (procName == "glProgramStringARB") {
+        // GH #67 step 1 (corrected, ADR-0481): the live engine resolves its ARB
+        // vertex-program entry points here (the proxy exports no Program*
+        // symbol), so this is the interception point for the transform source.
+        real_glProgramStringARB = (PFNGLPROGRAMSTRINGARBPROC)realProc;
+        if (realProc) return (PROC)Hook_glProgramStringARB;
+    } else if (procName == "glBindProgramARB") {
+        real_glBindProgramARB = (PFNGLBINDPROGRAMARBPROC)realProc;
+        if (realProc) return (PROC)Hook_glBindProgramARB;
+    } else if (procName == "glProgramEnvParameter4fvARB") {
+        real_glProgramEnvParameter4fvARB = (PFNGLPROGRAMENVPARAMETER4FVARBPROC)realProc;
+        if (realProc) return (PROC)Hook_glProgramEnvParameter4fvARB;
+    } else if (procName == "glProgramEnvParameter4fARB") {
+        real_glProgramEnvParameter4fARB = (PFNGLPROGRAMENVPARAMETER4FARBPROC)realProc;
+        if (realProc) return (PROC)Hook_glProgramEnvParameter4fARB;
     }
 
     return realProc;
@@ -571,6 +619,9 @@ void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
     // suppression window; a mid-frame depth-only clear opens it (see
     // viewmodel_suppressor.h). Configured here so an INI edit takes effect live.
     s_viewmodelSuppressor.Configure(BuildViewmodelSuppressionConfig());
+    // GH #67 step 1: the ARB vertex-program observation shares the same live
+    // switch (ViewmodelObserve=1) and is inert otherwise.
+    s_vertexProgramObserver.Configure(g_vrConfig.viewmodelObserve != 0);
     if (mask & 0x00004000u /* GL_COLOR_BUFFER_BIT */) {
         s_viewmodelSuppressor.NoteColorClear();
     } else if (mask & 0x00000100u /* GL_DEPTH_BUFFER_BIT */) {
@@ -585,6 +636,49 @@ void WINAPI OpenGLProxy::Hook_glBindFramebuffer(GLenum target, GLuint framebuffe
     RiddickVR_EnsureHookInitialized();
     if (real_glBindFramebuffer) {
         real_glBindFramebuffer(target, framebuffer);
+    }
+}
+
+// GH #67 step 1 (corrected, ADR-0481): the ARB vertex-program path. These are
+// returned from Hook_wglGetProcAddress for the names the engine resolves
+// dynamically (the proxy exports no Program* symbol), forward verbatim, and feed
+// the observer so the transform the engine feeds the GPU is visible in the same
+// live run. Nothing here suppresses, rewrites or delays a call.
+void APIENTRY OpenGLProxy::Hook_glProgramStringARB(GLenum target, GLenum format, GLsizei len, const void *string) {
+    RiddickVR_EnsureHookInitialized();
+    if (string && len > 0) {
+        // Hash at most 4 KiB of the program so a pathological string cannot
+        // stall the render thread; the identity only has to be discriminating.
+        const int hashLen = len > 4096 ? 4096 : static_cast<int>(len);
+        s_vertexProgramObserver.NoteProgramString(len, VertexProgramObserver::Fnv1a(string, hashLen));
+    }
+    if (real_glProgramStringARB) {
+        real_glProgramStringARB(target, format, len, string);
+    }
+}
+
+void APIENTRY OpenGLProxy::Hook_glBindProgramARB(GLenum target, GLuint program) {
+    RiddickVR_EnsureHookInitialized();
+    s_vertexProgramObserver.NoteBindProgram(program);
+    if (real_glBindProgramARB) {
+        real_glBindProgramARB(target, program);
+    }
+}
+
+void APIENTRY OpenGLProxy::Hook_glProgramEnvParameter4fvARB(GLenum target, GLuint index, const GLfloat *params) {
+    RiddickVR_EnsureHookInitialized();
+    s_vertexProgramObserver.NoteEnvParameter(index, params);
+    if (real_glProgramEnvParameter4fvARB) {
+        real_glProgramEnvParameter4fvARB(target, index, params);
+    }
+}
+
+void APIENTRY OpenGLProxy::Hook_glProgramEnvParameter4fARB(GLenum target, GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
+    RiddickVR_EnsureHookInitialized();
+    const float params[4] = {x, y, z, w};
+    s_vertexProgramObserver.NoteEnvParameter(index, params);
+    if (real_glProgramEnvParameter4fARB) {
+        real_glProgramEnvParameter4fARB(target, index, x, y, z, w);
     }
 }
 

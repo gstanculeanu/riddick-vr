@@ -85,6 +85,51 @@ matrix in effect at a draw is `base * translate(...)` -- not the base that
 `!glPushMatrix`, `!glPopMatrix` and `!glTranslatef` in RndrGL so the reported
 draw-time modelview is the effective one (ADR-0451).
 
+### Correction (ADR-0481): on the 2009 target the modelview is a dead end
+
+section 3 above is the **2004** module. On the live target (the 2009
+`System/Win32_x86/RndrGL.dll`, 939248 bytes, 05-Mar-12) the same measurement
+reproduces the same vocabulary -- **and a live run shows the stack is not used**:
+
+- Live (8790 frames, `RIDDICKVR_SIM=1`, `ViewmodelObserve=1`, read-only shadow
+  install): the hook log carries exactly **one** `glLoadMatrixf [MODELVIEW #1]`
+  (identity) for the whole run, 405 `glLoadMatrixf [3D VR PROJECTION …]` loads,
+  and **zero** `glFrustum` calls. The probe reads `pushes=0 translates=0` on
+  every sampled frame while all six RndrGL IAT hooks log as installed. So the
+  engine's only modelview load is an identity and it never calls
+  `glPushMatrix`/`glTranslatef`.
+- The 2009 `RndrGL.dll` **does** reference the ARB_vertex_program entry points
+  (`glProgramStringARB`, `glBindProgramARB`, `glGenProgramsARB`,
+  `glDeleteProgramsARB`, `glProgramEnvParameter4fvARB`, `glProgramEnvParameter4fARB`,
+  `glGetProgramivARB`, `glGetProgramStringARB`) and the generic-attribute path
+  (`glVertexAttribPointer`/`…ARB`, `glEnableVertexAttribArrayARB`,
+  `glVertexAttrib4fARB`; **no** `glTexCoordPointer`), and does **not** reference
+  `glMultMatrixf`/`glMultMatrixd`/`glLoadMatrixd`/`glRotatef`/`glScalef`.
+
+So the object/view transforms reach the GPU as **program environment
+parameters**, and `GetLastViewMatrix()` can never be the viewmodel transform,
+whichever fixed-function entry point is hooked. The matrix-stack mirror is kept
+(correct semantics, unit-tested, cheap) but is provably inert on this title; the
+ARB program path is intercepted instead (`src/hook/vertex_program_observe.h`) and
+reported as `ViewmodelProbe program [#N]: …`. Reproduce the vocabulary with
+`python tools/gl_vocabulary_scan.py --game-dir "<install>"` (read-only); add
+`--imports` for the authoritative static import table (the 2009 `RndrGL.dll`
+binds exactly 96 OpenGL 1.1 entry points from `OPENGL32.dll`, no ARB ones, and
+its legacy immediate-mode vocabulary -- `glBegin`/`glEnd`, `glVertex3f`/
+`glVertex3fv`, `glNormal3fv`, `glTexCoord*`, `glColor*`, `glMaterialfv`,
+`glLight*`, `glClipPlane`, `glTexGen*` -- so it is a fixed-function immediate-mode
+renderer).
+
+**Measured live, twice (ADR-0481):** with both env-parameter spellings
+(`glProgramEnvParameter4fvARB`, `glProgramEnvParameter4fARB`) intercepted, a 45 s
+gameplay run logs 23 sampled `ViewmodelProbe program` lines with
+`strings=0 binds=0 env=0` -- the ARB program path is not called either. Together
+with the identity modelview and the (per-view, not per-object) projection loads,
+the object/view transform is **not in GL state**: it is applied on the engine
+side to the submitted vertex data. Any GH #67 drive path must hook that, not a
+GL matrix.
+
+
 ## 4. Consequence for the suppressor (GH #66)
 - Interception targets: **`glDrawElements`** (primary; every 3D mesh) and
   **`glCallList`** (opportunistic). Both are IAT-hooked in `RndrGL.dll`
