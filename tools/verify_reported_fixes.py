@@ -885,8 +885,30 @@ def main():
             "run id) and the live harness must take a single-live-run lock and a "
             "per-run shadow directory, both unit-tested")
 
+    # GH #85: the 2009 *Assault on Dark Athena* models store a version-0x205
+    # VERTEXFRAMES frame -- the 2004 52-byte header + quantized u16 positions +
+    # s8 normals, then **two more s8 unit-vector arrays** (tangent + bitangent),
+    # i.e. 52 + 15n bytes and no leading frame_count word. Undecoded, the corpus
+    # check on the target install reported 4566 problems and the whole 2009
+    # geometry (the native-hand mesh path, GH #55) was unreadable.
+    mos_xmd = (ROOT / "tools/mos_xmd.py").read_text(encoding="utf-8")
+    mos_xmd_tests = (ROOT / "tools/test_mos_xmd.py").read_text(encoding="utf-8")
+    require("VF205_VERSION = 0x205" in mos_xmd and
+            "VF205_EXTRA_BASIS = 2" in mos_xmd and
+            "0x200, 0x201, 0x202, 0x203, 0x204, 0x205" in mos_xmd and
+            "_decode_i8_unit_vectors" in mos_xmd and
+            "extra_basis" in mos_xmd and
+            "test_geometry_roundtrip_205" in mos_xmd_tests and
+            "test_geometry_204_has_no_extra_basis" in mos_xmd_tests and
+            "test_geometry_205_truncated_basis_is_rejected" in mos_xmd_tests and
+            (ROOT / "docs/adr/0476-xmd-vertex-frame-205-layout.md").exists(),
+            "GH #85: the 2009 VERTEXFRAMES version 0x205 (52-byte header + u16 "
+            "positions + s8 normals + two s8 unit-vector arrays, no leading frame "
+            "count) must be decoded drop-in compatible with 0x204, unit-tested "
+            "and recorded")
+
     print("[issue-fixes] source invariants passed (#40, #43-47, #52-54, #58, #61, "
-          "#62, #64-68, #69, #71-73, #75-81, #83)")
+          "#62, #64-68, #69, #71-73, #75-81, #83, #85)")
     return 0
 
 

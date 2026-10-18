@@ -92,6 +92,15 @@ names `VERTEXFRAMES`, `TVERTEXFRAMES`, `BONEDEFORM`, `SKELETON`, `NODEINDICES`.
 - `VERTEXFRAMES` positions are byte-packed (not plain float3 arrays); the
   reader sizes the list then fills it in `CTriangleMeshCore::Read`. The precise
   packing (likely per-frame deltas) is the remaining decode target.
+  **Resolved for the two shipped versions (ADR-0415 + ADR-0476):** frame 0x204
+  (2004) is `header(52) + u16 pos[u16x3, 6n] + s8 nrm[3n]`; frame 0x205 (the
+  2009 *Assault on Dark Athena* models) keeps that header/position/normal layout
+  and appends **two more `s8` unit-vector arrays** (`3n` each) → `52 + 15n`.
+  Positions dequantize with `min + q*(max-min)/65535`; the normals/basis
+  re-normalize `s8/127`. Both are decoded by `tools/mos_xmd.py`
+  (`decode_vertex_frame`), and the two versions are told apart by whether the
+  chunk's first `u32` is itself a frame version (0x205) or a `frame_count` word
+  (0x1, the 2004 prefix).
 
 ## Reproduce
 ```

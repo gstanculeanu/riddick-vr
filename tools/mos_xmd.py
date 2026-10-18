@@ -65,6 +65,26 @@ Geometry (recovered from MXR.dll ``CTriangleMeshCore::Read`` +
                  ``min + q * (max - min) / 65535`` and normals with
                  ``c / 127`` re-normalized (exactly as the loader does).
 
+                 Version **0x205** (every shipped 2009 *Assault on Dark Athena*
+                 model; see ADR-0476) keeps the *same* 52-byte header and the
+                 *same* quantized ``u16`` position + ``s8`` normal arrays, but
+                 appends **two more per-vertex ``s8`` unit-vector arrays** after
+                 the normals (a tangent and its orthogonal complement), so a
+                 frame is ``52 + 6n + 3n + 3n + 3n == 52 + 15n`` bytes::
+
+                     ... the 52-byte 0x204 header above ...
+                     u16  positions[n][3]    (6n)
+                     s8   normals[n][3]      (3n)   (coincides with the face
+                                                    normal; |dot| 0.83-0.95)
+                     s8   tangent[n][3]      (3n)   (unit; orthogonal to it)
+                     s8   bitangent[n][3]    (3n)   (unit; orthogonal to it)
+
+                 The 0x205 frame carries **no** per-model ``frame_count`` word:
+                 the first ``u32`` is the frame version itself (the 2004 models
+                 instead prefix a ``frame_count`` whose value 0x1 is not a frame
+                 version, which is how :meth:`Xmd.vertex_frames` tells them
+                 apart).
+
   TRIANGLES    : ``u32 triangle_count`` then ``triangle_count`` *u16* triplets.
 
   TVERTEXFRAMES: one quantized UV frame, recovered from MXR.dll
@@ -239,13 +259,21 @@ NAME_RE = re.compile(rb"^[A-Za-z][A-Za-z0-9_ ]{1,23}$")
 # Chunks whose payload we know how to sanity-check (first u32 == element count).
 COUNT_PREFIX_CHUNKS = {"TRIANGLES", "PRIMITIVES", "EDGES", "EDGETRIS", "TRIEDGES"}
 
-# VERTEXFRAMES payload versions (recovered from MXR.dll, see ADR-0415). Every
-# shipped model uses 0x204 (quantized u16 positions + i8 normals); 0x202/0x203
+# VERTEXFRAMES payload versions (recovered from MXR.dll, see ADR-0415). The
+# shipped 2004 models use 0x204 (quantized u16 positions + i8 normals); 0x202/0x203
 # share its shape but store raw (unpacked) records, and are implemented from the
-# same decompilation though no shipped asset exercises them.
-VERTEX_FRAME_VERSIONS = (0x200, 0x201, 0x202, 0x203, 0x204)
+# same decompilation though no shipped asset exercises them. **0x205** is the
+# 2009 *Assault on Dark Athena* frame (see ADR-0476): same header + position +
+# normal arrays as 0x204, plus two more i8 unit-vector arrays (tangent and its
+# complement) after the normals.
+VERTEX_FRAME_VERSIONS = (0x200, 0x201, 0x202, 0x203, 0x204, 0x205)
+# The 2009 frame version and the number of *extra* i8 unit-vector arrays it
+# appends after the normals (tangent + bitangent).
+VF205_VERSION = 0x205
+VF205_EXTRA_BASIS = 2
 # Quantized-position readers we can fully decode from the decompiled loader.
-QUANTIZED_VF_VERSIONS = (0x202, 0x203, 0x204)
+QUANTIZED_VF_VERSIONS = (0x202, 0x203, 0x204, 0x205)
+
 # 1/65535: u16 position component -> fraction of the bounding-box extent.
 _Q16_SCALE = 1.0 / 65535.0
 # 1/127: i8 normal component scale (re-normalized after decode).
@@ -267,10 +295,12 @@ class VertexFrame:
     """One decoded ``VERTEXFRAMES`` frame (a static pose / blend target)."""
 
     __slots__ = ("version", "count", "bounds_min", "bounds_max", "aux",
-                 "header_extra", "positions", "normals", "size", "exact")
+                 "header_extra", "positions", "normals", "extra_basis",
+                 "size", "exact")
 
     def __init__(self, version, count, bounds_min, bounds_max, aux,
-                 header_extra, positions, normals, size, exact):
+                 header_extra, positions, normals, size, exact,
+                 extra_basis=()):
         self.version = version
         self.count = count
         self.bounds_min = bounds_min
@@ -279,6 +309,9 @@ class VertexFrame:
         self.header_extra = header_extra
         self.positions = positions
         self.normals = normals
+        # Version 0x205 only: the two extra i8 unit-vector arrays (tangent and
+        # bitangent). Empty for 0x204 and older frames.
+        self.extra_basis = list(extra_basis)
         self.size = size
         self.exact = exact
 
@@ -291,10 +324,31 @@ class VertexFrame:
             "size": self.size,
             "exact": self.exact,
         }
+        if self.extra_basis:
+            d["extra_basis_count"] = len(self.extra_basis)
         if with_geometry:
             d["positions"] = [list(p) for p in self.positions]
             d["normals"] = [list(n) for n in self.normals]
+            if self.extra_basis:
+                d["extra_basis"] = [[list(v) for v in arr]
+                                    for arr in self.extra_basis]
         return d
+
+
+def _decode_i8_unit_vectors(b: bytes, base: int, n: int) -> list[tuple]:
+    """Decode ``n`` ``s8[3]`` records at ``base`` and re-normalize each to a unit
+    vector (a zero record decodes to ``(0, 0, 0)``), exactly as the loader does
+    for the VERTEXFRAMES normal/basis arrays."""
+    out = []
+    for i in range(n):
+        qx, qy, qz = struct.unpack_from("<3b", b, base + i * 3)
+        vx = qx * _I8_NORMAL_SCALE
+        vy = qy * _I8_NORMAL_SCALE
+        vz = qz * _I8_NORMAL_SCALE
+        ln = (vx * vx + vy * vy + vz * vz) ** 0.5
+        out.append((0.0, 0.0, 0.0) if ln == 0.0
+                   else (vx / ln, vy / ln, vz / ln))
+    return out
 
 
 def decode_vertex_frame(b: bytes, off: int) -> tuple[VertexFrame, int]:
@@ -306,7 +360,7 @@ def decode_vertex_frame(b: bytes, off: int) -> tuple[VertexFrame, int]:
     ver = _u32(b, off)
     if ver not in QUANTIZED_VF_VERSIONS:
         raise GeometryError(
-            f"VERTEXFRAMES version 0x{ver:04x} not decodable (only 0x202-0x204)")
+            f"VERTEXFRAMES version 0x{ver:04x} not decodable (only 0x202-0x205)")
     p = off + 4
     extra20 = _u32(b, p)
     p += 4
@@ -326,8 +380,12 @@ def decode_vertex_frame(b: bytes, off: int) -> tuple[VertexFrame, int]:
     p += 4
     pos_end = p + n * 6
     nrm_end = pos_end + n * 3
-    size = nrm_end - off
-    if nrm_end > len(b):
+    # GH #85: the 2009 frame (0x205) appends two more per-vertex i8 unit-vector
+    # arrays (tangent + bitangent) after the normals.
+    basis_count = VF205_EXTRA_BASIS if ver == VF205_VERSION else 0
+    frame_end = nrm_end + n * 3 * basis_count
+    size = frame_end - off
+    if frame_end > len(b):
         raise GeometryError(
             f"VERTEXFRAMES frame at 0x{off:X} runs past EOF "
             f"(needs {size} bytes)")
@@ -338,18 +396,16 @@ def decode_vertex_frame(b: bytes, off: int) -> tuple[VertexFrame, int]:
     for i in range(n):
         qx, qy, qz = struct.unpack_from("<3H", b, p + i * 6)
         positions.append((mn[0] + qx * sx, mn[1] + qy * sy, mn[2] + qz * sz))
-    normals = []
-    for i in range(n):
-        qx, qy, qz = struct.unpack_from("<3b", b, pos_end + i * 3)
-        vx = qx * _I8_NORMAL_SCALE
-        vy = qy * _I8_NORMAL_SCALE
-        vz = qz * _I8_NORMAL_SCALE
-        ln = (vx * vx + vy * vy + vz * vz) ** 0.5
-        normals.append((0.0, 0.0, 0.0) if ln == 0.0
-                       else (vx / ln, vy / ln, vz / ln))
+    normals = _decode_i8_unit_vectors(b, pos_end, n)
+    extra_basis = [
+        _decode_i8_unit_vectors(b, nrm_end + k * n * 3, n)
+        for k in range(basis_count)
+    ]
     frame = VertexFrame(ver, n, mn, mx, aux, (extra20, extra, extra30),
-                        positions, normals, size, exact=True)
+                        positions, normals, size, exact=True,
+                        extra_basis=extra_basis)
     return frame, size
+
 
 
 def decode_triangles(b: bytes, off: int, size: int) -> tuple[int, tuple[int, ...]]:

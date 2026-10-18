@@ -257,6 +257,109 @@ def test_geometry_detects_size_mismatch(tmp_dir):
         os.remove(path)
 
 
+def _vf205_frame(verts, normals, extra_basis, mn=(0.0, 0.0, 0.0),
+                 mx=(100.0, 200.0, 300.0)) -> bytes:
+    """Build a VERTEXFRAMES payload: one version-0x205 frame, **no** leading
+    count word, followed by the two extra i8 unit-vector arrays."""
+    n = len(verts)
+    out = bytearray()
+    out += struct.pack("<I", 0x205)           # frame version (no count prefix)
+    out += struct.pack("<I", 0)               # header20
+    out += struct.pack("<3f", *mn)            # bounds_min
+    out += struct.pack("<3f", *mx)            # bounds_max
+    out += struct.pack("<3f", 0.0, 0.0, 0.0)  # aux
+    out += struct.pack("<I", 0)               # header30
+    out += struct.pack("<I", n)               # vertex count
+    for (x, y, z) in verts:
+        out += struct.pack("<3H", x, y, z)
+    for (x, y, z) in normals:
+        out += struct.pack("<3b", x, y, z)
+    for arr in extra_basis:
+        for (x, y, z) in arr:
+            out += struct.pack("<3b", x, y, z)
+    assert len(out) == 52 + 15 * n, len(out)
+    return bytes(out)
+
+
+def test_geometry_roundtrip_205(tmp_dir):
+    # Version 0x205 (every 2009 model): the 0x204 header + position + normal
+    # arrays, followed by two more i8 unit-vector arrays (GH #85 / ADR-0476).
+    verts = [(0, 0, 0), (65535, 0, 0), (0, 65535, 0), (0, 0, 65535)]
+    normals = [(127, 0, 0), (0, 127, 0), (0, 0, -127), (0, 0, 0)]
+    basis1 = [(0, 0, 127), (0, 127, 0), (127, 0, 0), (0, 0, 127)]
+    basis2 = [(0, -128, 0), (127, 0, 0), (0, 0, 127), (0, 127, 0)]
+    payload = _vf205_frame(verts, normals, [basis1, basis2])
+    assert len(payload) == 52 + 15 * 4, len(payload)   # no count prefix
+    blob = _geometry_container(payload, _triangles([0, 1, 2, 0, 2, 3]), 2)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        frames = x.vertex_frames()
+        assert len(frames) == 1, frames
+        f = frames[0]
+        assert f.version == 0x205 and f.count == 4, (f.version, f.count)
+        assert f.size == 52 + 15 * 4, f.size
+        assert f.bounds_min == (0.0, 0.0, 0.0)
+        assert f.bounds_max == (100.0, 200.0, 300.0)
+        assert f.positions[0] == (0.0, 0.0, 0.0), f.positions[0]
+        assert f.positions[1] == (100.0, 0.0, 0.0), f.positions[1]
+        assert f.positions[2] == (0.0, 200.0, 0.0), f.positions[2]
+        assert abs(f.positions[3][2] - 300.0) < 1e-3, f.positions[3]
+        # normals re-normalized to unit (or zeroed)
+        assert abs(f.normals[0][0] - 1.0) < 1e-6, f.normals[0]
+        assert f.normals[3] == (0.0, 0.0, 0.0), f.normals[3]
+        # two extra basis arrays, each a unit vector per vertex
+        assert len(f.extra_basis) == 2, f.extra_basis
+        assert len(f.extra_basis[0]) == 4 and len(f.extra_basis[1]) == 4
+        assert abs(f.extra_basis[0][0][2] - 1.0) < 1e-6, f.extra_basis[0][0]
+        assert abs(f.extra_basis[1][0][1] + 1.0) < 1e-6, f.extra_basis[1][0]
+        d = f.as_dict(with_geometry=True)
+        assert d["extra_basis_count"] == 2 and len(d["extra_basis"]) == 2, d
+        assert x.triangle_indices()[0] == 2
+        assert x.validate() == [], x.validate()
+        clusters = x.cluster_meshes()
+        assert len(clusters) == 1 and clusters[0]["index_in_range"] is True
+        assert x.geometry_stats()["decoded_vertices"] == 4
+    finally:
+        os.remove(path)
+
+
+def test_geometry_204_has_no_extra_basis(tmp_dir):
+    # The 0x204 frame must keep decoding with an empty basis (no regression).
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 127)] * 3
+    blob = _geometry_container(_vf204_frame(verts, normals),
+                               _triangles([0, 1, 2]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        f = x.vertex_frames()[0]
+        assert f.version == 0x204 and f.extra_basis == [], f.as_dict()
+        assert "extra_basis_count" not in f.as_dict()
+        assert x.validate() == [], x.validate()
+    finally:
+        os.remove(path)
+
+
+def test_geometry_205_truncated_basis_is_rejected(tmp_dir):
+    # A 0x205 frame that declares its vertex count but omits the two extra
+    # basis arrays no longer tiles the chunk and must be reported.
+    verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    normals = [(0, 0, 127)] * 3
+    basis = [([(0, 0, 127)] * 3), ([(0, 127, 0)] * 3)]
+    good = _vf205_frame(verts, normals, basis)
+    # drop the whole second basis array (3 bytes/vertex) from the payload
+    bad = good[:len(good) - 3 * 3]
+    blob = _geometry_container(bad, _triangles([0, 1, 2]), 1)
+    path = _write_tmp(blob)
+    try:
+        x = mos_xmd.Xmd(path)
+        problems = x.validate()
+        assert any("VERTEXFRAMES" in p for p in problems), problems
+    finally:
+        os.remove(path)
+
+
 def test_uv_roundtrip(tmp_dir):
     verts = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
     normals = [(0, 0, 0)] * 4
@@ -1353,6 +1456,8 @@ def main() -> int:
     tests = (test_roundtrip, test_rejects_bad_magic,
              test_geometry_roundtrip, test_geometry_detects_index_out_of_range,
              test_geometry_detects_size_mismatch,
+             test_geometry_roundtrip_205, test_geometry_204_has_no_extra_basis,
+             test_geometry_205_truncated_basis_is_rejected,
              test_uv_roundtrip, test_uv_detects_count_mismatch,
              test_uv_detects_bad_tiling, test_uv_empty_chunk_is_ok,
              test_skin_roundtrip, test_skin_matrix_map_and_influences_of,

@@ -2,6 +2,67 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 75 — 2026-10-18 02:25 (scheduled loop)
+- **Unit:** GH **#85** — decode the 2009 `VERTEXFRAMES` version **0x205** so every
+  *Assault on Dark Athena* cluster decodes. `tools/mos_xmd.py` (+`docs/rea/mos-xmd-format.md`
+  + `docs/adr/0476` + 3 tests + a #85 `verify_reported_fixes` invariant); **no C++
+  change, no build, no deploy, no game/input run**.
+- **Why this unit:** it is the explicit "Next" of wake 74 and the last *locally*
+  known red on the model tooling; the whole 2009 geometry (positions/normals) is
+  the prerequisite for the native-hand mesh path (GH #55) on the *target* install,
+  and the 2009 `F:` install is exactly what an XRSIM shadow run executes against.
+- **Root cause:** every 2009 frame starts with version word `0x205` (8645/8805
+  nodes; 160 empty) where the 2004 install uses a leading `u32 frame_count == 0x1`
+  + version `0x204` (4662/4662), so `decode_vertex_frame` raised
+  `VERTEXFRAMES version 0x… not decodable (only 0x202-0x204)` for all 4566 reds.
+- **Layout recovered from the shipped assets** (self-validating, read-only):
+  a `0x205` frame is the **identical 52-byte 0x204 header** (version, header20,
+  `bounds_min[3]`, `bounds_max[3]`, `aux[3]`, header30, `n`) followed by
+  `u16 positions[n][3]` (6n) + `s8 normals[n][3]` (3n) + **two more `s8`
+  unit-vector arrays** (`3n` each) = **52 + 15n**, with **no leading frame count**
+  (the first `u32` is the version, which `Xmd.vertex_frames`'s "skip only a
+  non-version word" rule already handles once 0x205 is a known version).
+- **Evidence (decisive, measured this wake):** (1) size law `data_size == 52 + 15n`
+  exact for `n` = max triangle index + 1 over 8 nodes of `abbot_rcap.xmd` /
+  `Riddick_B03.xmd` (`14062 = 52+15*934`, `292 = 52+15*16`, `1987 = 52+15*129`,
+  `772 = 52+15*48`), and the two-node solve gives the unique `(52, 15)`;
+  (2) **positions** = the first `6n` bytes: median triangle-edge / box-diagonal =
+  **0.037** (`abbot`) / **0.021** (`Riddick`) vs the known-good 2004 loader 0.045,
+  and 0.29-0.40 for every wrong placement (stride 15 at all 12 offsets, stride 9,
+  u8/i8); (3) the **tail `9n`** bytes are three `s8` unit-vector arrays (100 % unit
+  magnitude 934/934 and 1236/1236 at stride 3) and the first correlates with the
+  *geometric* face normal at **|dot| 0.951 / 0.833** while the other two sit at
+  0.48 (orthogonal → tangent/bitangent; handedness not claimed).
+- **Re-grade (read-only, installs untouched):** `xmd_pose --check` 2009 `F:` went
+  **4566 problems / 77 clusters / 59 skinned → 41 problems / 4602 clusters / 4384
+  skinned** (the 4525 fixed were all the `VERTEXFRAMES` kind); `xmd_fk --check`
+  2009 = 41. 2004 `C:` stays **0 problems / 268 models / 3454 clusters** (unchanged).
+  Before/after measured in one session by `git stash`-ing only the two source files.
+- **Blocker / honest limit:** the remaining 41 reds are a **new, distinct** 2009
+  `TRIANGLES` variant (19 files, mostly `Weapons/*`/`Misc/*`, no `Characters/*`):
+  e.g. `Misc/Cigarette.xmd` cluster 3 has `TRIANGLES size 188` and first bytes
+  `00 00 05 00 07 00 00 00 06 00 05 00` (a plausible index stream, no leading
+  `u32 count`), where the same file's working clusters start `40 00 00 00 00 00 01 00`
+  (`u32 count = 64`). It was hidden behind the `VERTEXFRAMES` abort and is **not**
+  caused by this change → **filed GH #86** with the raw payloads. So `--check` on
+  `F:` is still red (now 41, of a different kind). The `0x205` decode itself is
+  validated offline (synthetic + real assets) but **not** against a rendered frame
+  (no live run taken; nothing player-visible changed).
+- **Evidence (offline suite):** `tools/test_*.py` **11/11 PASS** (incl. 3 new
+  `test_mos_xmd` cases: `test_geometry_roundtrip_205`,
+  `test_geometry_204_has_no_extra_basis`, `test_geometry_205_truncated_basis_is_rejected`);
+  `verify_reported_fixes` (new #85 invariant, summary now `…#83, #85`),
+  `scenario_tests.py --check`, `verify_test_artifacts`, `verify_hook_init`,
+  `validate_addresses`, `xrsim --selftest` all PASS. **No C++ → no
+  `build-all`/CTest** (documented).
+- **Next:** (1) GH **#86** — recover the 2009 `TRIANGLES` variant (2-byte prefix vs
+  node `count` at `+0x28` vs shifted `u32`) so `xmd_pose/xmd_fk --check` on `F:` is
+  **0**; (2) then the `DEFAULT_GAME_DIR` retarget decision (tools still default to
+  the 2004 `C:` install while the target/README is 2009 `F:`/`--shadow-install`);
+  (3) the deploy-gated ladder is otherwise unchanged and live-capable via
+  `--shadow-install` (#72 req 1 latch A/B, #67 step 3, #68 req 5, #79 hook half,
+  #76 step 1).
+
 ## Wake 74 — 2026-10-18 02:06 (scheduled loop)
 - **Unit:** GH **#83** — the autoloop can no longer run two agents in one checkout:
   the runner now guards on **liveness** (not just the mutex), every wake is
