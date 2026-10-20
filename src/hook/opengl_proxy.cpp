@@ -884,7 +884,11 @@ void WINAPI OpenGLProxy::Hook_glClear(GLbitfield mask) {
     s_viewmodelSuppressor.Configure(BuildViewmodelSuppressionConfig());
     // GH #67 step 1: the ARB vertex-program observation shares the same live
     // switch (ViewmodelObserve=1) and is inert otherwise.
-    s_vertexProgramObserver.Configure(g_vrConfig.viewmodelObserve != 0);
+    // GH #76/#90 (ADR-0515): the native per-eye pass reads the *bound program* at
+    // each world draw (the transform source after ADR-0514), so the observation is
+    // also on while StereoDualRender=1. It is read-only and changes no draw.
+    s_vertexProgramObserver.Configure(g_vrConfig.viewmodelObserve != 0 ||
+                                      g_vrConfig.stereoDualRender != 0);
     // GH #67 step 1 (second correction, ADR-0482): the submitted-vertex
     // observation shares the same switch, so one live run yields the geometry
     // sample alongside the (silent) ARB tallies.
@@ -1151,6 +1155,14 @@ unsigned OpenGLProxy::ColourMaskCallCount() { return s_colourMaskCalls; }
 // sets `track` for it), so this reports the live first-person window boundary.
 bool OpenGLProxy::IsViewmodelWindowOpen() {
     return s_viewmodelSuppressor.WindowOpen();
+}
+
+// GH #76/#90 (ADR-0515): the bound ARB vertex program at the draw that asked. The
+// observer is live (ADR-0514's transform-source question), and `Current()` neither
+// publishes nor re-bases, so reading it inside a draw cannot disturb the per-frame
+// tallies. Read-only.
+VertexProgramState OpenGLProxy::GetVertexProgramState() {
+    return s_vertexProgramObserver.Current();
 }
 
 // GH #67 step 1 (ninth correction, ADR-0491): the immediate-mode census. The

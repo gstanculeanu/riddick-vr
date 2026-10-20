@@ -272,7 +272,8 @@ def main():
             '"glBindProgramARB"' in proxy and
             '"glProgramEnvParameter4fvARB"' in proxy and
             '"glProgramEnvParameter4fARB"' in proxy and
-            "s_vertexProgramObserver.Configure(g_vrConfig.viewmodelObserve != 0)" in proxy and
+            "s_vertexProgramObserver.Configure(" in proxy and
+            "g_vrConfig.stereoDualRender != 0" in proxy and
             "ViewmodelProbe program" in proxy and
             "VIEWMODEL_PROGRAM_RE" in xrsim_tool and
             "test_viewmodel_probe_program_lines_are_parsed" in
@@ -1131,7 +1132,7 @@ def main():
             "DualSampleScaleOf" in stereo_dual_h and
             "DualRejectReasonName" in stereo_dual_h and
             "kDualMidMaxExtent" in stereo_dual_h and
-            "m_dualCensus.Add(sampled, colourWritesOn)" in stereo_renderer_cpp and
+            "m_dualCensus.Add(sampled, colourWritesOn, prog)" in stereo_renderer_cpp and
             "m_dualCensus.Reset()" in stereo_renderer_cpp and
             "rc=[nonfloat=" in stereo_renderer_cpp and
             "sig=[%s vtype=" in stereo_renderer_cpp and
@@ -1341,6 +1342,30 @@ def main():
             "applied offsets logged and the same rows of both eye FBOs aligned -- so the "
             "run says whether the eye images differ by a uniform shift or carry "
             "depth-dependent disparity")
+
+    # GH #76/#90 (ADR-0515): ADR-0514 measured the fixed-function per-eye translate to
+    # leave the two eye frames byte-identical, so the *transform source* is the named
+    # question. The pass must read the ARB vertex program in force at the span's first
+    # eligible draw (a live read that neither publishes nor re-bases), classify
+    # program/fixed-function/unknown purely and test it, and print the signature
+    # (id + string hash + env-parameter matrix) -- while staying evidence-only.
+    require("struct VertexProgramState" in vp_observer.read_text(encoding="utf-8") and
+            "VertexProgramState Current() const" in vp_observer.read_text(encoding="utf-8") and
+            "GetVertexProgramState" in (ROOT / "src/hook/opengl_proxy.h").read_text(encoding="utf-8") and
+            "DualTransformSourceOf" in stereo_dual_h and
+            "DualTransformSourceName" in stereo_dual_h and
+            "enum class DualTransformSource" in stereo_dual_h and
+            "hasProgramSig" in stereo_dual_h and
+            "prog=[src=%s id=%u hash=0x%X env=%u mbase=%u " in stereo_renderer_cpp and
+            "GetVertexProgramState()" in stereo_renderer_cpp and
+            "DualTransformSourceOf" in (ROOT / "tests/stereo_dual_tests.cpp").read_text(encoding="utf-8") and
+            "Current() must not re-base" in
+            (ROOT / "tests/vertex_program_tracker_tests.cpp").read_text(encoding="utf-8") and
+            (ROOT / "docs/adr/0515-gh76-bound-program-at-the-world-draw.md").exists(),
+            "GH #76/#90 / ADR-0515: the world draw's *transform source* must be named -- "
+            "the bound ARB vertex program read live at the draw, classified purely, "
+            "tested, and printed as prog=[src id hash env mbase assembled] -- because "
+            "ADR-0514 measured the fixed-function translate to have no effect on the pair")
 
     # GH #77 (epic #57 DoD: "all claims backed by captured evidence"): the
     # `eye_frames.log` record presented the host's *synthetic* eye baseline

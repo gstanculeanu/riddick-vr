@@ -609,5 +609,18 @@ The Hook component is a 32-bit (x86) dynamic link library compiled as `opengl32.
   degenerating to a screen shift; `id=1` is both eyes translated identically. Evidence
   only, no draw changes, `StereoDualRender=0` stays the default.
 
+- **The world draw's transform source is named (ADR-0515, wake 113; GH #76 / GH #90).**
+  ADR-0514 left "where does the world pass's transform live?" open (the fixed-function
+  translate had no effect on the pair). `vertex_program_observe.h` gains
+  `VertexProgramState` + a const `Current()` (the live read `ComputeSnapshot` cannot give,
+  because it re-bases), enabled for the dual pass in `opengl_proxy.cpp` and exposed as
+  `OpenGLProxy::GetVertexProgramState()`. `stereo_dual.h::DualTransformSourceOf` classifies
+  `unknown` (observation off — a zero id says nothing) / `fixedfn` / `program`, and
+  `SpanDrawCensus::Add` records the first **eligible** draw's program signature (id, string
+  hash, env count, matrix base, assembled). The `DualRender:` line adds
+  `prog=[src=.. id=.. hash=0x.. env=.. mbase=.. assembled=..]`, fetched only until recorded.
+  Measured live (wake 113): `src=fixedfn id=0` on a depth-only span, with the ARB tally
+  `strings=0 binds=0 env=0` — resolved but never called. Evidence only, no draw changes.
+
 
 

@@ -1422,7 +1422,17 @@ void StereoRenderer::OnSceneDraw(GLenum mode, GLsizei count, GLenum type, const 
     // counted but not re-issued.
     const bool colourWritesOn =
         DualColourMaskWritesColour(OpenGLProxy::ColourWriteMaskNibble());
-    m_dualCensus.Add(sampled, colourWritesOn);
+    // GH #76/#90 (ADR-0515): the transform source at the span's first eligible draw.
+    // ADR-0514 measured the fixed-function `translate(-off)` to have no effect on the
+    // rendered pair, whose only consistent explanation is that the world pass's
+    // transform does not ride `GL_MODELVIEW`. The ARB vertex-program observer is live
+    // while StereoDualRender=1 (opengl_proxy.cpp), and `GetVertexProgramState()` is a
+    // non-publishing read, so this names the source without disturbing the tallies.
+    // Fetched only until the census records it, so the per-draw cost stops after one.
+    const VertexProgramState prog = m_dualCensus.hasProgramSig
+        ? VertexProgramState{}
+        : OpenGLProxy::GetVertexProgramState();
+    m_dualCensus.Add(sampled, colourWritesOn, prog);
 
     if (!DualRenderDrawEligible(sampled)) {
         return;
@@ -1997,6 +2007,8 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     "eyeFbo=[cap=%d drawbuf=0x%X vp=%d,%d,%dx%d dt=%d cmask=0x%X] "
                                     "mv=[cap=%d id=%d pre=%.3f,%.3f,%.3f post=%.3f,%.3f,%.3f] "
                                     "pair=[cap=%d dx=%d rows=%d spread=%d id=%d] "
+                                    "prog=[src=%s id=%u hash=0x%X env=%u mbase=%u "
+                                    "assembled=%d] "
                                     "offL=%.4f,%.4f,%.4f offR=%.4f,%.4f,%.4f",
                                     s_swapCount, m_dualFrames, m_dualFramesUsed, m_dualDraws,
                                     m_dualEligible, m_dualCensus.skipped, m_dualMirrorClears,
@@ -2047,6 +2059,10 @@ void StereoRenderer::OnSwapBuffers(HDC hdc) {
                                     (int)m_dualPair.measured, m_dualPair.bestDx,
                                     m_dualPair.rows, m_dualPair.spreadPx,
                                     (int)m_dualPair.identical,
+                                    DualTransformSourceName(m_dualCensus.transform),
+                                    m_dualCensus.programId, m_dualCensus.programHash,
+                                    m_dualCensus.programEnvParams, m_dualCensus.programMatrixBase,
+                                    (int)m_dualCensus.programMatrixAssembled,
                                     (double)m_dualOff[0][0], (double)m_dualOff[0][1],
                                     (double)m_dualOff[0][2],
                                     (double)m_dualOff[1][0], (double)m_dualOff[1][1],

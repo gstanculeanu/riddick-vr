@@ -465,6 +465,22 @@ with a `shift-only` presentation is a *presentation* fault, while no spread with
 non-zero `dx` is the eye-space translation degenerating to a screen shift.
 Evidence-only (`StereoDualRender=0` stays the default).
 
+**ADR-0515 (wake 113; GH #76 / GH #90) names the world draw's transform source.** ADR-0514
+measured the per-eye pair as byte-identical (`pair id=1`) although the two eyes are
+translated by different offsets, so the fixed-function modelview translate has no effect;
+the named next lead was an ARB vertex program (its transform rides **env parameters**). A
+live, non-publishing read of the program observer (`VertexProgramState` / `Current()`) is
+now enabled for the dual pass, classified purely (`DualTransformSource`:
+`unknown`/`fixedfn`/`program`) and recorded once per span at the first **eligible** draw.
+The `DualRender:` line adds
+`prog=[src=.. id=.. hash=0x.. env=.. mbase=.. assembled=..]`. Measured live (wake 113):
+`prog=[src=fixedfn id=0 …]` on a 3-draw depth-only span, with the run-wide ARB tally
+`strings=0 binds=0 env=0` — the engine **resolves** the program names but never calls
+them, so the env-parameter hypothesis is not supported in the measured state. The rich
+in-level colour span was not reached (the known menu flake), so re-running this probe on
+that span is the discriminating next step. Evidence-only; `StereoDualRender=0` stays the
+default.
+
 **Eye-view provenance (GH #77, ADR-0462/0463):** the `eye_frames.log` per-eye
 view/projection matrices are **not** the matrices the hook consumes in a mock/sim
 run. Mock mode never calls `xrLocateViews` (`src/host/openxr_manager.cpp:623-628`),

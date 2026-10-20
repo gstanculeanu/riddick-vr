@@ -57,6 +57,23 @@ struct VertexProgramSnapshot {
     float matrix[16] = {};       // the four consecutive vec4s, in index order
 };
 
+// GH #76/#90 (ADR-0515): the observer's *live* state, readable at a draw without
+// snapping/re-basing it. `ComputeSnapshot` publishes a frame's tallies and resets,
+// so it cannot answer "which program is bound at THIS draw?" -- which is exactly
+// the question the per-eye pass needs: a vertex program's transform rides its
+// env parameters, where a fixed-function `glTranslatef` cannot reach (ADR-0514
+// measured the translate to have no effect). `observing=false` means the observer
+// was off, so a zero program id must not be read as "fixed function".
+struct VertexProgramState {
+    bool observing = false;
+    unsigned programId = 0;      // last glBindProgramARB id (0 = none bound)
+    unsigned programHash = 0;    // FNV-1a of the last program string
+    unsigned envParams = 0;      // env-parameter uploads since the last snapshot
+    bool matrixAssembled = false;
+    unsigned matrixBase = 0;
+    float matrix[16] = {};
+};
+
 class VertexProgramObserver {
 public:
     // Observation is opt-in (ViewmodelObserve=1) and inert otherwise: every
@@ -101,6 +118,20 @@ public:
         }
         lastIndex_ = index;
         hasLastIndex_ = true;
+    }
+
+    // GH #76/#90 (ADR-0515): the live state at a draw, without publishing or
+    // re-basing. Read-only; safe to call on the render thread from a draw hook.
+    VertexProgramState Current() const {
+        VertexProgramState st;
+        st.observing = observe_;
+        st.programId = lastProgramId_;
+        st.programHash = lastStringHash_;
+        st.envParams = envParams_;
+        st.matrixAssembled = matrixAssembled_;
+        st.matrixBase = matrixBase_;
+        for (unsigned i = 0; i < 16u; ++i) st.matrix[i] = matrix_[i];
+        return st;
     }
 
     // Publishes this frame's tallies and re-bases them.

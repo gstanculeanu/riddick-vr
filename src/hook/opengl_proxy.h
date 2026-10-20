@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "vertex_submission_observe.h"
+#include "vertex_program_observe.h"
 #include "gl_entry_census.h"
 
 namespace RiddickVR {
@@ -157,6 +158,15 @@ public:
     // float client array (it reports `valid=false` instead of guessing).
     static VertexSample SampleSubmittedArray(unsigned count, unsigned indexType, const void* indices);
     static bool IsViewmodelWindowOpen();
+
+    // GH #76/#90 (ADR-0515): the ARB vertex program in force at a draw (id + string
+    // hash + the last env-parameter matrix), read from the observer without
+    // publishing/re-basing. This is the *transform source* probe: ADR-0514 measured
+    // that a fixed-function `glTranslatef` at the draw site leaves the per-eye pair
+    // byte-identical, so a bound program (whose transform rides env parameters) is
+    // the named alternative. `observing=false` means the observation switch is off,
+    // so a zero id must not be read as "fixed function".
+    static VertexProgramState GetVertexProgramState();
 
     // GH #76/#90 (ADR-0507): the *array source* census that ADR-0506's Next 1 asked
     // for. `ProcCensus` records every name the engine resolves through

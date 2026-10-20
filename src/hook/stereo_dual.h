@@ -29,6 +29,7 @@
 // No GL/Windows headers: headless, unit-tested (tests/stereo_dual_tests.cpp).
 
 #include "vertex_submission_observe.h"
+#include "vertex_program_observe.h"
 
 #include <cmath>
 #include <cstddef>
@@ -511,6 +512,34 @@ inline const char* DualRejectReasonName(VertexSampleReason r) {
 // invisible to the array sampler. `Add` also takes the engine's per-draw colour-write
 // state (ADR-0510) and splits the *eligible* draws into colour-on/off, so the same
 // span says whether it ever turns colour back on.
+//
+// GH #76/#90 (ADR-0515): `Add` additionally takes the ARB vertex program in force at
+// the draw, so the span names the **transform source**. ADR-0514 measured that a
+// fixed-function `translate(-off)` at the draw site leaves the two eye frames
+// byte-identical, which is only possible if the shipped world pass's transform does
+// not ride `GL_MODELVIEW`; a bound vertex program (its transform in env parameters)
+// is the named alternative, and the *first eligible draw* is where the pass's own
+// transform is applied.
+enum class DualTransformSource : unsigned {
+    Unknown = 0,       // observation was off: a zero id says nothing
+    FixedFunction,     // no ARB program bound at the draw: GL_MODELVIEW is the source
+    Program,           // an ARB vertex program is bound: its env parameters hold it
+};
+
+inline DualTransformSource DualTransformSourceOf(const VertexProgramState& st) {
+    if (!st.observing) return DualTransformSource::Unknown;
+    return st.programId != 0u ? DualTransformSource::Program
+                              : DualTransformSource::FixedFunction;
+}
+
+inline const char* DualTransformSourceName(DualTransformSource src) {
+    switch (src) {
+        case DualTransformSource::FixedFunction: return "fixedfn";
+        case DualTransformSource::Program:       return "program";
+        default:                                 return "unknown";
+    }
+}
+
 struct SpanDrawCensus {
     // `nearField` not `near`: windef.h defines a bare `near` macro (hence the
     // capitalised m_dualScaleNear of ADR-0505).
@@ -545,8 +574,14 @@ struct SpanDrawCensus {
     // that can colour an eye frame. The pass now re-issues only `colourOn`.
     unsigned eligibleColourOn = 0;
     unsigned eligibleColourOff = 0;
+    // GH #76/#90 (ADR-0515): the transform source at the first *eligible* draw.
+    bool hasProgramSig = false;
+    DualTransformSource transform = DualTransformSource::Unknown;
+    unsigned programId = 0, programHash = 0, programEnvParams = 0, programMatrixBase = 0;
+    bool programMatrixAssembled = false;
 
-    void Add(const VertexSample& s, bool colourWritesOn) {
+    void Add(const VertexSample& s, bool colourWritesOn,
+             const VertexProgramState& prog = VertexProgramState{}) {
         switch (DualSampleScaleOf(s)) {
             case DualSampleScale::Near:  ++nearField; break;
             case DualSampleScale::Mid:   ++mid;       break;
@@ -555,6 +590,15 @@ struct SpanDrawCensus {
         }
         if (DualRenderDrawEligible(s)) {        // a world draw the pass would re-issue
             if (colourWritesOn) ++eligibleColourOn; else ++eligibleColourOff;
+            if (!hasProgramSig) {               // name the transform the draw will use
+                hasProgramSig = true;
+                transform = DualTransformSourceOf(prog);
+                programId = prog.programId;
+                programHash = prog.programHash;
+                programEnvParams = prog.envParams;
+                programMatrixAssembled = prog.matrixAssembled;
+                programMatrixBase = prog.matrixBase;
+            }
             if (!s.valid) {                     // ... via the generic-attribute path
                 ++genericEligible;
                 if (s.genericPositionBufferId != 0u) ++genericBufferBacked;

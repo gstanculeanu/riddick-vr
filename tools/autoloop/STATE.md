@@ -2,6 +2,89 @@
 
 Durable, human-readable state written by each scheduled wake. Newest at top.
 
+## Wake 113 - 2026-10-20 18:45 (scheduled loop)
+- **Unit:** GH **#76 / GH #90 NATIVE STEREO (epic #57 DoD item 1) - the world draw's
+  TRANSFORM SOURCE is read at the draw (ADR-0515)**, implementing ADR-0514's Next 1
+  ("log the bound program (id + string hash) and the matrix sources at the world
+  draw"). The probe is landed, tested and exercised live; the ARB vertex-program
+  hypothesis is **not supported** in the measured state, and the rich in-level span
+  was not reached (menu flake) - honest partial measurement.
+- **Why this unit:** the standing prompt's top item (#76) + ADR-0514's explicit Next 1.
+  ADR-0514 measured the per-eye pair **byte-identical** (`pair id=1`) although the two
+  eyes are translated by different offsets, closing the fixed-function modelview
+  route; the named alternative was a vertex program (transform in env parameters).
+- **Change (evidence only; opt-in, gated; no draw or presentation change):**
+  - `vertex_program_observe.h`: NEW `VertexProgramState` (`observing`, `programId`,
+    `programHash`, `envParams`, `matrixAssembled`, `matrixBase`, `matrix[16]`) + a
+    const `Current()` live read (`ComputeSnapshot` re-bases, so it cannot answer
+    "what is bound at THIS draw?").
+  - `opengl_proxy.{h,cpp}`: `VertexProgramState GetVertexProgramState()`; the ARB
+    observer is configured by `viewmodelObserve` **or** `stereoDualRender` (the dual
+    pass needs it), read-only.
+  - `stereo_dual.h`: pure `DualTransformSource` (`Unknown`/`FixedFunction`/`Program`)
+    + `DualTransformSourceOf` / `DualTransformSourceName` (`unknown`/`fixedfn`/
+    `program`); `SpanDrawCensus::Add` takes the program state (defaulted) and records
+    the first **eligible** draw's signature (`hasProgramSig`, id, hash, env, mbase,
+    assembled).
+  - `stereo_renderer.cpp`: `OnSceneDraw` reads the state only until recorded;
+    `DualRender:` adds `prog=[src=%s id=%u hash=0x%X env=%u mbase=%u assembled=%d]`.
+  - `tests/stereo_dual_tests.cpp` new section 16 (classifier tokens, first-eligible
+    recording, no overwrite, Reset); `tests/vertex_program_tracker_tests.cpp` new
+    `Current()` section (live read, no re-base, snapshot re-bases). NEW
+    `docs/adr/0515-gh76-bound-program-at-the-world-draw.md`; `docs/adr/README.md`
+    (head -> 0515, range -> 0457-0515), `docs/vr-scenarios.md`, `src/hook/README.md`;
+    `verify_reported_fixes.py` new #76/#90/ADR-0515 invariant and the GH #67
+    Configure invariant updated.
+- **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 532992 B
+  `9ea4ea6f63ad` + x64 host); CTest is not on this shell's PATH, so the built test
+  binaries were run directly: **32/32 x86 cases** (31 exes, one registered twice) and
+  **30/30 x64**, including the new sections; `verify_reported_fixes`,
+  `xrsim --selftest`, `scenario_tests.py --check`, `verify_hook_init`,
+  `validate_addresses`, `verify_test_artifacts` PASS; all 12 `tools/test_*.py` exit 0.
+- **EVIDENCE live (`RIDDICKVR_SIM=1`, read-only per-run shadows, five attempts;
+  `--reach-gameplay --advance-menu --require-fresh-hook --require-parallax
+  --dump-branch any --downscale 4 --ini StereoDualRender=1`;
+  `deployed_hook_matches_build` PASS each, hook `9ea4ea6f63ad` = repo build):**
+  - Runs 1-2, 4-5 did not reach a span (game exited **cleanly, code 0** after
+    10.6-19.4 s; `menu_advance.reached=false` at 4-5 taps - the known
+    launcher/menu flake; frame p50 2.6-96 ms). Only the swap=1 `DualRender:` line.
+  - **Run 3 (shadow-22104, 16.6 s) reached a world span at swap=603** and the new
+    token is populated:
+    `draws=3 eligible=3 skipped=0 scale=[unknown=0 near=0 mid=0 world=3]
+    sstate=[cap=1 cmask=0x0 dmask=0 drawbuf=0x8CE0 vp=0,0,1280x605]
+    mv=[cap=1 id=1 pre=0.000,0.000,0.000 post=0.032,0.000,0.000]
+    pair=[cap=1 dx=0 rows=12 spread=0 id=1]
+    prog=[src=fixedfn id=0 hash=0x0 env=0 mbase=0 assembled=0]
+    offL=-0.0325,0.0000,0.0000 offR=0.0325,0.0000,0.0000`.
+    Run-wide the ARB observer tallies **`ViewmodelProbe program [#300]:
+    strings=0 binds=0 env=0 lastProg=0`** while `GLProcCensus name:
+    glProgramStringARB calls=2` - the engine **resolves** the program names but never
+    calls them in this run.
+- **VERDICT (honest):** the transform source is now **named at the draw**
+  (`prog=[src id hash env mbase assembled]`), and the ARB vertex-program hypothesis is
+  **not supported** in the measured state (`src=fixedfn`, `strings=0 binds=0 env=0`).
+  But the measured span was **depth-only** (`cmask=0x0`, 3 draws), not the wake-112
+  in-level colour span (549 draws), and five attempts failed to reach that span (menu
+  flake), so this **narrows** the route rather than closing it. Native stereo is NOT
+  achieved; `stereo_parallax_present` still FAILs. **No regression:** evidence only,
+  `StereoDualRender=0` default, presentation untouched.
+- **LIMITS:** one program signature per span (first eligible draw), not a per-draw
+  timeline; the run-wide ARB tally is re-based every snapshot; the in-level span was
+  not reached; the 2004 build untouched; no headset.
+- **Next:** (1) re-run the probe on an **in-level colour span** (the wake-112 shape;
+  work around the menu flake) and read `prog=` there - only then is the ARB-program
+  route closed or opened; (2) if `src=fixedfn` holds there, confirm whether the
+  re-issued draw's vertices are already camera-transformed engine-side (a modelview
+  translate would then be a no-op by construction) and apply the offset where that
+  transform is produced; (3) keep `StereoDualRender=0`/`StereoParallaxDibr=0`/
+  `StereoReplayProbe=0` defaults; (4) gate on the queried `GL_COLOR_WRITEMASK`
+  (ADR-0511 Next 2); (5) player-visible queue GH #63/#64/#61 then the P1 bugs
+  #45/#49/#50/#51/#65; (6) `DEFAULT_GAME_DIR` 2004-vs-2009; (7) GH #83/#88/#89/#74.
+- **OPS:** install untouched (READ-ONLY per-run shadows; no deploy, no install
+  write); no leftover game/host processes; live lock released;
+  `tests/xrsim/report.json` reverted to the committed baseline; GH #76 commented.
+
+
 ## Wake 112 - 2026-10-18 18:05 (scheduled loop)
 - **Unit:** GH **#92 / GH #76 NATIVE STEREO (epic #57 DoD item 1) - the per-eye pair is
   measured *directly* (both eyes' applied offsets + the same rows of both eye FBOs) and

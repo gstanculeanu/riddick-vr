@@ -168,6 +168,42 @@ int main() {
               "disabling observation must drop partial assembly state");
     }
 
+    // GH #76/#90 (ADR-0515): Current() is a *live* read -- it names the program bound
+    // at a draw without publishing or re-basing the frame's tallies.
+    {
+        VertexProgramObserver o;
+        const RiddickVR::VertexProgramState untouched = o.Current();
+        Check(!untouched.observing && untouched.programId == 0,
+              "an observation-off Current() reports observing=false, not a silent zero");
+
+        o.Configure(true);
+        o.NoteProgramString(64, VertexProgramObserver::Fnv1a("!!ARBvp1.0", 10));
+        o.NoteBindProgram(11u);
+        Param4(o, 4u, 0.032f, 0.0f, 0.0f, 1.0f);
+        Param4(o, 5u, 0.0f, 1.0f, 0.0f, 0.0f);
+        Param4(o, 6u, 0.0f, 0.0f, 1.0f, 0.0f);
+        Param4(o, 7u, 0.0f, 0.0f, 0.0f, 1.0f);
+
+        const RiddickVR::VertexProgramState live = o.Current();
+        Check(live.observing, "Current() reports the observation switch");
+        Check(live.programId == 11u, "Current() carries the bound program id");
+        Check(live.programHash == VertexProgramObserver::Fnv1a("!!ARBvp1.0", 10),
+              "Current() carries the program string hash");
+        Check(live.envParams == 4u && live.matrixAssembled && live.matrixBase == 4u,
+              "Current() carries the assembled env-parameter matrix");
+        Check(std::fabs(live.matrix[0] - 0.032f) < 1e-6f,
+              "Current() carries the matrix values in index order");
+
+        // Reading again must not re-base: the same values survive until a snapshot.
+        const RiddickVR::VertexProgramState again = o.Current();
+        Check(again.programId == 11u && again.envParams == 4u,
+              "Current() must not re-base the frame tallies");
+        (void)o.ComputeSnapshot();
+        const RiddickVR::VertexProgramState after = o.Current();
+        Check(after.programId == 0u && !after.matrixAssembled,
+              "a snapshot re-bases what Current() later reports");
+    }
+
     if (g_failures == 0) {
         std::printf("vertex program observer: all checks passed\n");
         return 0;

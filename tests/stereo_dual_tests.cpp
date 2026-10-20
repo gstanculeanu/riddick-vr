@@ -10,6 +10,7 @@
 #include "stereo_dual.h"
 
 #include <cstdio>
+#include <cstring>
 
 using RiddickVR::DualAlignPair;
 using RiddickVR::DualColourMaskNibble;
@@ -42,6 +43,9 @@ using RiddickVR::DualRenderDrawEligible;
 using RiddickVR::DualSampleExtent;
 using RiddickVR::DualSampleScale;
 using RiddickVR::DualSampleScaleOf;
+using RiddickVR::DualTransformSource;
+using RiddickVR::DualTransformSourceName;
+using RiddickVR::DualTransformSourceOf;
 using RiddickVR::IsNearFieldSample;
 using RiddickVR::kDualMidMaxExtent;
 using RiddickVR::kDualMinEyeCoverage;
@@ -52,6 +56,7 @@ using RiddickVR::SampleClientVertices;
 using RiddickVR::SpanDrawCensus;
 using RiddickVR::VertexSample;
 using RiddickVR::VertexSampleReason;
+using RiddickVR::VertexProgramState;
 
 static int g_failures = 0;
 
@@ -551,6 +556,65 @@ int main() {
               "a flat row is refused rather than aligned to noise");
         DualPairAlignment empty = DualAlignPair(flatRow, flatRow, width, 1, 16, 6);
         Check(!empty.measured, "a pair with no textured row is not measured");
+    }
+
+    // 16. GH #76/#90 (ADR-0515): the span census names the **transform source** at its
+    //     first eligible draw. ADR-0514 measured the fixed-function modelview
+    //     translate to leave the two eye frames byte-identical, so the source is what
+    //     decides where a per-eye offset must be applied: a bound ARB vertex program
+    //     (transform in its env parameters) or the fixed-function modelview.
+    {
+        VertexProgramState off;   // observation off: a zero id says nothing
+        Check(DualTransformSourceOf(off) == DualTransformSource::Unknown,
+              "an observation-off read is Unknown, never FixedFunction");
+
+        VertexProgramState fixedFn;
+        fixedFn.observing = true;
+        Check(DualTransformSourceOf(fixedFn) == DualTransformSource::FixedFunction,
+              "observing with no program bound is the fixed-function source");
+
+        VertexProgramState program;
+        program.observing = true;
+        program.programId = 7u;
+        program.programHash = 0xDEADBEEFu;
+        program.envParams = 12u;
+        program.matrixAssembled = true;
+        program.matrixBase = 4u;
+        Check(DualTransformSourceOf(program) == DualTransformSource::Program,
+              "a bound ARB vertex program is the program source");
+        Check(std::strcmp(DualTransformSourceName(DualTransformSource::Program), "program") == 0 &&
+                  std::strcmp(DualTransformSourceName(DualTransformSource::FixedFunction), "fixedfn") == 0 &&
+                  std::strcmp(DualTransformSourceName(DualTransformSource::Unknown), "unknown") == 0,
+              "transform-source tokens are stable");
+
+        SpanDrawCensus census;
+        // An ineligible (near-field) draw must not record the source ...
+        census.Add(MakeSample(true, -0.45f, 0.45f), true, program);
+        Check(!census.hasProgramSig,
+              "an ineligible draw does not name the transform source");
+        // ... the first *eligible* one does, with its full signature.
+        census.Add(MakeSample(true, 1600.0f, 3500.0f), true, program);
+        Check(census.hasProgramSig && census.transform == DualTransformSource::Program,
+              "the first eligible draw records the transform source");
+        Check(census.programId == 7u && census.programHash == 0xDEADBEEFu &&
+                  census.programEnvParams == 12u && census.programMatrixAssembled &&
+                  census.programMatrixBase == 4u,
+              "the recorded program signature is the one in force at the draw");
+
+        // A later eligible draw must not overwrite the first signature.
+        VertexProgramState later;
+        later.observing = true;
+        later.programId = 99u;
+        census.Add(MakeSample(true, 1600.0f, 3500.0f), true, later);
+        Check(census.programId == 7u,
+              "a later draw does not overwrite the first transform signature");
+        Check(census.eligibleColourOn == 2u,
+              "the program probe does not disturb the colour split");
+
+        census.Reset();
+        Check(!census.hasProgramSig && census.transform == DualTransformSource::Unknown &&
+                  census.programId == 0u,
+              "Reset clears the transform-source signature");
     }
 
     if (g_failures == 0) {

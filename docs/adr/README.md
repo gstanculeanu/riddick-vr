@@ -13,7 +13,7 @@ every ADR names the epic #57 subsystem it advances.
   stabilization, reload ergonomics, NanoMED interaction.
 - `0412-0456` — REA engine binding, MOS `.xmd` decode (geometry / UV / skin /
   texture), the native-hand draw path, and the first XRSIM harness generation.
-- `0457-0514` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
+- `0457-0515` - the #67 first-person-arms investigation (ADR-0488..0499 are mostly
   *falsifications* that close routes), the XRSIM gameplay-reach / no-evidence work
   (ADR-0497..0499), and autoloop infra (ADR-0475 single-instance guard, ADR-0500
   append-only run trace). ADR-0501 opens the **player-visible** milestone: GH #76
@@ -101,10 +101,21 @@ every ADR names the epic #57 subsystem it advances.
   re-issue's transform (not the presentation, not the offsets). This explicitly
   **closes** ADR-0504's fixed-function "eye-space + modelview translate" route as the
   per-eye camera for the shipped world pass; the leading next lead is the **ARB vertex
-  program** the engine resolves and calls (a program's transform rides its env
-  parameters, which `glTranslatef` cannot touch). Evidence-only, no draw changes,
+  program** the engine *resolves* (a program's transform rides its env parameters,
+  which `glTranslatef` cannot touch).
+  ADR-0515 implements that next step: a **live, non-publishing read** of the ARB
+  vertex-program observer (`VertexProgramState` / `Current()`), enabled for the dual
+  pass, is classified purely (`DualTransformSource`: `fixedfn` / `program` /
+  `unknown`), recorded once per span at the first **eligible** draw, and printed as
+  `prog=[src=… id=… hash=0x… env=… mbase=… assembled=…]`. Live (wake 113), the probe
+  fires on a 3-draw span and reads **`src=fixedfn`** (`id=0`) while the run-wide ARB
+  tally is **`strings=0 binds=0 env=0`**: the engine resolves the program names twice
+  but never calls them, so "the transform rides the bound program's env parameters"
+  is **not supported** in the measured state. That span was **depth-only**
+  (`cmask=0x0`), and the rich in-level span was not reached (five early-exit runs, the
+  known menu flake), so the route is narrowed, not yet closed. Evidence-only;
   `StereoDualRender=0` stays the default.
-  **Head = `0514`; the next new ADR is `0515`.**
+  **Head = `0515`; the next new ADR is `0516`.**
 
 ## Known defect: duplicate numbers (GH #74)
 
