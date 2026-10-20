@@ -148,9 +148,9 @@ GLProcCensus name: glProgramStringARB calls=2
 ## Validation
 
 - `tools/build-all.ps1 -Config Release` clean (x86 hook `532992 B`
-  `sha256 9ea4ea6f63ad` + x64 host). Tests run via the built binaries (CTest is not
-  on this shell's PATH): **32/32 x86 cases** (31 exes, one registered twice) and
-  **30/30 x64**, including the new `stereo_dual` section 16 and the
+  `sha256 9ea4ea6f63ad` + x64 host). **CTest 32/32 (x86)** and **30/30 (x64)**
+  (invoked from the Visual Studio CMake path, since `ctest` is not on this shell's
+  PATH), including the new `stereo_dual` section 16 and the
   `vertex_program_tracker` `Current()` section.
 - `verify_reported_fixes.py` (extended GH #67 invariant + new GH #76/#90/ADR-0515
   invariant), `xrsim --selftest`, `scenario_tests.py --check`,

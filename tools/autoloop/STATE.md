@@ -36,9 +36,9 @@ Durable, human-readable state written by each scheduled wake. Newest at top.
     `verify_reported_fixes.py` new #76/#90/ADR-0515 invariant and the GH #67
     Configure invariant updated.
 - **EVIDENCE offline:** `build-all.ps1 -Config Release` clean (x86 hook 532992 B
-  `9ea4ea6f63ad` + x64 host); CTest is not on this shell's PATH, so the built test
-  binaries were run directly: **32/32 x86 cases** (31 exes, one registered twice) and
-  **30/30 x64**, including the new sections; `verify_reported_fixes`,
+  `9ea4ea6f63ad` + x64 host); **CTest 32/32 (x86) and 30/30 (x64)** (invoked from the
+  Visual Studio CMake path - `ctest` is not on this shell's PATH - and also re-run as
+  the built binaries directly), including the new sections; `verify_reported_fixes`,
   `xrsim --selftest`, `scenario_tests.py --check`, `verify_hook_init`,
   `validate_addresses`, `verify_test_artifacts` PASS; all 12 `tools/test_*.py` exit 0.
 - **EVIDENCE live (`RIDDICKVR_SIM=1`, read-only per-run shadows, five attempts;
